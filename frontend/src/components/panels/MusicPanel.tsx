@@ -14,20 +14,35 @@ function artistLine(artists?: string[] | null) {
   return artists?.length ? artists.join(", ") : "";
 }
 
-// Slight per-cover tilt so the artist grid feels hand-pinned rather than rigid.
-// Keyed by index (not Math.random) so server and client render the same angle —
-// random in render would cause an SSR hydration mismatch. Full literal class
-// strings so Tailwind's JIT keeps them; hover straightens the cover.
-const TILT_CLASSES = [
-  "-rotate-3",
-  "rotate-2",
-  "-rotate-2",
-  "rotate-3",
-  "-rotate-1",
-  "rotate-1",
+// Per-tile tilt so the grids feel hand-pinned rather than rigid. Keyed by index
+// (not Math.random) so server and client render the same angle — random in render
+// would cause an SSR hydration mismatch. Full literal class strings so Tailwind's
+// JIT keeps them; hover straightens the tile.
+//
+// Artists are circular, so the tilt only shows in the photo content — it needs a
+// bigger angle to read as intentional. Playlist cards rotate as a whole (border +
+// art + label), so they stay subtle.
+const ARTIST_TILTS = [
+  "-rotate-[7deg]",
+  "rotate-[5deg]",
+  "-rotate-[6deg]",
+  "rotate-[7deg]",
+  "-rotate-[5deg]",
+  "rotate-[6deg]",
 ];
-function coverTilt(i: number) {
-  return TILT_CLASSES[i % TILT_CLASSES.length];
+const CARD_TILTS = [
+  "-rotate-2",
+  "rotate-1",
+  "-rotate-2",
+  "rotate-1",
+  "-rotate-1",
+  "rotate-2",
+];
+function artistTilt(i: number) {
+  return ARTIST_TILTS[i % ARTIST_TILTS.length];
+}
+function cardTilt(i: number) {
+  return CARD_TILTS[i % CARD_TILTS.length];
 }
 
 function TrackArt({ track, size }: { track: TrackBody; size: number }) {
@@ -189,7 +204,7 @@ export function MusicPanel() {
                   <img
                     src={a.image}
                     alt={a.name}
-                    className={`mx-auto mb-2 aspect-square w-full rounded-full object-cover transition duration-300 group-hover:rotate-0 group-hover:opacity-90 ${coverTilt(i)}`}
+                    className={`mx-auto mb-2 aspect-square w-full rounded-full object-cover transition duration-300 group-hover:rotate-0 group-hover:opacity-90 ${artistTilt(i)}`}
                   />
                 ) : (
                   <div className="mx-auto mb-2 aspect-square w-full rounded-full bg-sky/10" />
@@ -210,13 +225,13 @@ export function MusicPanel() {
             My favourite playlists
           </h3>
           <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 sm:gap-5">
-            {playlists.map((p) => (
+            {playlists.map((p, i) => (
               <a
                 key={p.url ?? p.name}
                 href={p.url}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="group rounded-lg border border-slate-700 bg-white/[0.02] p-3 no-underline transition hover:border-mint"
+                className={`group rounded-lg border border-slate-700 bg-white/[0.02] p-3 no-underline transition duration-300 hover:rotate-0 hover:border-mint ${cardTilt(i)}`}
               >
                 {p.image ? (
                   // Remote Spotify CDN art — plain img avoids next/image config.
