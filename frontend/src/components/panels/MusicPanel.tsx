@@ -1,16 +1,16 @@
-'use client';
+"use client";
 
-import { Section } from '@/components/Section';
+import { Section } from "@/components/Section";
 import {
   useGetSpotifyNowPlaying,
   useGetSpotifyPlaylists,
   useGetSpotifyTopArtists,
   useGetSpotifyTopTracks,
-} from '@/lib/api/generated';
-import type { TrackBody } from '@/lib/api/model';
+} from "@/lib/api/generated";
+import type { TrackBody } from "@/lib/api/model";
 
 function artistLine(artists?: string[] | null) {
-  return artists?.length ? artists.join(', ') : '';
+  return artists?.length ? artists.join(", ") : "";
 }
 
 function TrackArt({ track, size }: { track: TrackBody; size: number }) {
@@ -27,7 +27,7 @@ function TrackArt({ track, size }: { track: TrackBody; size: number }) {
     // eslint-disable-next-line @next/next/no-img-element
     <img
       src={track.album_image}
-      alt={track.album ?? ''}
+      alt={track.album ?? ""}
       width={size}
       height={size}
       className="shrink-0 rounded object-cover"
@@ -66,7 +66,9 @@ export function MusicPanel() {
   const { data: playlistData } = useGetSpotifyPlaylists();
 
   const track = now?.track;
-  const live = now?.source === 'now-playing';
+  // Trust the backend's source, but also require is_playing so a paused track
+  // (Spotify still returns it with is_playing:false) never shows as LIVE.
+  const live = now?.source === "now-playing" && track?.is_playing === true;
   const topTracks = top?.tracks ?? [];
   const topArtists = artistData?.artists ?? [];
   const playlists = playlistData?.playlists ?? [];
@@ -77,14 +79,14 @@ export function MusicPanel() {
       <p className="mb-3 flex items-center gap-2 font-mono text-sm">
         {live ? (
           <>
-            <span className="h-2 w-2 animate-pulse rounded-full bg-mint" />
+            <span className="h-2 w-2 animate-pulse rounded-full bg-coral" />
             <span className="text-mint">Currently listening to</span>
-            <span className="rounded-full bg-mint/15 px-1.5 py-0.5 text-[10px] font-semibold tracking-wide text-mint">
+            <span className="rounded-full animate-pulse bg-coral/15 px-1.5 py-0.5 text-[10px] font-semibold tracking-wide text-coral">
               LIVE
             </span>
           </>
         ) : (
-          <span className="text-slate-500">Last played</span>
+          <span className="text-slate-300">Last played</span>
         )}
       </p>
 
@@ -122,9 +124,7 @@ export function MusicPanel() {
       {/* Top tracks */}
       {topTracks.length > 0 && (
         <div className="mt-8">
-          <h3 className="mb-3 font-mono text-sm text-mint">
-            On repeat lately
-          </h3>
+          <h3 className="mb-3 font-mono text-sm text-mint">On repeat lately</h3>
           <ol className="space-y-1">
             {topTracks.map((t, i) => (
               <li key={`${t.title}-${i}`}>
@@ -172,10 +172,10 @@ export function MusicPanel() {
                   <img
                     src={a.image}
                     alt={a.name}
-                    className="mx-auto mb-2 aspect-square w-full rounded-full object-cover transition group-hover:opacity-90"
+                    className="mx-auto mb-2 aspect-square w-full rounded-full object-cover ring-1 ring-white/10 shadow-md shadow-black/40 transition duration-300 group-hover:scale-105 group-hover:ring-2 group-hover:ring-mint"
                   />
                 ) : (
-                  <div className="mx-auto mb-2 aspect-square w-full rounded-full bg-sky/10" />
+                  <div className="mx-auto mb-2 aspect-square w-full rounded-full bg-sky/10 ring-1 ring-white/10 shadow-md shadow-black/40" />
                 )}
                 <div className="truncate text-xs text-slate-300 transition group-hover:text-mint">
                   {a.name}
@@ -189,7 +189,9 @@ export function MusicPanel() {
       {/* Favourite playlists */}
       {playlists.length > 0 && (
         <div className="mt-8">
-          <h3 className="mb-3 font-mono text-sm text-mint">My favourite playlists</h3>
+          <h3 className="mb-3 font-mono text-sm text-mint">
+            My favourite playlists
+          </h3>
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
             {playlists.map((p) => (
               <a

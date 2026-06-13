@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"time"
 
@@ -12,17 +11,22 @@ import (
 	"github.com/alifyandra/portfolio-site/backend/internal/spotify"
 )
 
+// Cache TTLs are deliberately longer than their refresh intervals (see
+// spotify_refresher.go) so a transient Spotify hiccup on one refresh doesn't
+// blank the panel — the last good value survives until the next success. The
+// TTL is just a safety net for a dead refresher; the poller is what keeps the
+// data fresh.
 const (
 	nowPlayingCacheKey = "spotify:now-playing"
-	nowPlayingCacheTTL = 30 * time.Second
+	nowPlayingCacheTTL = 90 * time.Second // refreshed every 30s
 	topTracksCacheKey  = "spotify:top-tracks"
-	topTracksCacheTTL  = time.Hour
+	topTracksCacheTTL  = 2 * time.Hour // refreshed hourly
 	topTracksLimit     = 5
 	topTracksRange     = "short_term" // ~4 weeks, matches "lately"
 	playlistsCacheKey  = "spotify:playlists"
-	playlistsCacheTTL  = time.Hour
+	playlistsCacheTTL  = 2 * time.Hour // refreshed hourly
 	topArtistsCacheKey = "spotify:top-artists"
-	topArtistsCacheTTL = time.Hour
+	topArtistsCacheTTL = 2 * time.Hour // refreshed hourly
 	topArtistsLimit    = 12
 )
 
@@ -101,6 +105,12 @@ type topArtistsOutput struct {
 	}
 }
 
+// The Spotify handlers are read-only: they serve whatever the SpotifyRefresher
+// (see spotify_refresher.go) last wrote to Redis and NEVER call Spotify
+// themselves. This keeps visitor traffic fully decoupled from the Spotify API —
+// no per-request fetch, no cache stampede. A cold cache (just after boot, before
+// the first refresh) returns an empty-but-valid body; the panel fills within a
+// tick.
 func (h *Handler) registerSpotify(api huma.API) {
 	huma.Register(api, huma.Operation{
 		OperationID: "get-spotify-now-playing",
@@ -110,44 +120,7 @@ func (h *Handler) registerSpotify(api huma.API) {
 		Tags:        []string{"spotify"},
 	}, func(ctx context.Context, _ *struct{}) (*nowPlayingOutput, error) {
 		out := &nowPlayingOutput{}
-
-		// Serve from cache when warm (Redis is cache-only; see ADR 0007).
-		if cached, err := h.deps.Redis.Get(ctx, nowPlayingCacheKey).Bytes(); err == nil {
-			if json.Unmarshal(cached, &out.Body) == nil {
-				return out, nil
-			}
-		}
-
-		track, err := h.deps.Spotify.NowPlaying(ctx)
-		if errors.Is(err, spotify.ErrNotConfigured) {
-			// Local dev without Spotify creds: report nothing gracefully.
-			return out, nil
-		}
-		if err != nil {
-			return nil, huma.Error502BadGateway("failed to reach Spotify", err)
-		}
-
-		if track != nil {
-			tb := trackBodyFrom(track)
-			out.Body.Track = &tb
-			out.Body.Source = "now-playing"
-		} else {
-			// Nothing live — fall back to most recently played so the panel is
-			// never dead.
-			recent, err := h.deps.Spotify.RecentlyPlayed(ctx)
-			if err != nil {
-				return nil, huma.Error502BadGateway("failed to reach Spotify", err)
-			}
-			if recent != nil {
-				tb := trackBodyFrom(recent)
-				out.Body.Track = &tb
-				out.Body.Source = "recently-played"
-			}
-		}
-
-		if b, err := json.Marshal(out.Body); err == nil {
-			_ = h.deps.Redis.Set(ctx, nowPlayingCacheKey, b, nowPlayingCacheTTL).Err()
-		}
+		h.readSpotifyCache(ctx, nowPlayingCacheKey, &out.Body)
 		return out, nil
 	})
 
@@ -160,29 +133,7 @@ func (h *Handler) registerSpotify(api huma.API) {
 	}, func(ctx context.Context, _ *struct{}) (*topTracksOutput, error) {
 		out := &topTracksOutput{}
 		out.Body.Tracks = []trackBody{}
-
-		if cached, err := h.deps.Redis.Get(ctx, topTracksCacheKey).Bytes(); err == nil {
-			if json.Unmarshal(cached, &out.Body) == nil {
-				return out, nil
-			}
-		}
-
-		tracks, err := h.deps.Spotify.TopTracks(ctx, topTracksLimit, topTracksRange)
-		if errors.Is(err, spotify.ErrNotConfigured) {
-			return out, nil
-		}
-		if err != nil {
-			return nil, huma.Error502BadGateway("failed to reach Spotify", err)
-		}
-
-		for _, t := range tracks {
-			tt := t
-			out.Body.Tracks = append(out.Body.Tracks, trackBodyFrom(&tt))
-		}
-
-		if b, err := json.Marshal(out.Body); err == nil {
-			_ = h.deps.Redis.Set(ctx, topTracksCacheKey, b, topTracksCacheTTL).Err()
-		}
+		h.readSpotifyCache(ctx, topTracksCacheKey, &out.Body)
 		return out, nil
 	})
 
@@ -195,31 +146,7 @@ func (h *Handler) registerSpotify(api huma.API) {
 	}, func(ctx context.Context, _ *struct{}) (*playlistsOutput, error) {
 		out := &playlistsOutput{}
 		out.Body.Playlists = []playlistBody{}
-
-		if cached, err := h.deps.Redis.Get(ctx, playlistsCacheKey).Bytes(); err == nil {
-			if json.Unmarshal(cached, &out.Body) == nil {
-				return out, nil
-			}
-		}
-
-		for _, id := range featuredPlaylistIDs {
-			p, err := h.deps.Spotify.PlaylistByID(ctx, id)
-			if errors.Is(err, spotify.ErrNotConfigured) {
-				return out, nil
-			}
-			if err != nil {
-				return nil, huma.Error502BadGateway("failed to reach Spotify", err)
-			}
-			out.Body.Playlists = append(out.Body.Playlists, playlistBody{
-				Name:  p.Name,
-				Image: p.Image,
-				URL:   p.URL,
-			})
-		}
-
-		if b, err := json.Marshal(out.Body); err == nil {
-			_ = h.deps.Redis.Set(ctx, playlistsCacheKey, b, playlistsCacheTTL).Err()
-		}
+		h.readSpotifyCache(ctx, playlistsCacheKey, &out.Body)
 		return out, nil
 	})
 
@@ -232,32 +159,18 @@ func (h *Handler) registerSpotify(api huma.API) {
 	}, func(ctx context.Context, _ *struct{}) (*topArtistsOutput, error) {
 		out := &topArtistsOutput{}
 		out.Body.Artists = []artistBody{}
-
-		if cached, err := h.deps.Redis.Get(ctx, topArtistsCacheKey).Bytes(); err == nil {
-			if json.Unmarshal(cached, &out.Body) == nil {
-				return out, nil
-			}
-		}
-
-		artists, err := h.deps.Spotify.TopArtists(ctx, topArtistsLimit, topTracksRange)
-		if errors.Is(err, spotify.ErrNotConfigured) {
-			return out, nil
-		}
-		if err != nil {
-			return nil, huma.Error502BadGateway("failed to reach Spotify", err)
-		}
-
-		for _, a := range artists {
-			out.Body.Artists = append(out.Body.Artists, artistBody{
-				Name:  a.Name,
-				Image: a.Image,
-				URL:   a.URL,
-			})
-		}
-
-		if b, err := json.Marshal(out.Body); err == nil {
-			_ = h.deps.Redis.Set(ctx, topArtistsCacheKey, b, topArtistsCacheTTL).Err()
-		}
+		h.readSpotifyCache(ctx, topArtistsCacheKey, &out.Body)
 		return out, nil
 	})
+}
+
+// readSpotifyCache unmarshals the cached value at key into dst. A miss or decode
+// error leaves dst at its zero/default value (an empty-but-valid body), so the
+// handler degrades gracefully when the cache is cold.
+func (h *Handler) readSpotifyCache(ctx context.Context, key string, dst any) {
+	cached, err := h.deps.Redis.Get(ctx, key).Bytes()
+	if err != nil {
+		return
+	}
+	_ = json.Unmarshal(cached, dst)
 }

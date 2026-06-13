@@ -105,6 +105,12 @@ func (c *Client) configured() bool {
 	return c.clientID != "" && c.clientSecret != "" && c.refreshToken != ""
 }
 
+// Configured reports whether Spotify credentials are present. Lets callers (e.g.
+// the background refresher) skip work entirely instead of hitting ErrNotConfigured.
+func (c *Client) Configured() bool {
+	return c.configured()
+}
+
 // token returns a valid access token, refreshing if necessary.
 func (c *Client) token(ctx context.Context) (string, error) {
 	c.mu.Lock()
@@ -170,6 +176,13 @@ func (c *Client) NowPlaying(ctx context.Context) (*Track, error) {
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
 		return nil, err
+	}
+	// Spotify returns 200 with the paused track and is_playing:false when you
+	// pause (it only 204s when no device is active). Treat paused as "nothing
+	// live" so the caller falls back to recently-played instead of showing a
+	// stale LIVE state.
+	if !raw.IsPlaying {
+		return nil, nil
 	}
 	return raw.Item.toTrack(raw.IsPlaying), nil
 }
