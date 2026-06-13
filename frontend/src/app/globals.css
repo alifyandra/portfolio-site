@@ -1,0 +1,27 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --color-deepsea: #053c5e;
+  --color-mint: #45cb85;
+  --color-sky: #96c5f7;
+  --color-citron: #eaf27c;
+  --color-coral: #f24333;
+}
+
+body {
+  @apply bg-deepsea text-slate-100 antialiased;
+}
+
+a {
+  @apply text-sky;
+}
+a:hover {
+  @apply underline;
+}
+
+::selection {
+  background: var(--color-citron);
+  color: var(--color-deepsea);
+}

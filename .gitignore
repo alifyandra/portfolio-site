@@ -1,0 +1,21 @@
+# Secrets / local env
+.env
+.env.local
+.env.*.local
+
+# OS / editor / local agent state
+.DS_Store
+*.log
+.idea/
+.vscode/
+.claude/
+
+# Go build artifacts
+backend/bin/
+backend/tmp/
+
+# Generated Ent client — regenerate with `make generate-ent` (committed: schema only)
+backend/ent/*
+!backend/ent/generate.go
+!backend/ent/schema/
+!backend/ent/schema/**

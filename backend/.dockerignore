@@ -1,0 +1,7 @@
+.git
+*.md
+openapi.yaml
+bin/
+tmp/
+.env
+.env.*
