@@ -13,6 +13,7 @@ import (
 	"github.com/alifyandra/portfolio-site/backend/ent"
 	"github.com/alifyandra/portfolio-site/backend/internal/cache"
 	"github.com/alifyandra/portfolio-site/backend/internal/config"
+	"github.com/alifyandra/portfolio-site/backend/internal/email"
 	"github.com/alifyandra/portfolio-site/backend/internal/queue"
 	"github.com/alifyandra/portfolio-site/backend/internal/server"
 	"github.com/alifyandra/portfolio-site/backend/internal/spotify"
@@ -69,6 +70,13 @@ func New(ctx context.Context, cfg *config.Config) (*App, error) {
 
 	sp := spotify.New(cfg.SpotifyClientID, cfg.SpotifyClientSecret, cfg.SpotifyRefreshToken)
 
+	mailer, err := email.New(ctx, cfg)
+	if err != nil {
+		_ = entClient.Close()
+		_ = redisClient.Close()
+		return nil, err
+	}
+
 	deps := &server.Deps{
 		Config:  cfg,
 		Ent:     entClient,
@@ -76,6 +84,7 @@ func New(ctx context.Context, cfg *config.Config) (*App, error) {
 		Spotify: sp,
 		Storage: store,
 		Queue:   q,
+		Email:   mailer,
 	}
 
 	return &App{

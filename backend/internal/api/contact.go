@@ -2,9 +2,13 @@ package api
 
 import (
 	"context"
+	"encoding/json"
+	"log/slog"
 	"net/http"
 
 	"github.com/danielgtaylor/huma/v2"
+
+	"github.com/alifyandra/portfolio-site/backend/internal/queue"
 )
 
 type createContactInput struct {
@@ -40,8 +44,20 @@ func (h *Handler) registerContact(api huma.API) {
 			return nil, huma.Error500InternalServerError("failed to save message", err)
 		}
 
-		// Future: enqueue a notification job here once the worker handles it.
-		// _ = h.deps.Queue.Enqueue(ctx, queue.Job{Type: "contact.notify", ...})
+		// Best-effort: enqueue an email-notification job. The message is already
+		// persisted, so a queue hiccup must not fail the request. Skipped when no
+		// queue URL is configured (e.g. local dev without the async profile).
+		if h.deps.Queue != nil && h.deps.Queue.Configured() {
+			payload, _ := json.Marshal(queue.ContactNotifyPayload{
+				ID: msg.ID, Name: msg.Name, Email: msg.Email, Body: msg.Body,
+			})
+			if err := h.deps.Queue.Enqueue(ctx, queue.Job{
+				Type:    queue.TypeContactNotify,
+				Payload: payload,
+			}); err != nil {
+				slog.WarnContext(ctx, "failed to enqueue contact notification", "err", err)
+			}
+		}
 
 		out := &createContactOutput{}
 		out.Body.ID = msg.ID

@@ -12,6 +12,7 @@ import (
 	"github.com/alifyandra/portfolio-site/backend/ent"
 	"github.com/alifyandra/portfolio-site/backend/internal/api"
 	"github.com/alifyandra/portfolio-site/backend/internal/config"
+	"github.com/alifyandra/portfolio-site/backend/internal/email"
 	"github.com/alifyandra/portfolio-site/backend/internal/queue"
 	"github.com/alifyandra/portfolio-site/backend/internal/spotify"
 	"github.com/alifyandra/portfolio-site/backend/internal/storage"
@@ -26,6 +27,7 @@ type Deps struct {
 	Spotify *spotify.Client
 	Storage *storage.Store
 	Queue   *queue.Client
+	Email   *email.Mailer
 }
 
 // New builds the Chi router with Huma mounted on it and all routes registered.

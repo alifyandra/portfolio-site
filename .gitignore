@@ -3,6 +3,9 @@
 .env.local
 .env.*.local
 
+# Résumé PDF — never commit (contains personal contact details)
+*.pdf
+
 # OS / editor / local agent state
 .DS_Store
 *.log
