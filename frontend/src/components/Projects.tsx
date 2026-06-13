@@ -27,7 +27,7 @@ export function Projects() {
               {p.tags?.map((t) => (
                 <span
                   key={t}
-                  className="rounded bg-mint/15 px-2 py-0.5 text-xs text-mint"
+                  className="rounded-sm bg-mint/15 px-2 py-0.5 text-xs text-mint"
                 >
                   {t}
                 </span>

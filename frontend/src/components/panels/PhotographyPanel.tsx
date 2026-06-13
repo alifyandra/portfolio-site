@@ -24,7 +24,7 @@ export function PhotographyPanel() {
                 className="w-full transition duration-300 group-hover:opacity-90"
               />
               {photo.caption && (
-                <figcaption className="absolute inset-x-0 bottom-0 translate-y-full bg-gradient-to-t from-black/80 to-transparent px-3 py-2 text-xs text-slate-200 transition group-hover:translate-y-0">
+                <figcaption className="absolute inset-x-0 bottom-0 translate-y-full bg-linear-to-t from-black/80 to-transparent px-3 py-2 text-xs text-slate-200 transition group-hover:translate-y-0">
                   {photo.caption}
                 </figcaption>
               )}
