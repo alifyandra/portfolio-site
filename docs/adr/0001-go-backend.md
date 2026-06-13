@@ -5,37 +5,36 @@ Status: Accepted
 
 ## Context
 
-Alif's production experience is Python (Django/DRF) and Java (Spring). The
-backend needs to support future async/queue work and LLM integration, and the
-choice was framed primarily around **career ROI over the next ~5 years**, not
-just shipping speed.
+The backend has to support async/queue work now and an LLM integration later,
+and it needs to run cheaply as a single container on a small box (see the EC2
+and compose ADR). Since this is also a project to learn on, a language with a
+concurrency model worth getting fluent in counted in its favour.
 
 Candidates considered: FastAPI (Python), Go, Rust.
 
-- **FastAPI** — lowest ramp (already a Python dev), best LLM ecosystem, but a
-  lateral move that teaches little new; reads as incremental on a résumé.
-- **Rust** — strongest systems signal, but Melbourne market is thin (~6 jobs in
-  metro at time of writing) and time-to-productive is months due to the borrow
-  checker. Poor ROI for a portfolio project.
-- **Go** — new concurrency model (goroutines/channels) and a genuinely new
-  paradigm to learn; strong, growing Melbourne demand (~330+ AU roles, hiring at
-  Culture Amp, fintech, cloud-adjacent orgs); single-binary containers; aligns
-  with Alif's cloud/infra trajectory (AWS cert in progress).
+- FastAPI: quickest to build and the strongest LLM ecosystem, but mostly
+  familiar territory, so there isn't much new to pick up.
+- Rust: the strongest systems story, but the ramp (the borrow checker, a longer
+  time to productive) is hard to justify for a project this size.
+- Go: a different concurrency model (goroutines and channels), compiles to one
+  static binary that drops cleanly into a minimal container, and has a healthy
+  cloud-native ecosystem.
 
 ## Decision
 
-Use **Go** for the backend. Mitigate Go's weaker LLM ecosystem by adding a thin
-Python (FastAPI/Lambda) sidecar *later*, only when the LLM feature is built —
-yielding a polyglot-microservices signal rather than a single-language project.
+Use Go for the backend. Its thinner LLM ecosystem is an acceptable trade: when
+the LLM feature actually gets built, add a small Python sidecar (FastAPI or a
+Lambda) for that part instead of forcing it into the Go service.
 
 ## Consequences
 
-- Higher learning value than FastAPI; meaningful but not punishing ramp.
-- Idiomatic Go (explicit errors, codegen-over-reflection) shapes later choices
-  (see ORM and API-contract ADRs).
-- LLM work will likely cross a language boundary; accepted as a future cost.
+- Single-binary builds keep the image small and the deploy simple.
+- Idiomatic Go (explicit errors, codegen over reflection) shapes later choices;
+  see the ORM and API-contract ADRs.
+- The eventual LLM work will cross a language boundary. That is accepted as a
+  future cost.
 
 ## Alternatives rejected
 
-- FastAPI: too little learned given existing Python depth.
-- Rust: market too thin in Melbourne; ramp too costly for the goal.
+- FastAPI: familiar territory, so too little new to learn here.
+- Rust: the ramp costs more than it is worth for this project.

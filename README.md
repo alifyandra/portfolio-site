@@ -1,25 +1,26 @@
 # Portfolio Site
 
-Personal portfolio for **Ahmad Alifyandra (Alif)** — a Go backend + Next.js
-frontend, built as a scalable foundation (async queue + LLM-ready) rather than a
-static page.
+Personal portfolio for Ahmad Alifyandra (Alif). It is a Go backend with a
+Next.js frontend, built to grow past a static page: there is an async queue and
+room to add LLM features later.
 
 ## Stack
 
 | Layer | Choice | Why |
 |-------|--------|-----|
 | Frontend | Next.js (App Router) + Tailwind | On Vercel ([ADR 3](docs/adr/0003-vercel-frontend-aws-backend-split.md)) |
-| Backend | Go + Chi + [Huma](https://huma.rocks) | Career ROI ([ADR 1](docs/adr/0001-go-backend.md)) |
-| ORM | [Ent](https://entgo.io) (codegen) | Magic without raw SQL ([ADR 4](docs/adr/0004-ent-orm.md)) |
-| API contract | Huma → OpenAPI → [orval](https://orval.dev) hooks | Code-first, type-safe ([ADR 5](docs/adr/0005-contract-first-codegen.md)) |
-| DB / cache | PostgreSQL / Redis | — |
-| Async | AWS SQS (worker seam) | ([ADR 7](docs/adr/0007-sqs-async-queue.md)) |
-| Storage | S3 (MinIO locally) | — |
-| Prod | EC2 `t4g.micro` + docker compose + Caddy | Budget ([ADR 6](docs/adr/0006-ec2-compose-over-fargate.md)) |
+| Backend | Go + Chi + [Huma](https://huma.rocks) | Concurrency model, single-binary deploy ([ADR 1](docs/adr/0001-go-backend.md)) |
+| ORM | [Ent](https://entgo.io) (codegen) | Typed queries, no hand-written SQL ([ADR 4](docs/adr/0004-ent-orm.md)) |
+| API contract | Huma to OpenAPI to [orval](https://orval.dev) hooks | Code-first and type-safe ([ADR 5](docs/adr/0005-contract-first-codegen.md)) |
+| DB / cache | PostgreSQL / Redis | |
+| Async | AWS SQS (worker seam) | [ADR 7](docs/adr/0007-sqs-async-queue.md) |
+| Storage | S3 (MinIO locally) | |
+| Prod | EC2 t4g.micro + docker compose + Caddy | Cheap to run ([ADR 6](docs/adr/0006-ec2-compose-over-fargate.md)) |
 
-See [`CONTEXT.md`](CONTEXT.md) for domain language, [`docs/adr/`](docs/adr) for
-decisions, [`docs/design/color-palette.md`](docs/design/color-palette.md) for the
-palette, [`docs/deployment.md`](docs/deployment.md) for deploy steps, and
+For more detail, see [`CONTEXT.md`](CONTEXT.md) for the domain language,
+[`docs/adr/`](docs/adr) for the decisions,
+[`docs/design/color-palette.md`](docs/design/color-palette.md) for the palette,
+[`docs/deployment.md`](docs/deployment.md) for deploy steps, and
 [`docs/security.md`](docs/security.md) for the security runbook.
 
 ## Repo layout
@@ -38,8 +39,8 @@ docker-compose.prod.yml   single-box production stack
 
 ## Quick start (local)
 
-Prerequisites: **Docker**, **Node 20+**. A local **Go** install is optional —
-backend builds run in Docker.
+You need Docker and Node 22+. A local Go install is optional, since the backend
+builds run in Docker.
 
 ```bash
 make setup     # copies .env, installs frontend deps, runs codegen
@@ -50,27 +51,27 @@ make fe-dev    # Next.js at http://localhost:3000 (separate terminal)
 
 - API docs (Huma): http://localhost:8080/docs
 - Health: http://localhost:8080/healthz
-- Add `make up-async` for the worker + local SQS (ElasticMQ).
+- Run `make up-async` to also start the worker and local SQS (ElasticMQ).
 
 ## The codegen pipeline
 
-The API contract flows one way, fully type-safe:
+The API contract flows one way and stays type-safe the whole way:
 
 ```
-Go handlers ──(make generate-spec)──▶ backend/openapi.yaml ──(make codegen)──▶ frontend hooks
+Go handlers --(make generate-spec)--> backend/openapi.yaml --(make codegen)--> frontend hooks
 ```
 
-After changing a handler, run `make generate` (regenerates Ent, the spec, and
-the frontend hooks). **CI fails if `openapi.yaml` is out of date.**
+After you change a handler, run `make generate`. It regenerates Ent, the spec,
+and the frontend hooks. CI fails if `openapi.yaml` is out of date.
 
 ## Deployment
 
-- **Frontend → Vercel.** Set Root Directory to `frontend` and
-  `NEXT_PUBLIC_API_URL` to the API domain. Auto-deploys per push.
-- **Backend → EC2.** GitHub Actions builds the image, pushes to GHCR, and
+- Frontend goes to Vercel. Set the Root Directory to `frontend` and
+  `NEXT_PUBLIC_API_URL` to the API domain. It auto-deploys on every push.
+- Backend goes to EC2. GitHub Actions builds the image, pushes it to GHCR, and
   redeploys over SSM. See [`.github/workflows`](.github/workflows) and the
   one-time setup in [`docs/deployment.md`](docs/deployment.md).
 
 ## License
 
-Personal project — all rights reserved unless stated otherwise.
+Personal project. All rights reserved unless stated otherwise.
