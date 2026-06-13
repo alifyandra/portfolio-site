@@ -1,0 +1,124 @@
+# Local development stack. `docker compose up` brings up everything the backend
+# needs (Postgres, Redis, MinIO=S3). The Go API builds from ./backend.
+#
+# Optional profiles:
+#   --profile async      adds ElasticMQ (local SQS) + the worker
+#   --profile fullstack  also runs the Next.js dev server in a container
+#
+# Prefer running the frontend with `cd frontend && npm run dev` for fast HMR.
+name: portfolio
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: portfolio
+      POSTGRES_PASSWORD: portfolio
+      POSTGRES_DB: portfolio
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U portfolio"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000" # S3 API
+      - "9001:9001" # web console
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # One-shot: create the assets bucket on startup.
+  minio-setup:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_started
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set local http://minio:9000 minioadmin minioadmin; do sleep 1; done;
+      mc mb --ignore-existing local/portfolio-assets;
+      mc anonymous set download local/portfolio-assets;
+      exit 0;
+      "
+
+  api:
+    build: ./backend
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio-setup:
+        condition: service_completed_successfully
+    ports:
+      - "8080:8080"
+
+  # Async worker + local SQS. Opt-in: `docker compose --profile async up`.
+  elasticmq:
+    image: softwaremill/elasticmq-native:latest
+    profiles: ["async"]
+    ports:
+      - "9324:9324"
+      - "9325:9325" # web UI
+    volumes:
+      - ./deploy/elasticmq.conf:/opt/elasticmq.conf:ro
+
+  worker:
+    build: ./backend
+    command: ["worker"]
+    profiles: ["async"]
+    env_file: .env
+    environment:
+      SQS_ENDPOINT_URL: http://elasticmq:9324
+      SQS_QUEUE_URL: http://elasticmq:9324/000000000000/jobs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      elasticmq:
+        condition: service_started
+
+  # Optional: run the frontend in-container. `docker compose --profile fullstack up`.
+  frontend:
+    image: node:22-alpine
+    profiles: ["fullstack"]
+    working_dir: /app
+    command: sh -c "npm install && npm run dev"
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8080
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - ./backend/openapi.yaml:/backend/openapi.yaml:ro
+
+volumes:
+  pgdata:
+  miniodata:

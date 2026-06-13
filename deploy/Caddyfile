@@ -1,0 +1,6 @@
+# Caddy auto-provisions TLS for $DOMAIN via Let's Encrypt and reverse-proxies
+# the API. Set DOMAIN in .env (e.g. api.alifyandra.dev).
+{$DOMAIN} {
+	encode gzip
+	reverse_proxy api:8080
+}
