@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/alifyandra/portfolio-site/backend/internal/api"
 	"github.com/alifyandra/portfolio-site/backend/internal/bootstrap"
 	"github.com/alifyandra/portfolio-site/backend/internal/config"
 	"github.com/alifyandra/portfolio-site/backend/internal/server"
@@ -40,6 +41,10 @@ func run() error {
 	defer app.Close()
 
 	handler, _ := server.New(app.Deps)
+
+	// Keep Spotify data fresh in Redis on the backend's own schedule so the HTTP
+	// handlers only ever read cache (no per-request Spotify calls). Stops with ctx.
+	go api.NewSpotifyRefresher(app.Deps.Redis, app.Deps.Spotify).Run(ctx)
 
 	srv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Port),

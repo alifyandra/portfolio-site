@@ -19,10 +19,10 @@ export function Contact() {
   };
 
   return (
-    <Section id="contact" title="Get in touch">
+    <Section id="contact" title="Get in Touch">
       {done ? (
         <p className="text-mint">
-          Thanks — your message has been received. I&apos;ll get back to you at{' '}
+          Thanks, got your message. I&apos;ll get back to you at{' '}
           {form.email}.
         </p>
       ) : (

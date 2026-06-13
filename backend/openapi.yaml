@@ -1,5 +1,17 @@
 components:
   schemas:
+    ArtistBody:
+      additionalProperties: false
+      properties:
+        image:
+          type: string
+        name:
+          type: string
+        url:
+          type: string
+      required:
+        - name
+      type: object
     CreateContactInputBody:
       additionalProperties: false
       properties:
@@ -135,24 +147,43 @@ components:
           format: uri
           readOnly: true
           type: string
-        album:
+        source:
           type: string
-        album_image:
+        track:
+          $ref: "#/components/schemas/TrackBody"
+      required:
+        - source
+      type: object
+    PlaylistBody:
+      additionalProperties: false
+      properties:
+        image:
           type: string
-        artists:
+        name:
+          type: string
+        url:
+          type: string
+      required:
+        - name
+      type: object
+    PlaylistsOutputBody:
+      additionalProperties: false
+      properties:
+        $schema:
+          description: A URL to the JSON Schema for this object.
+          examples:
+            - https://example.com/schemas/PlaylistsOutputBody.json
+          format: uri
+          readOnly: true
+          type: string
+        playlists:
           items:
-            type: string
+            $ref: "#/components/schemas/PlaylistBody"
           type:
             - array
             - "null"
-        is_playing:
-          type: boolean
-        song_url:
-          type: string
-        title:
-          type: string
       required:
-        - is_playing
+        - playlists
       type: object
     ProjectDTO:
       additionalProperties: false
@@ -198,6 +229,66 @@ components:
         - tags
         - image_keys
         - featured
+      type: object
+    TopArtistsOutputBody:
+      additionalProperties: false
+      properties:
+        $schema:
+          description: A URL to the JSON Schema for this object.
+          examples:
+            - https://example.com/schemas/TopArtistsOutputBody.json
+          format: uri
+          readOnly: true
+          type: string
+        artists:
+          items:
+            $ref: "#/components/schemas/ArtistBody"
+          type:
+            - array
+            - "null"
+      required:
+        - artists
+      type: object
+    TopTracksOutputBody:
+      additionalProperties: false
+      properties:
+        $schema:
+          description: A URL to the JSON Schema for this object.
+          examples:
+            - https://example.com/schemas/TopTracksOutputBody.json
+          format: uri
+          readOnly: true
+          type: string
+        tracks:
+          items:
+            $ref: "#/components/schemas/TrackBody"
+          type:
+            - array
+            - "null"
+      required:
+        - tracks
+      type: object
+    TrackBody:
+      additionalProperties: false
+      properties:
+        album:
+          type: string
+        album_image:
+          type: string
+        artists:
+          items:
+            type: string
+          type:
+            - array
+            - "null"
+        is_playing:
+          type: boolean
+        song_url:
+          type: string
+        title:
+          type: string
+      required:
+        - is_playing
       type: object
 info:
   description: Backend API for alifyandra's portfolio site.
@@ -300,6 +391,63 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorModel"
           description: Error
-      summary: Get Alif's currently-playing Spotify track
+      summary: Get Alif's currently-playing track, falling back to most recent
+      tags:
+        - spotify
+  /api/spotify/playlists:
+    get:
+      operationId: get-spotify-playlists
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlaylistsOutputBody"
+          description: OK
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ErrorModel"
+          description: Error
+      summary: Get Alif's public Spotify playlists
+      tags:
+        - spotify
+  /api/spotify/top-artists:
+    get:
+      operationId: get-spotify-top-artists
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TopArtistsOutputBody"
+          description: OK
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ErrorModel"
+          description: Error
+      summary: Get Alif's top artists (~4 week window)
+      tags:
+        - spotify
+  /api/spotify/top-tracks:
+    get:
+      operationId: get-spotify-top-tracks
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TopTracksOutputBody"
+          description: OK
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ErrorModel"
+          description: Error
+      summary: Get Alif's top tracks (~6 month window)
       tags:
         - spotify

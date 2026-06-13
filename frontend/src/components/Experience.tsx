@@ -3,7 +3,7 @@ import { experience, education } from '@/lib/resume';
 
 export function Experience() {
   return (
-    <Section id="experience" title="Experience">
+    <Section id="experience" title="Work Experience">
       <ol className="relative border-l border-slate-700">
         {experience.map((job) => (
           <li key={`${job.company}-${job.period}`} className="mb-10 ml-6">
@@ -25,12 +25,12 @@ export function Experience() {
       </ol>
 
       <h3 className="mb-3 mt-6 text-lg font-semibold text-citron">
-        Education & Certifications
+        Education & Certs
       </h3>
       <ul className="space-y-2 text-slate-300">
         {education.map((e) => (
           <li key={e.title}>
-            <span className="font-medium text-white">{e.title}</span> —{' '}
+            <span className="font-medium text-white">{e.title}</span>,{' '}
             {e.org}{' '}
             <span className="text-slate-400">({e.year})</span>
           </li>

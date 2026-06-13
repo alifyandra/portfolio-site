@@ -12,6 +12,7 @@ frontend**, built as a scalable foundation (async queue + LLM-ready), not a stat
 - Decisions (read before changing architecture): [`docs/adr/`](docs/adr)
 - Deploy steps: [`docs/deployment.md`](docs/deployment.md)
 - Security runbook: [`docs/security.md`](docs/security.md)
+- Spotify proxy setup + dead endpoints: [`docs/spotify.md`](docs/spotify.md)
 - Palette: [`docs/design/color-palette.md`](docs/design/color-palette.md)
 
 ## Stack (see ADRs for why)
@@ -66,6 +67,19 @@ make fe-dev    # Next.js at :3000 (separate terminal)
 - ✅ SES email-on-contact via the SQS worker seam; LinkedIn link; security hardening
   (honeypot, rate limit, headers, govulncheck, Dependabot).
 - ✅ Résumé PDF removed and **scrubbed from git history**; `*.pdf` gitignored.
+- ✅ **Pivot decided:** site becomes **aliflab** — a tools platform; portfolio
+  becomes the about area. Path-based routing (not subdomains). Domain
+  **`aliflabs.dev`** bought (Cloudflare, DNSSEC on). Platform shell deferred
+  until Tool #1; see memory `aliflab-rebrand`. Hero now reads just "Alif".
+- ✅ **About Panels** (new concept, see CONTEXT.md): extensible registry in
+  `frontend/src/components/panels/`. Two shipped:
+  - **Music** — Spotify live now-playing (+recently-played fallback, LIVE badge),
+    top tracks, top artists, hand-curated playlists. **Spotify creds wired**
+    (refresh token in `.env`). Setup + dead endpoints: `docs/spotify.md`.
+  - **Photography** — static masonry of curated photos (`frontend/public/photos/`
+    + `src/lib/photos.ts`); originals in gitignored `pics/`.
 - ⏳ **Not yet done:** actual EC2 deploy (needs AWS secrets — see deployment.md),
-  Spotify creds, Cloudflare setup (see security.md), and **auth** (deferred for v1).
+  Cloudflare proxy/security setup (security.md), and **auth** (deferred for v1).
+  Auth is the unlock for: dynamic DB-backed Photography + curated playlists +
+  admin page.
 - The `Deploy Backend` workflow's final SSM step fails until AWS secrets are set — expected.
