@@ -32,9 +32,9 @@ would add cost with no benefit.
 
 ### Job (async)
 A unit of background work placed on a queue and processed by a worker out of
-band from the web request. None exist on day one; the queue wiring is laid so
-the first real Job (e.g. an LLM-powered task, or sending contact notifications)
-can be added without re-architecting. See `docs/adr/0007-sqs-async-queue.md`.
+band from the web request. The first real Job is **`contact.notify`** — emailing
+Alif (via SES) when a Contact Message arrives. Further Jobs (e.g. an LLM-powered
+task) slot into the same seam. See `docs/adr/0007-sqs-async-queue.md`.
 
 ## Naming conventions
 
