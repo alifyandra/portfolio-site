@@ -14,7 +14,7 @@ function artistLine(artists?: string[] | null) {
   return artists?.length ? artists.join(", ") : "";
 }
 
-// Slight per-cover tilt so the playlist grid feels hand-pinned rather than rigid.
+// Slight per-cover tilt so the artist grid feels hand-pinned rather than rigid.
 // Keyed by index (not Math.random) so server and client render the same angle —
 // random in render would cause an SSR hydration mismatch. Full literal class
 // strings so Tailwind's JIT keeps them; hover straightens the cover.
@@ -175,7 +175,7 @@ export function MusicPanel() {
             Artists on heavy rotation
           </h3>
           <div className="grid grid-cols-3 gap-5 sm:grid-cols-4 sm:gap-6">
-            {topArtists.map((a) => (
+            {topArtists.map((a, i) => (
               <a
                 key={a.url ?? a.name}
                 href={a.url}
@@ -189,7 +189,7 @@ export function MusicPanel() {
                   <img
                     src={a.image}
                     alt={a.name}
-                    className="mx-auto mb-2 aspect-square w-full rounded-full object-cover transition group-hover:opacity-90"
+                    className={`mx-auto mb-2 aspect-square w-full rounded-full object-cover transition duration-300 group-hover:rotate-0 group-hover:opacity-90 ${coverTilt(i)}`}
                   />
                 ) : (
                   <div className="mx-auto mb-2 aspect-square w-full rounded-full bg-sky/10" />
@@ -210,7 +210,7 @@ export function MusicPanel() {
             My favourite playlists
           </h3>
           <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 sm:gap-5">
-            {playlists.map((p, i) => (
+            {playlists.map((p) => (
               <a
                 key={p.url ?? p.name}
                 href={p.url}
@@ -224,7 +224,7 @@ export function MusicPanel() {
                   <img
                     src={p.image}
                     alt={p.name}
-                    className={`mb-2 aspect-square w-full rounded object-cover transition duration-300 group-hover:rotate-0 group-hover:opacity-90 ${coverTilt(i)}`}
+                    className="mb-2 aspect-square w-full rounded object-cover transition group-hover:opacity-90"
                   />
                 ) : (
                   <div className="mb-2 aspect-square w-full rounded bg-sky/10" />

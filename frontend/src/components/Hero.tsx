@@ -47,7 +47,7 @@ export function Hero() {
         <img
           src="/alif.jpg"
           alt={profile.name}
-          className="mx-auto w-44 shrink-0 rounded-2xl border border-slate-700 object-cover shadow-xl shadow-black/40 sm:w-52 md:w-60"
+          className="mx-auto w-44 shrink-0 rounded-2xl border border-slate-700 object-cover sm:w-52 md:w-60"
         />
       </div>
     </header>
