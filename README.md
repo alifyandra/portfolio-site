@@ -15,7 +15,7 @@ static page.
 | DB / cache | PostgreSQL / Redis | — |
 | Async | AWS SQS (worker seam) | ([ADR 7](docs/adr/0007-sqs-async-queue.md)) |
 | Storage | S3 (MinIO locally) | — |
-| Prod | EC2 + docker compose + Caddy | Budget ([ADR 6](docs/adr/0006-ec2-compose-over-fargate.md)) |
+| Prod | EC2 `t4g.micro` + docker compose + Caddy | Budget ([ADR 6](docs/adr/0006-ec2-compose-over-fargate.md)) |
 
 See [`CONTEXT.md`](CONTEXT.md) for domain language, [`docs/adr/`](docs/adr) for
 decisions, and [`docs/design/color-palette.md`](docs/design/color-palette.md)

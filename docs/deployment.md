@@ -15,10 +15,18 @@ docker compose (see [ADR 6](adr/0006-ec2-compose-over-fargate.md)).
 
 ### One-time host setup
 
-1. Launch a **`t4g.small`** (arm64) in **ap-southeast-2**, Amazon Linux 2023.
-   Attach an **IAM instance profile** allowing the app's S3 bucket + SQS queue,
-   and `AmazonSSMManagedInstanceCore` (so GitHub Actions can deploy via SSM).
-2. Install Docker + the compose plugin; enable the service.
+1. Launch a **`t4g.micro`** (arm64, 1 GB) in **ap-southeast-2**, Amazon Linux
+   2023. Attach an **IAM instance profile** allowing the app's S3 bucket, SQS
+   queue, and `ses:SendEmail`, plus `AmazonSSMManagedInstanceCore` (so GitHub
+   Actions can deploy via SSM). Security group: open **443/80 only**; manage the
+   box via **SSM Session Manager**, not a public SSH port.
+2. Install Docker + the compose plugin; enable the service. Add a swap file so
+   1 GB has headroom under transient spikes:
+   ```bash
+   sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile
+   sudo mkswap /swapfile && sudo swapon /swapfile
+   echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+   ```
 3. Create the deploy directory and copy the compose + deploy files:
    ```bash
    sudo mkdir -p /opt/portfolio/deploy
