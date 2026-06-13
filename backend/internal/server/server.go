@@ -2,12 +2,14 @@ package server
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humachi"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
+	"github.com/go-chi/httprate"
 
 	"github.com/alifyandra/portfolio-site/backend/ent"
 	"github.com/alifyandra/portfolio-site/backend/internal/api"
@@ -40,6 +42,10 @@ func New(deps *Deps) (http.Handler, huma.API) {
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
+
+	// App-layer rate limit per client IP (a speed bump; Cloudflare is the real
+	// DDoS layer in prod). RealIP above sets the IP from X-Forwarded-For.
+	r.Use(httprate.LimitByIP(100, time.Minute))
 
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   deps.Config.CORSAllowedOrigins,

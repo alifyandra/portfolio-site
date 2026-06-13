@@ -16,6 +16,9 @@ type createContactInput struct {
 		Name  string `json:"name" minLength:"1" maxLength:"120"`
 		Email string `json:"email" format:"email" maxLength:"254"`
 		Body  string `json:"body" minLength:"1"`
+		// Website is a honeypot: hidden in the UI, so a real user never fills it.
+		// A non-empty value means a bot — we accept the request but discard it.
+		Website string `json:"website,omitempty"`
 	}
 }
 
@@ -35,6 +38,14 @@ func (h *Handler) registerContact(api huma.API) {
 		Tags:          []string{"contact"},
 		DefaultStatus: http.StatusCreated,
 	}, func(ctx context.Context, in *createContactInput) (*createContactOutput, error) {
+		// Honeypot tripped: pretend success, store nothing, notify no one.
+		if in.Body.Website != "" {
+			slog.InfoContext(ctx, "dropped honeypot contact submission")
+			out := &createContactOutput{}
+			out.Body.Message = "Thanks — your message has been received."
+			return out, nil
+		}
+
 		msg, err := h.deps.Ent.ContactMessage.Create().
 			SetName(in.Body.Name).
 			SetEmail(in.Body.Email).

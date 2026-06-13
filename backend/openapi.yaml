@@ -21,6 +21,8 @@ components:
           maxLength: 120
           minLength: 1
           type: string
+        website:
+          type: string
       required:
         - name
         - email
@@ -44,44 +46,6 @@ components:
       required:
         - id
         - message
-      type: object
-    CreateProjectInputBody:
-      additionalProperties: false
-      properties:
-        $schema:
-          description: A URL to the JSON Schema for this object.
-          examples:
-            - https://example.com/schemas/CreateProjectInputBody.json
-          format: uri
-          readOnly: true
-          type: string
-        description:
-          type: string
-        featured:
-          type: boolean
-        live_url:
-          type: string
-        repo_url:
-          type: string
-        slug:
-          minLength: 1
-          type: string
-        summary:
-          maxLength: 280
-          type: string
-        tags:
-          items:
-            type: string
-          type:
-            - array
-            - "null"
-        title:
-          minLength: 1
-          type: string
-      required:
-        - slug
-        - title
-        - summary
       type: object
     ErrorDetail:
       additionalProperties: false
@@ -291,30 +255,6 @@ paths:
                 $ref: "#/components/schemas/ErrorModel"
           description: Error
       summary: List projects
-      tags:
-        - projects
-    post:
-      operationId: create-project
-      requestBody:
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/CreateProjectInputBody"
-        required: true
-      responses:
-        "201":
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ProjectDTO"
-          description: Created
-        default:
-          content:
-            application/problem+json:
-              schema:
-                $ref: "#/components/schemas/ErrorModel"
-          description: Error
-      summary: Create a project
       tags:
         - projects
   /api/projects/{slug}:
