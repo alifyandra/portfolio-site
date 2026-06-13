@@ -24,8 +24,6 @@ jobs:
       # not-yet-generated ./ent/* packages look like missing remote modules.
       - name: Generate Ent client
         run: go generate ./ent
-        env:
-          GOFLAGS: -mod=mod
 
       - name: Download modules
         run: go mod download
