@@ -39,20 +39,24 @@ role so usage stays consistent across the Next.js app and any future surfaces.
 ## Tints / shades (suggested steps)
 
 For hover/disabled/border states, generate 50–900 ramps in Tailwind. Anchor
-each ramp on the base hex above (the `500` step). The Tailwind config in
-`frontend/tailwind.config.ts` is the source of truth for the generated ramps.
+each ramp on the base hex above (the `500` step). The `@theme` block in
+`frontend/src/app/globals.css` is the source of truth for the palette.
 
 ## Tailwind tokens
 
-These are wired into `frontend/tailwind.config.ts`:
+Tailwind v4 is CSS-first — the palette is declared in the `@theme` block of
+`frontend/src/app/globals.css` (there is no `tailwind.config.ts`). Each
+`--color-NAME` token auto-generates the `bg-NAME`, `text-NAME` and
+`border-NAME` utilities used across the app:
 
-```ts
-colors: {
-  deepsea: '#053c5e', // background / primary text on light
-  mint:    '#45cb85', // secondary / success
-  sky:     '#96c5f7', // tertiary / links
-  citron:  '#eaf27c', // primary accent / CTA
-  coral:   '#f24333', // danger / error
+```css
+/* frontend/src/app/globals.css */
+@theme {
+  --color-deepsea: #053c5e; /* background / primary text on light */
+  --color-mint:    #45cb85; /* secondary / success */
+  --color-sky:     #96c5f7; /* tertiary / links */
+  --color-citron:  #eaf27c; /* primary accent / CTA */
+  --color-coral:   #f24333; /* danger / error */
 }
 ```
 
@@ -67,12 +71,34 @@ Usage examples:
 
 ## CSS variables (for non-Tailwind contexts)
 
+The `@theme` tokens above are themselves exposed as `--color-*` custom
+properties on `:root`, so non-Tailwind CSS can reference them directly — no
+separate `:root` block needed:
+
 ```css
-:root {
-  --color-deepsea: #053c5e;
-  --color-mint:    #45cb85;
-  --color-sky:     #96c5f7;
-  --color-citron:  #eaf27c;
-  --color-coral:   #f24333;
+background: var(--color-citron);
+color: var(--color-deepsea);
+```
+
+## Tailwind v4 gotcha: base styles must live in `@layer base`
+
+Tailwind v4 emits real CSS cascade layers (`theme, base, components,
+utilities`). **Unlayered CSS beats every layer**, so any custom base rule
+written outside a layer will override utility classes regardless of
+specificity. In `globals.css` an unlayered `a { @apply text-sky }` once
+overrode `text-deepsea` / `text-mint` / `text-coral` on every link and
+link-button (e.g. the citron "Get in touch" CTA rendered with bright sky
+text). v3 didn't have this problem because it flattened layers.
+
+Rule of thumb: **wrap element-level base styles (`body`, `a`, `::selection`,
+placeholder/cursor resets, …) in `@layer base`** so utilities can still win:
+
+```css
+@layer base {
+  a { @apply text-sky; }
+  /* … */
 }
 ```
+
+Per-element utility classes (`text-deepsea`, `bg-citron`, …) live in the
+`utilities` layer and will then correctly override these defaults.

@@ -3,7 +3,9 @@ import { Inter } from 'next/font/google';
 import './globals.css';
 import { Providers } from './providers';
 
-const inter = Inter({ subsets: ['latin'], variable: '--font-sans' });
+// Exposed as --font-inter and consumed by the Tailwind v4 --font-sans token
+// (see globals.css) so it drives both the default body font and font-sans.
+const inter = Inter({ subsets: ['latin'], variable: '--font-inter' });
 
 export const metadata: Metadata = {
   title: 'Ahmad Alifyandra · Full-Stack Engineer',

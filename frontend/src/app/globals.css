@@ -1,27 +1,51 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import 'tailwindcss';
 
-:root {
-  --color-deepsea: #053c5e;
-  --color-mint: #45cb85;
-  --color-sky: #96c5f7;
-  --color-citron: #eaf27c;
-  --color-coral: #f24333;
+/* Palette source of truth: see /docs/design/color-palette.md
+ * Tailwind v4 is CSS-first: colors declared here as --color-NAME become the
+ * bg-NAME, text-NAME and border-NAME utilities (bg-deepsea, text-coral, …)
+ * used across the app. The font stack references the next/font Inter variable
+ * (--font-inter, set in layout.tsx) so font-sans / the default body font
+ * resolve to Inter, matching the old JS config. */
+@theme {
+  --color-deepsea: #053c5e; /* background / primary text on light */
+  --color-mint: #45cb85; /* secondary / success */
+  --color-sky: #96c5f7; /* tertiary / links */
+  --color-citron: #eaf27c; /* primary accent / CTA */
+  --color-coral: #f24333; /* danger / error */
+
+  --font-sans: var(--font-inter), system-ui, sans-serif;
 }
 
-body {
-  @apply bg-deepsea text-slate-100 antialiased;
-}
+/* These base customizations MUST live in @layer base. Tailwind v4 emits real
+ * CSS @layers (theme, base, components, utilities) and unlayered rules beat
+ * every layer — so an unlayered `a { color: sky }` would override text-mint /
+ * text-deepsea / text-coral on every link. Inside @layer base, utilities win,
+ * matching the v3 behaviour. */
+@layer base {
+  body {
+    @apply bg-deepsea text-slate-100 antialiased;
+  }
 
-a {
-  @apply text-sky;
-}
-a:hover {
-  @apply underline;
-}
+  a {
+    @apply text-sky;
+  }
+  a:hover {
+    @apply underline;
+  }
 
-::selection {
-  background: var(--color-citron);
-  color: var(--color-deepsea);
+  /* v4 Preflight changed two defaults; restore the v3 look used by this site. */
+  /* Placeholders defaulted to currentColor/50% (here white-ish) — was gray-400. */
+  ::placeholder {
+    @apply text-slate-400;
+  }
+  /* <button> now defaults to cursor: default — keep the pointer affordance. */
+  button:not(:disabled),
+  [role='button']:not(:disabled) {
+    cursor: pointer;
+  }
+
+  ::selection {
+    background: var(--color-citron);
+    color: var(--color-deepsea);
+  }
 }

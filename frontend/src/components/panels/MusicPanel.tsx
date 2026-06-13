@@ -49,7 +49,7 @@ function TrackArt({ track, size }: { track: TrackBody; size: number }) {
   if (!track.album_image) {
     return (
       <div
-        className="shrink-0 rounded bg-sky/10"
+        className="shrink-0 rounded-sm bg-sky/10"
         style={{ width: size, height: size }}
       />
     );
@@ -62,7 +62,7 @@ function TrackArt({ track, size }: { track: TrackBody; size: number }) {
       alt={track.album ?? ""}
       width={size}
       height={size}
-      className="shrink-0 rounded object-cover"
+      className="shrink-0 rounded-sm object-cover"
     />
   );
 }
@@ -239,10 +239,10 @@ export function MusicPanel() {
                   <img
                     src={p.image}
                     alt={p.name}
-                    className="mb-2 aspect-square w-full rounded object-cover transition group-hover:opacity-90"
+                    className="mb-2 aspect-square w-full rounded-sm object-cover transition group-hover:opacity-90"
                   />
                 ) : (
-                  <div className="mb-2 aspect-square w-full rounded bg-sky/10" />
+                  <div className="mb-2 aspect-square w-full rounded-sm bg-sky/10" />
                 )}
                 <div className="truncate text-sm font-medium text-slate-200">
                   {p.name}
