@@ -4,14 +4,14 @@
 export const profile = {
   name: 'Ahmad Alifyandra',
   nickname: 'Alif',
-  title: 'Full-Stack Software Engineer',
+  title: 'Full-Stack Engineer',
   location: 'Melbourne, VIC',
   email: 'alifyandra@gmail.com',
   github: 'https://github.com/alifyandra',
   linkedin: 'https://linkedin.com/in/alifyandra',
   spotify: 'https://open.spotify.com/user/alifyandraid',
   summary:
-    'Full-stack engineer with ~3 years building scalable web platforms with Python (Django/DRF), Next.js (TypeScript) and PostgreSQL. I modernise legacy systems into production SaaS, improving performance up to 80% through DB optimisation and async processing (Celery/Redis). Strong in secure API design, containerised deployments, and cloud infrastructure.',
+    "Software engineer based in Melbourne, currently working with Python, Django and TypeScript to build systems that deal with complex data and real production workloads.\n\nI've worked across backend, full-stack and infra, from payment systems in fintech to an AI analytics platform I helped rebuild to be more scalable with Django, Docker, Redis, Celery and Next.js, cutting processing time by around 80%.",
 };
 
 export const skills: { group: string; items: string[] }[] = [
@@ -40,8 +40,16 @@ export type Experience = {
 export const experience: Experience[] = [
   {
     role: 'Software Engineer',
+    company: 'FOUNDIT',
+    period: 'May 2026 – Present',
+    points: [
+      'Building full-stack at FOUNDIT, an early-stage proptech startup, leading one of their products.',
+    ],
+  },
+  {
+    role: 'Software Engineer',
     company: 'Openresim Pty Ltd',
-    period: 'Jul 2024 – Present',
+    period: 'Jul 2024 – May 2026',
     points: [
       'Led the redevelopment of a legacy analytics system into a scalable, AI-driven SaaS platform using Django REST Framework and Next.js.',
       'Reduced analysis computation time by ~80% via query redesign and indexing.',
@@ -62,7 +70,7 @@ export const experience: Experience[] = [
   {
     role: 'Software Engineer Intern',
     company: 'TKA Developments',
-    period: 'Mar 2021 – Jul 2021',
+    period: 'Mar 2021 – Aug 2021',
     points: [
       'Built three campaign-based mobile/web apps (community, wealth-tracking, social e-commerce).',
       'Designed NoSQL schemas and integrated the MidTrans payment gateway.',

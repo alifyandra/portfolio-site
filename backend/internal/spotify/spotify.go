@@ -49,8 +49,66 @@ type Track struct {
 	SongURL    string   `json:"song_url,omitempty"`
 }
 
+// rawTrack mirrors the slice of Spotify's track object we care about. Spotify
+// returns this same shape under different keys (now-playing `item`,
+// recently-played `items[].track`, top-tracks `items[]`), so we parse it once.
+type rawTrack struct {
+	Name         string `json:"name"`
+	ExternalURLs struct {
+		Spotify string `json:"spotify"`
+	} `json:"external_urls"`
+	Artists []struct {
+		Name string `json:"name"`
+	} `json:"artists"`
+	Album struct {
+		Name   string `json:"name"`
+		Images []struct {
+			URL string `json:"url"`
+		} `json:"images"`
+	} `json:"album"`
+}
+
+func (rt rawTrack) toTrack(isPlaying bool) *Track {
+	t := &Track{
+		IsPlaying: isPlaying,
+		Title:     rt.Name,
+		Album:     rt.Album.Name,
+		SongURL:   rt.ExternalURLs.Spotify,
+	}
+	for _, a := range rt.Artists {
+		t.Artists = append(t.Artists, a.Name)
+	}
+	if len(rt.Album.Images) > 0 {
+		t.AlbumImage = rt.Album.Images[0].URL
+	}
+	return t
+}
+
+// get issues an authenticated GET to the Spotify Web API.
+func (c *Client) get(ctx context.Context, url string) (*http.Response, error) {
+	if !c.configured() {
+		return nil, ErrNotConfigured
+	}
+	tok, err := c.token(ctx)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+tok)
+	return c.http.Do(req)
+}
+
 func (c *Client) configured() bool {
 	return c.clientID != "" && c.clientSecret != "" && c.refreshToken != ""
+}
+
+// Configured reports whether Spotify credentials are present. Lets callers (e.g.
+// the background refresher) skip work entirely instead of hitting ErrNotConfigured.
+func (c *Client) Configured() bool {
+	return c.configured()
 }
 
 // token returns a valid access token, refreshing if necessary.
@@ -96,21 +154,9 @@ func (c *Client) token(ctx context.Context) (string, error) {
 }
 
 // NowPlaying returns the currently-playing track, or (nil, nil) if nothing is
-// playing.
+// playing. Callers fall back to RecentlyPlayed to avoid a dead view.
 func (c *Client) NowPlaying(ctx context.Context) (*Track, error) {
-	if !c.configured() {
-		return nil, ErrNotConfigured
-	}
-	tok, err := c.token(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet,
-		"https://api.spotify.com/v1/me/player/currently-playing", nil)
-	req.Header.Set("Authorization", "Bearer "+tok)
-
-	resp, err := c.http.Do(req)
+	resp, err := c.get(ctx, "https://api.spotify.com/v1/me/player/currently-playing")
 	if err != nil {
 		return nil, err
 	}
@@ -125,38 +171,168 @@ func (c *Client) NowPlaying(ctx context.Context) (*Track, error) {
 	}
 
 	var raw struct {
-		IsPlaying bool `json:"is_playing"`
-		Item      struct {
-			Name         string `json:"name"`
-			ExternalURLs struct {
-				Spotify string `json:"spotify"`
-			} `json:"external_urls"`
-			Artists []struct {
-				Name string `json:"name"`
-			} `json:"artists"`
-			Album struct {
-				Name   string `json:"name"`
-				Images []struct {
-					URL string `json:"url"`
-				} `json:"images"`
-			} `json:"album"`
-		} `json:"item"`
+		IsPlaying bool     `json:"is_playing"`
+		Item      rawTrack `json:"item"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
 		return nil, err
 	}
-
-	track := &Track{
-		IsPlaying: raw.IsPlaying,
-		Title:     raw.Item.Name,
-		Album:     raw.Item.Album.Name,
-		SongURL:   raw.Item.ExternalURLs.Spotify,
+	// Spotify returns 200 with the paused track and is_playing:false when you
+	// pause (it only 204s when no device is active). Treat paused as "nothing
+	// live" so the caller falls back to recently-played instead of showing a
+	// stale LIVE state.
+	if !raw.IsPlaying {
+		return nil, nil
 	}
-	for _, a := range raw.Item.Artists {
-		track.Artists = append(track.Artists, a.Name)
-	}
-	if len(raw.Item.Album.Images) > 0 {
-		track.AlbumImage = raw.Item.Album.Images[0].URL
-	}
-	return track, nil
+	return raw.Item.toTrack(raw.IsPlaying), nil
 }
+
+// RecentlyPlayed returns the most recently played track, or (nil, nil) if
+// Spotify reports no history. Requires the user-read-recently-played scope.
+func (c *Client) RecentlyPlayed(ctx context.Context) (*Track, error) {
+	resp, err := c.get(ctx, "https://api.spotify.com/v1/me/player/recently-played?limit=1")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("spotify recently-played: status %d", resp.StatusCode)
+	}
+
+	var raw struct {
+		Items []struct {
+			Track rawTrack `json:"track"`
+		} `json:"items"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return nil, err
+	}
+	if len(raw.Items) == 0 {
+		return nil, nil
+	}
+	return raw.Items[0].Track.toTrack(false), nil
+}
+
+// TopTracks returns Alif's top tracks for the given time range
+// (short_term ~4 weeks, medium_term ~6 months, long_term ~1 year).
+// Requires the user-top-read scope.
+func (c *Client) TopTracks(ctx context.Context, limit int, timeRange string) ([]Track, error) {
+	url := fmt.Sprintf(
+		"https://api.spotify.com/v1/me/top/tracks?limit=%d&time_range=%s", limit, timeRange)
+	resp, err := c.get(ctx, url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("spotify top-tracks: status %d", resp.StatusCode)
+	}
+
+	var raw struct {
+		Items []rawTrack `json:"items"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return nil, err
+	}
+	tracks := make([]Track, 0, len(raw.Items))
+	for _, it := range raw.Items {
+		tracks = append(tracks, *it.toTrack(false))
+	}
+	return tracks, nil
+}
+
+// Artist is the trimmed, frontend-facing shape for a Spotify artist.
+// (Spotify no longer returns the genres field for newer apps, so it's omitted.)
+type Artist struct {
+	Name  string `json:"name"`
+	Image string `json:"image,omitempty"`
+	URL   string `json:"url,omitempty"`
+}
+
+// TopArtists returns Alif's top artists for the given time range.
+// Requires the user-top-read scope.
+func (c *Client) TopArtists(ctx context.Context, limit int, timeRange string) ([]Artist, error) {
+	url := fmt.Sprintf(
+		"https://api.spotify.com/v1/me/top/artists?limit=%d&time_range=%s", limit, timeRange)
+	resp, err := c.get(ctx, url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("spotify top-artists: status %d", resp.StatusCode)
+	}
+
+	var raw struct {
+		Items []struct {
+			Name         string `json:"name"`
+			ExternalURLs struct {
+				Spotify string `json:"spotify"`
+			} `json:"external_urls"`
+			Images []struct {
+				URL string `json:"url"`
+			} `json:"images"`
+		} `json:"items"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return nil, err
+	}
+	artists := make([]Artist, 0, len(raw.Items))
+	for _, it := range raw.Items {
+		a := Artist{
+			Name: it.Name,
+			URL:  it.ExternalURLs.Spotify,
+		}
+		if len(it.Images) > 0 {
+			a.Image = it.Images[0].URL
+		}
+		artists = append(artists, a)
+	}
+	return artists, nil
+}
+
+// Playlist is the trimmed, frontend-facing shape for a Spotify playlist.
+type Playlist struct {
+	Name  string `json:"name"`
+	Image string `json:"image,omitempty"`
+	URL   string `json:"url,omitempty"`
+}
+
+// PlaylistByID fetches a single playlist by its Spotify ID. Used for the
+// hand-curated "playlists I love" list — the reliable way to control exactly
+// which playlists appear (the public users/{id}/playlists endpoint is
+// restricted for this app, and the per-playlist `public` flag is unreliable).
+func (c *Client) PlaylistByID(ctx context.Context, id string) (*Playlist, error) {
+	url := fmt.Sprintf(
+		"https://api.spotify.com/v1/playlists/%s?fields=name,external_urls,images", id)
+	resp, err := c.get(ctx, url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("spotify playlist %s: status %d", id, resp.StatusCode)
+	}
+
+	var raw struct {
+		Name         string `json:"name"`
+		ExternalURLs struct {
+			Spotify string `json:"spotify"`
+		} `json:"external_urls"`
+		Images []struct {
+			URL string `json:"url"`
+		} `json:"images"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return nil, err
+	}
+	p := &Playlist{
+		Name: raw.Name,
+		URL:  raw.ExternalURLs.Spotify,
+	}
+	if len(raw.Images) > 0 {
+		p.Image = raw.Images[0].URL
+	}
+	return p, nil
+}
+

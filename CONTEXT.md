@@ -19,10 +19,30 @@ and body. Persisted on submission. A Contact Message is *inbound only* — the
 site stores it; any reply happens outside the system (e.g. Alif's email).
 
 ### Spotify Proxy
-A backend-served, cached view of Alif's public Spotify listening data
-(now-playing / top tracks) for the handle `alifyandraid`. It is a **proxy**: the
-site never exposes Spotify credentials to the browser; the backend holds the
-token, calls Spotify, caches the result, and serves a clean read-only endpoint.
+A backend-served, cached view of Alif's public Spotify listening data for the
+handle `alifyandraid`, exposed as read-only views: **now-playing**,
+**recently-played** (fallback shown when nothing is live, so the view is never
+dead), **top tracks**, **top artists**, and a **hand-curated playlists** list.
+It is a **proxy**: the site never exposes Spotify credentials to the browser;
+the backend holds the token, calls Spotify, caches the result, and serves clean
+read-only endpoints. Setup, scopes, and the (many) Spotify endpoints that are
+dead for this app live in `docs/spotify.md`.
+
+### About Panel
+A self-contained personal-interest section rendered in the about page (e.g.
+**Music**, **Photography**). An About Panel is *not* a Project (it showcases an
+interest, not work) and *not* a Tool (it is read-only, not an app the visitor
+operates). Panels are independent of each other and of résumé Static Content;
+the about page composes whichever panels exist. Some panels are backed by live
+data (Music), others by curated assets (Photography).
+
+### Music
+The About Panel showing Alif's listening life, powered by the [Spotify Proxy]
+(now-playing with a LIVE badge, top tracks, top artists, curated playlists).
+"Music" is the panel; Spotify is its current data source.
+
+### Photography
+The About Panel showcasing a curated set of Alif's photos (image + caption).
 
 ### Static Content
 Résumé-derived material that changes rarely and lives in the frontend codebase,

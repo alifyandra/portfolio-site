@@ -22,3 +22,6 @@ backend/ent/*
 !backend/ent/generate.go
 !backend/ent/schema/
 !backend/ent/schema/**
+
+# original full-res photo sources (resized copies live in frontend/public/photos)
+pics/
