@@ -17,6 +17,13 @@ Budget is ~**$20 AUD/month**. Realistic Sydney (ap-southeast-2) monthly costs:
 The ALB alone (~$25 AUD) exceeds the budget before compute or a database. A
 managed Fargate + RDS + ALB stack is unattainable under $20 AUD.
 
+**Cost correction (post-build):** the EC2 option's true run-rate is higher than
+the ~$18 AUD first estimated — `t4g.small` on-demand is ~$24 AUD/mo (not $12 USD),
+and AWS now bills every public IPv4 (~$5.50 AUD/mo). With EBS + domain the real
+total is **~$38–40 AUD/mo**. To hit the ~$20 budget: use **`t4g.micro`** (1 GB;
+saves ~$12) and/or a 1-year Savings Plan (~30–40% off compute) → ~$22–25 AUD/mo.
+SES adds ~$0 at portfolio volume ($0.16 per 1,000 emails).
+
 ## Decision
 
 Run a **single EC2 `t4g.small`** with **docker compose** (Go + Postgres + Redis

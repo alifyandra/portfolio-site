@@ -60,6 +60,22 @@ Required GitHub repo **secrets**:
 Postgres runs on-box. Schedule `pg_dump` to S3 (cron or a tiny systemd timer)
 — a single-box deploy has no managed backups (the tradeoff in ADR 6).
 
+## Email notifications (AWS SES)
+
+The contact form stores every message in Postgres and (when configured) enqueues
+a `contact.notify` SQS job; the **worker** sends the email via SES. To enable:
+
+1. In SES (ap-southeast-2), **verify a sender** — a domain (preferred) or a
+   single email address. Set `SES_SENDER_EMAIL` to it in `/opt/portfolio/.env`.
+2. New SES accounts are **sandboxed** (can only send to verified addresses).
+   Either verify `CONTACT_NOTIFY_TO`, or request **production access** to send
+   freely. Default recipient is `alifyandra@gmail.com` (`CONTACT_NOTIFY_TO`).
+3. Give the EC2 instance profile `ses:SendEmail` permission.
+4. Create the SQS queue and set `SQS_QUEUE_URL` in `.env`. The `worker` service
+   is already in `docker-compose.prod.yml`, so `docker compose -f
+   docker-compose.prod.yml up -d` runs it. Until SES + the queue are configured,
+   messages are still stored — the app just logs and skips the email.
+
 ## Migrations
 
 `AUTO_MIGRATE=true` runs Ent's schema auto-migration on startup — fine for a
