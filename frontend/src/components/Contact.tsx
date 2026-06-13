@@ -6,7 +6,7 @@ import { useCreateContactMessage } from '@/lib/api/generated';
 import { profile } from '@/lib/resume';
 
 export function Contact() {
-  const [form, setForm] = useState({ name: '', email: '', body: '' });
+  const [form, setForm] = useState({ name: '', email: '', body: '', website: '' });
   const [done, setDone] = useState(false);
   const mutation = useCreateContactMessage();
 
@@ -27,6 +27,17 @@ export function Contact() {
         </p>
       ) : (
         <form onSubmit={onSubmit} className="flex max-w-xl flex-col gap-4">
+          {/* Honeypot: hidden from users; bots that fill it get silently dropped. */}
+          <input
+            type="text"
+            name="website"
+            tabIndex={-1}
+            autoComplete="off"
+            aria-hidden="true"
+            className="hidden"
+            value={form.website}
+            onChange={(e) => setForm({ ...form, website: e.target.value })}
+          />
           <input
             required
             placeholder="Your name"

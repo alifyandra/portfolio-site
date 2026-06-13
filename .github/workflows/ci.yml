@@ -37,6 +37,9 @@ jobs:
       - name: Test
         run: go test ./...
 
+      - name: Vulnerability scan (govulncheck)
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
       - name: Check OpenAPI spec is up to date
         run: |
           go run ./cmd/spec > /tmp/openapi.yaml
