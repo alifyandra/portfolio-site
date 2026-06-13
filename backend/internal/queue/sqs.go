@@ -40,6 +40,9 @@ func New(ctx context.Context, cfg *appconfig.Config) (*Client, error) {
 	return &Client{sqs: client, queueURL: cfg.SQSQueueURL}, nil
 }
 
+// Configured reports whether a queue URL is set (false => queueing disabled).
+func (c *Client) Configured() bool { return c.queueURL != "" }
+
 // Enqueue places a job on the queue.
 func (c *Client) Enqueue(ctx context.Context, job Job) error {
 	body, err := json.Marshal(job)

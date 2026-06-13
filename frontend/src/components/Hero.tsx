@@ -22,12 +22,12 @@ export function Hero() {
           Get in touch
         </a>
         <a
-          href={profile.resumeUrl}
+          href={profile.linkedin}
           target="_blank"
           rel="noopener noreferrer"
-          className="rounded-md border border-sky px-5 py-2.5 font-semibold text-sky no-underline transition hover:bg-sky/10"
+          className="rounded-md px-5 py-2.5 font-semibold text-slate-300 no-underline transition hover:text-white"
         >
-          Résumé (PDF)
+          LinkedIn
         </a>
         <a
           href={profile.github}

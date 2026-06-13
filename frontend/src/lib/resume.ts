@@ -12,7 +12,6 @@ export const profile = {
   spotify: 'https://open.spotify.com/user/alifyandraid',
   summary:
     'Full-stack engineer with ~3 years building scalable web platforms with Python (Django/DRF), Next.js (TypeScript) and PostgreSQL. I modernise legacy systems into production SaaS, improving performance up to 80% through DB optimisation and async processing (Celery/Redis). Strong in secure API design, containerised deployments, and cloud infrastructure.',
-  resumeUrl: '/Ahmad_Alifyandra-SED-RESUME.pdf',
 };
 
 export const skills: { group: string; items: string[] }[] = [

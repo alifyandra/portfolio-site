@@ -37,6 +37,12 @@ type Config struct {
 	SpotifyClientID     string `env:"SPOTIFY_CLIENT_ID"`
 	SpotifyClientSecret string `env:"SPOTIFY_CLIENT_SECRET"`
 	SpotifyRefreshToken string `env:"SPOTIFY_REFRESH_TOKEN"`
+
+	// Email (AWS SES). The sender must be a verified SES identity. ContactNotifyTo
+	// is where contact-form notifications are delivered. Both blank => email
+	// disabled (the contact form still stores messages).
+	SESSenderEmail string `env:"SES_SENDER_EMAIL"`
+	ContactNotifyTo string `env:"CONTACT_NOTIFY_TO" envDefault:"alifyandra@gmail.com"`
 }
 
 // Load reads and validates configuration from the environment.
