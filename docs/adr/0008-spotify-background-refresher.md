@@ -24,13 +24,13 @@ That bounded Spotify calls to ~one per TTL window, but left two problems:
 
 Split fetching from serving. A **`SpotifyRefresher`** goroutine, started in
 `cmd/api` with the server's shutdown context, polls Spotify on a fixed cadence
-(now-playing every 30s; the hourly-changing sets every hour) and writes the
+(now-playing every 30s; the rarely-changing sets once a day) and writes the
 results to Redis. The HTTP handlers become **read-only**: they only ever read
 the cache and never call Spotify. A cold cache (just after boot) returns an
 empty-but-valid body; the panel fills within a tick.
 
 Cache TTLs are set longer than their refresh intervals (now-playing 90s,
-others 2h) so a transient Spotify hiccup on one refresh doesn't blank the panel —
+others 48h) so a transient Spotify hiccup on one refresh doesn't blank the panel —
 the last good value survives until the next success. The TTL is a safety net for
 a dead refresher, not the freshness mechanism.
 

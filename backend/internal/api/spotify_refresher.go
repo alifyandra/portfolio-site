@@ -13,12 +13,12 @@ import (
 )
 
 // Refresh cadence. now-playing changes constantly so it polls often; top
-// tracks/artists/playlists barely move, so they refresh hourly. Both are well
+// tracks/artists/playlists barely move, so they refresh daily. Both are well
 // inside their cache TTLs (see spotify.go), so a missed tick never blanks the
 // panel — stale data just lingers until the next successful refresh.
 const (
 	nowPlayingRefreshInterval = 30 * time.Second
-	slowRefreshInterval       = time.Hour
+	slowRefreshInterval       = 24 * time.Hour
 )
 
 // SpotifyRefresher periodically pulls Alif's Spotify data into Redis on the

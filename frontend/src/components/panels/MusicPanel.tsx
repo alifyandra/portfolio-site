@@ -172,12 +172,12 @@ export function MusicPanel() {
                   <img
                     src={a.image}
                     alt={a.name}
-                    className="mx-auto mb-2 aspect-square w-full rounded-full object-cover ring-1 ring-white/10 shadow-md shadow-black/40 transition duration-300 group-hover:scale-105 group-hover:ring-2 group-hover:ring-mint"
+                    className="mx-auto mb-2 aspect-square w-full rounded-full object-cover transition group-hover:opacity-90"
                   />
                 ) : (
-                  <div className="mx-auto mb-2 aspect-square w-full rounded-full bg-sky/10 ring-1 ring-white/10 shadow-md shadow-black/40" />
+                  <div className="mx-auto mb-2 aspect-square w-full rounded-full bg-sky/10" />
                 )}
-                <div className="truncate text-xs text-slate-300 transition group-hover:text-mint">
+                <div className="truncate text-sm font-medium text-slate-200 transition group-hover:text-mint">
                   {a.name}
                 </div>
               </a>

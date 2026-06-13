@@ -20,13 +20,13 @@ const (
 	nowPlayingCacheKey = "spotify:now-playing"
 	nowPlayingCacheTTL = 90 * time.Second // refreshed every 30s
 	topTracksCacheKey  = "spotify:top-tracks"
-	topTracksCacheTTL  = 2 * time.Hour // refreshed hourly
+	topTracksCacheTTL  = 48 * time.Hour // refreshed daily
 	topTracksLimit     = 5
 	topTracksRange     = "short_term" // ~4 weeks, matches "lately"
 	playlistsCacheKey  = "spotify:playlists"
-	playlistsCacheTTL  = 2 * time.Hour // refreshed hourly
+	playlistsCacheTTL  = 48 * time.Hour // refreshed daily
 	topArtistsCacheKey = "spotify:top-artists"
-	topArtistsCacheTTL = 2 * time.Hour // refreshed hourly
+	topArtistsCacheTTL = 48 * time.Hour // refreshed daily
 	topArtistsLimit    = 12
 )
 
