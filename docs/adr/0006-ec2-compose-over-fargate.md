@@ -26,9 +26,11 @@ SES adds ~$0 at portfolio volume ($0.16 per 1,000 emails).
 
 ## Decision
 
-Run a **single EC2 `t4g.small`** with **docker compose** (Go + Postgres + Redis
-+ Caddy for automatic HTTPS), self-hosting the database and cache on the box.
-Build images in GitHub Actions → push to **GHCR** → pull on the host.
+Run a **single EC2 `t4g.micro` (1 GB) + a 1–2 GB swap file** with **docker
+compose** (Go + Postgres + Redis + Caddy for automatic HTTPS), self-hosting the
+database and cache on the box. Build images in GitHub Actions → push to **GHCR**
+→ pull on the host. Idle memory is ~300–450 MB, and images are built in CI (not
+on the box), so 1 GB + swap is comfortable for portfolio traffic.
 
 This also satisfies the "same setup local and prod" goal: the *same*
 `docker-compose.yml` (with a prod override) runs in both places.
@@ -45,3 +47,10 @@ This also satisfies the "same setup local and prod" goal: the *same*
 ## Alternatives rejected
 
 - ECS Fargate / App Runner: both blow the $20 AUD budget, chiefly via ALB + RDS.
+- **AWS Lightsail** (~$11 AUD/mo all-in, incl. static IP + transfer; cheaper and
+  simpler): rejected because it undercuts the *reason we chose AWS* (cert ROI —
+  ADR 0002). Lightsail abstracts away VPC/IAM/EBS (the SAA exam's core), has **no
+  IAM instance roles** (forcing static access keys for S3/SES/SQS), and isn't
+  SSM-managed (our CI deploy uses SSM Run Command). EC2 keeps credentials-free
+  instance roles, the SSM deploy path, and a clean lift to Fargate later. Revisit
+  Lightsail only if this stops being a cert-prep vehicle and cost dominates.
