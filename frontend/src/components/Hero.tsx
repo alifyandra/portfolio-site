@@ -10,7 +10,7 @@ export function Hero() {
       <h2 className="text-2xl font-semibold text-sky sm:text-3xl">
         {profile.title}
       </h2>
-      <p className="max-w-2xl leading-relaxed text-slate-300">
+      <p className="max-w-2xl whitespace-pre-line leading-relaxed text-slate-300">
         {profile.summary}
       </p>
       <div className="mt-2 flex flex-wrap gap-3">

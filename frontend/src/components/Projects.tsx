@@ -12,7 +12,7 @@ export function Projects() {
       {isLoading && <p className="text-slate-400">Loading projects…</p>}
       {isError && (
         <p className="text-coral">
-          Couldn&apos;t load projects — is the API running?
+          Couldn&apos;t load projects. Is the API running?
         </p>
       )}
       <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">

@@ -6,9 +6,9 @@ import { Providers } from './providers';
 const inter = Inter({ subsets: ['latin'], variable: '--font-sans' });
 
 export const metadata: Metadata = {
-  title: 'Ahmad Alifyandra — Software Engineer',
+  title: 'Ahmad Alifyandra · Full-Stack Engineer',
   description:
-    'Full-stack software engineer in Melbourne. Go, Next.js, PostgreSQL, AWS.',
+    'Full-stack engineer in Melbourne. Python, Django, Next.js, Redis, AWS.',
 };
 
 export default function RootLayout({

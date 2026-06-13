@@ -72,7 +72,7 @@ export function MusicPanel() {
   const playlists = playlistData?.playlists ?? [];
 
   return (
-    <Section id="music" title="Music">
+    <Section id="music" title="What I'm Listening To">
       {/* Header reflects live state so it's clear when it's real-time. */}
       <p className="mb-3 flex items-center gap-2 font-mono text-sm">
         {live ? (
@@ -115,7 +115,7 @@ export function MusicPanel() {
           className="flex items-center gap-3 rounded-lg border border-slate-700 bg-white/[0.02] px-4 py-3 text-sm text-slate-400 no-underline transition hover:border-mint"
         >
           <span className="h-2 w-2 shrink-0 rounded-full bg-slate-600" />
-          Nothing playing right now — see my Spotify
+          Nothing playing right now. See my Spotify
         </a>
       )}
 
@@ -189,7 +189,7 @@ export function MusicPanel() {
       {/* Favourite playlists */}
       {playlists.length > 0 && (
         <div className="mt-8">
-          <h3 className="mb-3 font-mono text-sm text-mint">Playlists I love</h3>
+          <h3 className="mb-3 font-mono text-sm text-mint">My favourite playlists</h3>
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
             {playlists.map((p) => (
               <a

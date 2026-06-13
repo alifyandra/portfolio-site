@@ -3,7 +3,7 @@ import { photos } from '@/lib/photos';
 
 export function PhotographyPanel() {
   return (
-    <Section id="photography" title="Photography">
+    <Section id="photography" title="Photos I've Taken">
       {photos.length === 0 ? (
         <p className="text-sm text-slate-500">
           A few shots, coming soon.
