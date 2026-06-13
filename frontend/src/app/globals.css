@@ -16,18 +16,36 @@
   --font-sans: var(--font-inter), system-ui, sans-serif;
 }
 
-body {
-  @apply bg-deepsea text-slate-100 antialiased;
-}
+/* These base customizations MUST live in @layer base. Tailwind v4 emits real
+ * CSS @layers (theme, base, components, utilities) and unlayered rules beat
+ * every layer — so an unlayered `a { color: sky }` would override text-mint /
+ * text-deepsea / text-coral on every link. Inside @layer base, utilities win,
+ * matching the v3 behaviour. */
+@layer base {
+  body {
+    @apply bg-deepsea text-slate-100 antialiased;
+  }
 
-a {
-  @apply text-sky;
-}
-a:hover {
-  @apply underline;
-}
+  a {
+    @apply text-sky;
+  }
+  a:hover {
+    @apply underline;
+  }
 
-::selection {
-  background: var(--color-citron);
-  color: var(--color-deepsea);
+  /* v4 Preflight changed two defaults; restore the v3 look used by this site. */
+  /* Placeholders defaulted to currentColor/50% (here white-ish) — was gray-400. */
+  ::placeholder {
+    @apply text-slate-400;
+  }
+  /* <button> now defaults to cursor: default — keep the pointer affordance. */
+  button:not(:disabled),
+  [role='button']:not(:disabled) {
+    cursor: pointer;
+  }
+
+  ::selection {
+    background: var(--color-citron);
+    color: var(--color-deepsea);
+  }
 }
