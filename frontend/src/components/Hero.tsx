@@ -5,8 +5,7 @@ export function Hero() {
     <header className="mx-auto flex w-full max-w-4xl flex-col gap-6 px-6 pb-8 pt-24">
       <p className="font-mono text-sm text-mint">Hi, my name is</p>
       <h1 className="text-5xl font-extrabold tracking-tight text-white sm:text-6xl">
-        {profile.name}{' '}
-        <span className="text-slate-400">({profile.nickname})</span>
+        {profile.nickname}
       </h1>
       <h2 className="text-2xl font-semibold text-sky sm:text-3xl">
         {profile.title}
