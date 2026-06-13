@@ -18,8 +18,9 @@ static page.
 | Prod | EC2 `t4g.micro` + docker compose + Caddy | Budget ([ADR 6](docs/adr/0006-ec2-compose-over-fargate.md)) |
 
 See [`CONTEXT.md`](CONTEXT.md) for domain language, [`docs/adr/`](docs/adr) for
-decisions, and [`docs/design/color-palette.md`](docs/design/color-palette.md)
-for the palette.
+decisions, [`docs/design/color-palette.md`](docs/design/color-palette.md) for the
+palette, [`docs/deployment.md`](docs/deployment.md) for deploy steps, and
+[`docs/security.md`](docs/security.md) for the security runbook.
 
 ## Repo layout
 
