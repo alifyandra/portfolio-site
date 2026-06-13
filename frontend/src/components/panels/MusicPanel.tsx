@@ -14,6 +14,22 @@ function artistLine(artists?: string[] | null) {
   return artists?.length ? artists.join(", ") : "";
 }
 
+// Slight per-cover tilt so the playlist grid feels hand-pinned rather than rigid.
+// Keyed by index (not Math.random) so server and client render the same angle —
+// random in render would cause an SSR hydration mismatch. Full literal class
+// strings so Tailwind's JIT keeps them; hover straightens the cover.
+const TILT_CLASSES = [
+  "-rotate-3",
+  "rotate-2",
+  "-rotate-2",
+  "rotate-3",
+  "-rotate-1",
+  "rotate-1",
+];
+function coverTilt(i: number) {
+  return TILT_CLASSES[i % TILT_CLASSES.length];
+}
+
 function TrackArt({ track, size }: { track: TrackBody; size: number }) {
   if (!track.album_image) {
     return (
@@ -194,7 +210,7 @@ export function MusicPanel() {
             My favourite playlists
           </h3>
           <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 sm:gap-5">
-            {playlists.map((p) => (
+            {playlists.map((p, i) => (
               <a
                 key={p.url ?? p.name}
                 href={p.url}
@@ -208,7 +224,7 @@ export function MusicPanel() {
                   <img
                     src={p.image}
                     alt={p.name}
-                    className="mb-2 aspect-square w-full rounded object-cover transition group-hover:opacity-90"
+                    className={`mb-2 aspect-square w-full rounded object-cover transition duration-300 group-hover:rotate-0 group-hover:opacity-90 ${coverTilt(i)}`}
                   />
                 ) : (
                   <div className="mb-2 aspect-square w-full rounded bg-sky/10" />
