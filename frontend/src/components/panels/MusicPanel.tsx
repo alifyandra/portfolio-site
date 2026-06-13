@@ -1,6 +1,7 @@
 "use client";
 
 import { Section } from "@/components/Section";
+import { profile } from "@/lib/resume";
 import {
   useGetSpotifyNowPlaying,
   useGetSpotifyPlaylists,
@@ -111,7 +112,7 @@ export function MusicPanel() {
         </TrackLink>
       ) : (
         <a
-          href="https://open.spotify.com/user/alifyandraid"
+          href={profile.spotify}
           target="_blank"
           rel="noopener noreferrer"
           className="flex items-center gap-3 rounded-lg border border-slate-700 bg-white/[0.02] px-4 py-3 text-sm text-slate-400 no-underline transition hover:border-mint"
@@ -157,7 +158,7 @@ export function MusicPanel() {
           <h3 className="mb-3 font-mono text-sm text-mint">
             Artists on heavy rotation
           </h3>
-          <div className="grid grid-cols-3 gap-3 sm:grid-cols-4">
+          <div className="grid grid-cols-3 gap-5 sm:grid-cols-4 sm:gap-6">
             {topArtists.map((a) => (
               <a
                 key={a.url ?? a.name}
@@ -192,7 +193,7 @@ export function MusicPanel() {
           <h3 className="mb-3 font-mono text-sm text-mint">
             My favourite playlists
           </h3>
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+          <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 sm:gap-5">
             {playlists.map((p) => (
               <a
                 key={p.url ?? p.name}
@@ -220,6 +221,15 @@ export function MusicPanel() {
           </div>
         </div>
       )}
+
+      <a
+        href={profile.spotify}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="mt-8 inline-flex items-center gap-2 rounded-md border border-mint/40 px-4 py-2 text-sm font-medium text-mint no-underline transition hover:bg-mint/10"
+      >
+        Open my Spotify profile ↗
+      </a>
     </Section>
   );
 }
