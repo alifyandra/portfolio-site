@@ -3,8 +3,11 @@ package bootstrap
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 
+	"entgo.io/ent/dialect"
+	entsql "entgo.io/ent/dialect/sql"
 	_ "github.com/jackc/pgx/v5/stdlib" // register the "pgx" database/sql driver
 
 	"github.com/alifyandra/portfolio-site/backend/ent"
@@ -28,10 +31,14 @@ func (a *App) Close() error { return a.close() }
 // New constructs all dependencies. In development it also runs Ent's
 // auto-migration so the schema is created on first run.
 func New(ctx context.Context, cfg *config.Config) (*App, error) {
-	entClient, err := ent.Open("pgx", cfg.DatabaseURL)
+	// Open the *sql.DB with the pgx stdlib driver (registered as "pgx"), then
+	// hand it to Ent with the Postgres dialect. ent.Open won't accept "pgx"
+	// directly — it only maps the dialect names to database/sql driver names.
+	db, err := sql.Open("pgx", cfg.DatabaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("opening database: %w", err)
 	}
+	entClient := ent.NewClient(ent.Driver(entsql.OpenDB(dialect.Postgres, db)))
 
 	if cfg.AutoMigrate {
 		if err := entClient.Schema.Create(ctx); err != nil {
