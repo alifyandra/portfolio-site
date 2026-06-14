@@ -78,14 +78,22 @@ make fe-dev    # Next.js at :3000 (separate terminal)
     (refresh token in `.env`). Setup + dead endpoints: `docs/spotify.md`.
   - **Photography** — static masonry of curated photos (`frontend/public/photos/`
     + `src/lib/photos.ts`); originals in gitignored `pics/`.
-- ✅ **Deploy IaC plan decided** ([ADR 9](docs/adr/0009-terraform-provisioning.md)):
-  Terraform in `deploy/terraform/` (flat root), S3 remote state, hybrid CI apply
-  (bootstrap local, then plan-on-PR + gated apply-on-merge), fully-codified host
-  (`user_data` + SSM Parameter Store for `.env`), minimal custom VPC (2 subnets /
-  2 AZs, EIP), DNS + SES as code (Cloudflare provider), on-box Postgres
-  reaffirmed, nightly `pg_dump` to S3. **Next step: scaffold the Terraform.**
-- ⏳ **Not yet done:** actual EC2 deploy (needs AWS secrets — see deployment.md),
-  Cloudflare proxy/security setup (security.md), and **auth** (deferred for v1).
-  Auth is the unlock for: dynamic DB-backed Photography + curated playlists +
-  admin page.
-- The `Deploy Backend` workflow's final SSM step fails until AWS secrets are set — expected.
+- ✅ **Deploy IaC built + applied** ([ADR 9](docs/adr/0009-terraform-provisioning.md),
+  `deploy/terraform/`): Terraform flat root, S3 remote state (native locking,
+  needs TF >= 1.10), hybrid apply (local bootstrap, then plan-on-PR + gated
+  apply-on-merge), fully-codified host (`user_data` + SSM Parameter Store for
+  `.env`), minimal custom VPC (2 subnets/2 AZs, EIP), DNS + SES via Cloudflare
+  provider, on-box Postgres, `pg_dump`-to-S3 backups bucket.
+- ✅ **Backend is LIVE** at `https://api.aliflabs.dev` (EC2 `t4g.micro` arm64,
+  EIP `13.236.29.201`, account `363045847720`, ap-southeast-2). Verified
+  `/healthz`, `/api/projects`, `/docs`, valid TLS. SSM Session Manager works.
+  Bootstrap gotchas hit + fixed (see git): instance policy needs
+  `ssm:GetParametersByPath` on the **path** ARN not just `/*`; AMI must be the
+  **standard** AL2023 (`al2023-ami-2023.*`), not `minimal` (no SSM agent); the
+  GHCR image must be **arm64/multi-arch** (Dockerfile cross-compiles, CI builds
+  `linux/amd64,linux/arm64`). `prod` Postgres is empty (not seeded).
+- ⏳ **Not yet done:** push this branch to `main` (will trigger gated CI apply —
+  create the `production` GitHub Environment w/ required reviewer first); Vercel
+  `NEXT_PUBLIC_API_URL=https://api.aliflabs.dev`; SES production-access request;
+  Cloudflare proxy/security setup (security.md); **auth** (deferred for v1, the
+  unlock for dynamic Photography + curated playlists + admin page).
