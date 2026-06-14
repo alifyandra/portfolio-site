@@ -56,16 +56,19 @@ user, locally) plus a scoped Cloudflare API token.
    export TF_VAR_cloudflare_zone_id=...   # zone id for aliflabs.dev
    ```
 
-3. **Init and first apply** (local, seeds everything):
+3. **Init and seed the secret slots first.** Apply just the SecureString
+   parameters so they exist before the box that reads them:
 
    ```bash
    terraform init
-   terraform apply
+   terraform apply -target=aws_ssm_parameter.secret
    ```
 
-4. **Push the secret values** to Parameter Store. The SecureString slots exist
-   with a `CHANGE_ME` placeholder; overwrite each with the real value (these
-   never enter Terraform state):
+4. **Push the real secret values** to Parameter Store, overwriting the
+   `CHANGE_ME` placeholders (these never enter Terraform state). Do this *before*
+   the full apply: the instance rebuilds `.env` from SSM on first boot, and
+   Postgres initialises its volume with whatever `POSTGRES_PASSWORD` it sees
+   then, so the real value has to be in place first.
 
    ```bash
    for k in POSTGRES_PASSWORD DATABASE_URL SPOTIFY_CLIENT_ID \
@@ -79,15 +82,14 @@ user, locally) plus a scoped Cloudflare API token.
    `DATABASE_URL` for the on-box Postgres looks like
    `postgres://portfolio:<POSTGRES_PASSWORD>@postgres:5432/portfolio?sslmode=disable`.
 
-   Then reboot or re-pull so the box rebuilds `.env`:
+5. **Full apply.** Creates the rest, including the host, which now boots with the
+   real secrets:
 
    ```bash
-   aws ssm send-command --instance-ids "$(terraform output -raw instance_id)" \
-     --document-name AWS-RunShellScript --region ap-southeast-2 \
-     --parameters 'commands=["cd /opt/portfolio","docker compose -f docker-compose.prod.yml up -d --force-recreate"]'
+   terraform apply
    ```
 
-5. **Set the repo secrets** GitHub Actions needs (one-off; not done in Terraform
+6. **Set the repo secrets** GitHub Actions needs (one-off; not done in Terraform
    on purpose, see ADR 9). Read the ARNs straight from outputs:
 
    ```bash
@@ -100,16 +102,16 @@ user, locally) plus a scoped Cloudflare API token.
    gh secret set CLOUDFLARE_ZONE_ID    --body "$TF_VAR_cloudflare_zone_id"
    ```
 
-6. **Gate the apply workflow.** In repo Settings > Environments, create
+7. **Gate the apply workflow.** In repo Settings > Environments, create
    `production` and add yourself as a required reviewer so merge-to-main applies
    pause for approval.
 
-7. **Request SES production access.** New accounts are sandboxed (can only send
+8. **Request SES production access.** New accounts are sandboxed (can only send
    to verified addresses). In the SES console (ap-southeast-2), submit the
    production-access request. DKIM verification of `aliflabs.dev` happens
    automatically once the CNAMEs propagate.
 
-8. **Make the GHCR package pullable.** The box pulls
+9. **Make the GHCR package pullable.** The box pulls
    `ghcr.io/alifyandra/portfolio-backend` with no AWS credentials. Set the
    package to public, or add a GHCR login step to `user_data`.
 
@@ -121,5 +123,11 @@ gated `apply` on merge to main. App image deploys stay on the separate
 
 - Config in `ssm.tf` (`env_config`) is Terraform-managed; edit, apply, then
   re-pull on the box. Secret slots (`env_secrets`) are ignored after creation.
-- `terraform fmt` and `terraform validate` were not run during scaffolding (no
-  local CLI). Run them before the first apply; CI also runs `fmt -check`.
+- After changing a secret value, push it with `aws ssm put-parameter
+  --overwrite` and force a re-pull on the box:
+  ```bash
+  aws ssm send-command --instance-ids "$(terraform output -raw instance_id)" \
+    --document-name AWS-RunShellScript --region ap-southeast-2 \
+    --parameters 'commands=["cd /opt/portfolio","docker compose -f docker-compose.prod.yml up -d --force-recreate"]'
+  ```
+- CI runs `terraform fmt -check` and `validate` on every PR.

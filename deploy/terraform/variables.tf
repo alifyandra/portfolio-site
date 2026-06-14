@@ -75,10 +75,10 @@ variable "ses_sender_email" {
   default     = "noreply@aliflabs.dev"
 }
 
-variable "budget_amount_aud" {
-  description = "Monthly cost budget in AUD."
+variable "budget_amount_usd" {
+  description = "Monthly cost budget in USD (AWS Budgets only supports USD for this account). ~17 USD tracks the intended ~25 AUD ceiling."
   type        = string
-  default     = "25"
+  default     = "17"
 }
 
 variable "backup_retention_days" {

@@ -49,6 +49,12 @@ resource "aws_instance" "app" {
     encrypted   = true
   }
 
+  # The box rebuilds .env from these on first boot, so they must exist first.
+  # Real secret values are seeded before this instance is created (see the
+  # two-phase bootstrap in README.md) so Postgres initialises with the real
+  # password rather than the placeholder.
+  depends_on = [aws_ssm_parameter.config, aws_ssm_parameter.secret]
+
   tags = { Name = "${var.project}-app" }
 }
 

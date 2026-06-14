@@ -31,5 +31,6 @@ pics/
 *.tfstate
 *.tfstate.*
 *.tfvars
+*.tfplan
 !*.tfvars.example
 # .terraform.lock.hcl stays committed (pins provider versions)

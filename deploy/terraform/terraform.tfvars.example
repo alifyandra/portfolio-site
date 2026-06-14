@@ -9,4 +9,4 @@ cloudflare_zone_id = "your-cloudflare-zone-id"
 # api_subdomain    = "api"
 # alert_email      = "alifyandra@gmail.com"
 # ses_sender_email = "noreply@aliflabs.dev"
-# budget_amount_aud = "25"
+# budget_amount_usd = "17"   # AWS Budgets only supports USD; ~17 USD ≈ 25 AUD

@@ -41,7 +41,8 @@ push secrets to SSM, set repo secrets, gate the apply environment), see
 - Cloudflare DNS: `api.aliflabs.dev` A record (grey-cloud so Caddy can run ACME)
   and SES DKIM CNAMEs
 - SES domain identity + Easy DKIM for `aliflabs.dev`
-- Cost budget (~25 AUD/month) with email alerts
+- Cost budget (~17 USD/month, roughly 25 AUD; AWS Budgets only supports USD)
+  with email alerts
 
 ### CI/CD
 
