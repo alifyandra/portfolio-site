@@ -144,7 +144,18 @@ Cloudflare is gated by two flags (both default `false`, so the committed config
 is the pre-proxy posture). Caddy switches from Let's Encrypt/ACME to a Cloudflare
 **origin certificate** so it never needs to reach the public internet once the
 security group is locked. SSM Session Manager is always available, so a wrong SG
-never locks you out. Do the steps in order:
+never locks you out. Do the steps in order.
+
+**How the flags get applied.** Stage each flag through the **`Terraform` workflow's
+`workflow_dispatch`** (Actions tab → Run workflow), setting the `proxy_api` /
+`lock_origin_to_cloudflare` inputs. The dispatch runs gated `plan-dispatch` →
+`apply` jobs: the first approval lets the plan run (read it), the second applies
+it. Inputs are passed as `-var` only when set, so they stage a flag *without*
+committing it first — no local creds, no per-step PR. (`*.tfvars` is gitignored,
+so committed config lives in the variable defaults.) Once both flags are live and
+verified, **reconcile**: a small PR flipping the two `default = false` to `true`
+in `variables.tf` so committed config matches reality (its CI plan should show no
+changes). Roll back by dispatching with the input(s) set to `false`.
 
 1. **Generate a Cloudflare Origin Certificate** (dashboard → SSL/TLS → Origin
    Server → Create Certificate). Cover `aliflabs.dev` and `*.aliflabs.dev`. Save
@@ -163,15 +174,22 @@ never locks you out. Do the steps in order:
 3. **Set SSL/TLS mode to Full (strict)** in the Cloudflare dashboard (never
    Flexible). The origin cert satisfies strict validation.
 
-4. **Proxy the api + apply.** Set `proxy_api = true` (tfvars or
-   `-var proxy_api=true`) and apply. This orange-clouds the api record and
-   replaces the box so Caddy boots serving the origin cert. The EIP stays, so
-   DNS does not move. Verify `https://api.<domain>/healthz` through Cloudflare
-   before continuing.
+4. **Proxy the api + apply.** Dispatch the `Terraform` workflow with
+   `proxy_api = true` (leave `lock_origin_to_cloudflare = unchanged`). This
+   orange-clouds the api record and **replaces the box** so Caddy boots serving
+   the origin cert. The EIP stays, so DNS does not move. Verify
+   `https://api.<domain>/healthz` through Cloudflare before continuing.
 
-5. **Lock the origin + apply.** Set `lock_origin_to_cloudflare = true` and apply.
-   The web SG now accepts 80/443 only from `cloudflare_ip_ranges`; the box is
-   unreachable except via Cloudflare (manage it via SSM). This is an in-place SG
-   change, not a box replacement.
+5. **Lock the origin + apply.** Dispatch again with `proxy_api = true` and
+   `lock_origin_to_cloudflare = true` (both, since the committed defaults are
+   still `false` until you reconcile). The web SG now accepts 80/443 only from
+   `cloudflare_ip_ranges`; the box is unreachable except via Cloudflare (manage
+   it via SSM). This is an in-place SG change, not a box replacement.
 
-To roll back, flip the flags off and apply (lock first, then proxy).
+6. **Reconcile.** Open a PR flipping both `default = false` to `true` in
+   `variables.tf`. Its CI plan should report no changes (live already matches),
+   confirming committed config now equals reality. After this, a plain dispatch
+   keeps the flags on.
+
+To roll back, dispatch with the relevant input(s) set to `false` (lock first,
+then proxy), then revert the reconcile defaults.
