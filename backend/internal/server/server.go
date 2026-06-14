@@ -1,7 +1,9 @@
 package server
 
 import (
+	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -89,10 +91,13 @@ func New(deps *Deps) (http.Handler, huma.API) {
 // Cloudflare. CF sets CF-Connecting-IP to the originating client's address; it
 // is only trustworthy once the origin security group is locked to Cloudflare's
 // ranges (otherwise a client could spoof the header to evade the limit). When
-// the header is absent (e.g. a direct request) it falls back to the connecting
-// IP, so the limiter degrades safely.
+// the header is absent or not a valid IP (e.g. a direct request) it falls back
+// to the connecting IP, so the limiter degrades safely.
 func keyByCloudflareIP(r *http.Request) (string, error) {
-	if ip := r.Header.Get("CF-Connecting-IP"); ip != "" {
+	// Validate the header is a single IP before trusting it as the limiter key.
+	// A malformed or oversized value (spoofed, or just junk) would otherwise
+	// bloat the limiter's key map; fall back to the connecting IP when invalid.
+	if ip := strings.TrimSpace(r.Header.Get("CF-Connecting-IP")); net.ParseIP(ip) != nil {
 		return ip, nil
 	}
 	return httprate.KeyByIP(r)

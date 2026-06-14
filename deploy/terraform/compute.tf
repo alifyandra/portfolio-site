@@ -83,8 +83,14 @@ resource "aws_instance" "app" {
   # The box rebuilds .env from these on first boot, so they must exist first.
   # Real secret values are seeded before this instance is created (see the
   # two-phase bootstrap in README.md) so Postgres initialises with the real
-  # password rather than the placeholder.
-  depends_on = [aws_ssm_parameter.config, aws_ssm_parameter.secret]
+  # password rather than the placeholder. origin_tls is included so a fresh
+  # proxy_api=true apply can't create the box before cert_fetch's /tls/* params
+  # exist (user_data would otherwise fail fetching the Cloudflare origin cert).
+  depends_on = [
+    aws_ssm_parameter.config,
+    aws_ssm_parameter.secret,
+    aws_ssm_parameter.origin_tls,
+  ]
 
   tags = { Name = "${var.project}-app" }
 }
