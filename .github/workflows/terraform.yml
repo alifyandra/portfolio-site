@@ -3,18 +3,41 @@ name: Terraform
 # Plan on PRs that touch the IaC (read-only role). Apply is manual via
 # workflow_dispatch (write role) so infra never mutates unattended on merge.
 #
-# The apply job runs in the `production` GitHub Environment, which now carries a
-# required-reviewer rule (free on public repos): a dispatched apply pauses for an
-# explicit approval before running. While the repo was private on the Free plan
-# that rule was unavailable and the manual trigger alone was the gate. The
-# Environment also pins the apply role's OIDC trust (sub = ...:environment:production).
+# The dispatch path is a two-stage, gated plan -> apply so a human reads the plan
+# for *this* run before it applies:
+#   1. plan-dispatch  - computes the plan and prints it.
+#   2. apply          - applies it after a second approval.
+# Both stages run in the `production` GitHub Environment, which carries a
+# required-reviewer rule (free on public repos): each pauses for an explicit
+# approval. The first approval just lets the plan run; the second is the real
+# "yes, apply what I just read" gate. The Environment also pins the apply role's
+# OIDC trust (sub = ...:environment:production), which is why both dispatch jobs
+# use that role rather than the PR-only plan role.
+#
+# Cutover flags (proxy_api, lock_origin_to_cloudflare) can be staged via the
+# workflow_dispatch inputs below WITHOUT first committing them: an input is only
+# passed as -var when set to true/false, so a plain dispatch (both "unchanged")
+# tracks the committed config and never reverts a live flag by accident. Once a
+# cutover is verified, reconcile by setting the variable defaults to match (the
+# `*.tfvars` files are gitignored, so defaults are the committed source of truth).
 
 on:
   pull_request:
     paths:
       - "deploy/terraform/**"
       - ".github/workflows/terraform.yml"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      proxy_api:
+        description: "Override proxy_api (orange-cloud api.<domain>). 'unchanged' keeps committed config."
+        type: choice
+        options: ["unchanged", "true", "false"]
+        default: "unchanged"
+      lock_origin_to_cloudflare:
+        description: "Override lock_origin_to_cloudflare (web SG -> CF IP ranges only). 'unchanged' keeps committed config."
+        type: choice
+        options: ["unchanged", "true", "false"]
+        default: "unchanged"
 
 concurrency:
   group: terraform
@@ -63,12 +86,10 @@ jobs:
       - name: Plan
         run: terraform plan -input=false -no-color
 
-  apply:
+  # Stage 1 of the dispatch path: compute and print the plan (gated).
+  plan-dispatch:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    # Gated by this Environment's required-reviewer rule plus the manual trigger
-    # (see header). The Environment also pins the apply role's OIDC sub
-    # (...:environment:production).
     environment: production
     permissions:
       id-token: write # OIDC
@@ -85,8 +106,62 @@ jobs:
         with:
           terraform_version: "1.10.5"
 
+      - name: Build flag overrides
+        id: vars
+        run: |
+          args=""
+          if [ "${{ inputs.proxy_api }}" != "unchanged" ]; then
+            args="$args -var=proxy_api=${{ inputs.proxy_api }}"
+          fi
+          if [ "${{ inputs.lock_origin_to_cloudflare }}" != "unchanged" ]; then
+            args="$args -var=lock_origin_to_cloudflare=${{ inputs.lock_origin_to_cloudflare }}"
+          fi
+          echo "args=$args" >> "$GITHUB_OUTPUT"
+          echo "Flag overrides: ${args:-(none, tracking committed config)}"
+
+      - name: Init
+        run: terraform init -input=false
+
+      - name: Plan
+        run: terraform plan -input=false -no-color ${{ steps.vars.outputs.args }}
+
+  # Stage 2 of the dispatch path: apply after a second approval. Re-plans with
+  # the same overrides and applies; serialized by the `terraform` concurrency
+  # group so nothing changes state between the printed plan and this apply.
+  apply:
+    if: github.event_name == 'workflow_dispatch'
+    needs: plan-dispatch
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      id-token: write # OIDC
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.TF_APPLY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.10.5"
+
+      - name: Build flag overrides
+        id: vars
+        run: |
+          args=""
+          if [ "${{ inputs.proxy_api }}" != "unchanged" ]; then
+            args="$args -var=proxy_api=${{ inputs.proxy_api }}"
+          fi
+          if [ "${{ inputs.lock_origin_to_cloudflare }}" != "unchanged" ]; then
+            args="$args -var=lock_origin_to_cloudflare=${{ inputs.lock_origin_to_cloudflare }}"
+          fi
+          echo "args=$args" >> "$GITHUB_OUTPUT"
+
       - name: Init
         run: terraform init -input=false
 
       - name: Apply
-        run: terraform apply -input=false -auto-approve
+        run: terraform apply -input=false -auto-approve ${{ steps.vars.outputs.args }}
