@@ -18,8 +18,8 @@ docker compose (see [ADR 6](adr/0006-ec2-compose-over-fargate.md)).
 Host provisioning is now fully codified via Terraform in `deploy/terraform/`
 (flat root, one environment, S3 remote state with native locking; see
 [ADR 9](adr/0009-terraform-provisioning.md)). The first apply runs locally to
-seed the stack; thereafter infra changes flow through CI (plan on PRs, gated
-apply on merge to main).
+seed the stack; thereafter infra changes flow through CI (plan on PRs, manual
+`apply` via workflow_dispatch).
 
 For the one-time bootstrap order (create the state bucket, init, first apply,
 push secrets to SSM, set repo secrets, gate the apply environment), see
@@ -58,8 +58,9 @@ changes:
 `.github/workflows/terraform.yml`:
 
 - `plan` on pull requests (read-only `TF_PLAN_ROLE_ARN` via OIDC)
-- `apply` on merge to main, gated behind the `production` GitHub Environment
-  (requires a reviewer approval before it runs)
+- `apply` manually via `workflow_dispatch` (write `TF_APPLY_ROLE_ARN`), so infra
+  never mutates unattended. The `production` Environment exists for the apply
+  role's OIDC trust, not for reviewer gating (a paid/public-repo feature).
 
 Required GitHub repo **secrets** (set once from `terraform output` after the
 first apply; see the Terraform README):

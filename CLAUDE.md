@@ -84,8 +84,8 @@ make fe-dev    # Next.js at :3000 (separate terminal)
   apply-on-merge), fully-codified host (`user_data` + SSM Parameter Store for
   `.env`), minimal custom VPC (2 subnets/2 AZs, EIP), DNS + SES via Cloudflare
   provider, on-box Postgres, `pg_dump`-to-S3 backups bucket.
-- ✅ **Backend is LIVE** at `https://api.aliflabs.dev` (EC2 `t4g.micro` arm64,
-  EIP `13.236.29.201`, account `363045847720`, ap-southeast-2). Verified
+- ✅ **Backend is LIVE** at `https://api.aliflabs.dev` (EC2 `t4g.micro` arm64 on
+  a stable EIP, ap-southeast-2; IDs/IPs via `terraform output`). Verified
   `/healthz`, `/api/projects`, `/docs`, valid TLS. SSM Session Manager works.
   Bootstrap gotchas hit + fixed (see git): instance policy needs
   `ssm:GetParametersByPath` on the **path** ARN not just `/*`; AMI must be the

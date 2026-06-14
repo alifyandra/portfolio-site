@@ -1,18 +1,19 @@
 name: Terraform
 
-# Plan on PRs that touch the IaC (read-only role). Apply on merge to main behind
-# a gated GitHub Environment (write role + required reviewer). See ADR 9.
+# Plan on PRs that touch the IaC (read-only role). Apply is manual via
+# workflow_dispatch (write role) so infra never mutates unattended on merge.
+#
+# ADR 9 envisioned a required-reviewer gate on the `production` Environment, but
+# that protection is unavailable for a private repo on the Free plan. The manual
+# trigger is the gate instead; the `production` Environment is still referenced
+# so the apply role's OIDC trust (sub = ...:environment:production) holds.
 
 on:
   pull_request:
     paths:
       - "deploy/terraform/**"
       - ".github/workflows/terraform.yml"
-  push:
-    branches: [main]
-    paths:
-      - "deploy/terraform/**"
-      - ".github/workflows/terraform.yml"
+  workflow_dispatch: {}
 
 concurrency:
   group: terraform
@@ -62,9 +63,10 @@ jobs:
         run: terraform plan -input=false -no-color
 
   apply:
-    if: github.event_name == 'push'
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    # Required-reviewer gate is configured on this Environment in repo settings.
+    # Manual trigger is the gate (see header). The Environment is kept so the
+    # apply role's OIDC sub remains ...:environment:production.
     environment: production
     permissions:
       id-token: write # OIDC

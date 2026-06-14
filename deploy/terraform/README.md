@@ -102,9 +102,11 @@ user, locally) plus a scoped Cloudflare API token.
    gh secret set CLOUDFLARE_ZONE_ID    --body "$TF_VAR_cloudflare_zone_id"
    ```
 
-7. **Gate the apply workflow.** In repo Settings > Environments, create
-   `production` and add yourself as a required reviewer so merge-to-main applies
-   pause for approval.
+7. **Create the `production` Environment.** In repo Settings > Environments,
+   create `production` (no protection rules needed). It exists only so the apply
+   role's OIDC trust (sub `...:environment:production`) matches. The apply
+   workflow is manual (`workflow_dispatch`), so it never runs unattended.
+   Required-reviewer protection is a paid/public-repo feature and is not used.
 
 8. **Request SES production access.** New accounts are sandboxed (can only send
    to verified addresses). In the SES console (ap-southeast-2), submit the
