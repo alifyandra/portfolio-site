@@ -25,6 +25,14 @@ type Config struct {
 	// CORS: comma-separated allowed origins for the frontend.
 	CORSAllowedOrigins []string `env:"CORS_ALLOWED_ORIGINS" envSeparator:"," envDefault:"http://localhost:3000"`
 
+	// TrustCloudflareIP makes the rate limiter key off CF-Connecting-IP (the real
+	// visitor IP Cloudflare sets) instead of the connecting IP. Only safe once the
+	// origin security group is locked to Cloudflare's ranges, otherwise the header
+	// is spoofable by a direct request. Flipped on at the proxy cutover, in lock
+	// step with lock_origin_to_cloudflare (see docs/security.md). Default false
+	// keeps it inert until the cutover.
+	TrustCloudflareIP bool `env:"TRUST_CLOUDFLARE_IP" envDefault:"false"`
+
 	// AWS / S3 / SQS. Endpoint overrides let us point at LocalStack/MinIO/ElasticMQ locally.
 	AWSRegion    string `env:"AWS_REGION" envDefault:"ap-southeast-2"`
 	S3Bucket     string `env:"S3_BUCKET" envDefault:"portfolio-assets"`

@@ -46,12 +46,14 @@ func New(deps *Deps) (http.Handler, huma.API) {
 	r.Use(middleware.Recoverer)
 
 	// App-layer rate limit per client IP (a speed bump; Cloudflare is the real
-	// DDoS layer in prod). In production the limiter keys off CF-Connecting-IP
-	// (the real visitor IP Cloudflare sets), trustworthy once the origin SG is
-	// locked to Cloudflare's ranges; elsewhere it keys off the connecting IP.
-	// RealIP above still normalizes RemoteAddr for logging.
+	// DDoS layer in prod). When TrustCloudflareIP is set (only at the proxy
+	// cutover, once the origin SG is locked to Cloudflare's ranges) the limiter
+	// keys off CF-Connecting-IP, the real visitor IP Cloudflare sets; otherwise it
+	// keys off the connecting IP. Gating on an explicit flag rather than
+	// IsProduction keeps the spoofable-header path inert until the origin lock is
+	// live. RealIP above still normalizes RemoteAddr for logging.
 	rateLimitKey := httprate.KeyByIP
-	if deps.Config.IsProduction() {
+	if deps.Config.TrustCloudflareIP {
 		rateLimitKey = keyByCloudflareIP
 	}
 	r.Use(httprate.Limit(100, time.Minute, httprate.WithKeyFuncs(rateLimitKey)))

@@ -86,12 +86,14 @@ Visitor ──▶ Cloudflare edge (DDoS, WAF, cache, challenges) ──▶ EC2 o
 
 ### Code tweak when Cloudflare is live
 
-Behind Cloudflare the real client IP arrives in `CF-Connecting-IP`. **Done:** in
-production the rate limiter keys off that header (`keyByCloudflareIP` in
-`internal/server/server.go`), falling back to the connecting IP when the header
-is absent, so limits apply per real visitor rather than per Cloudflare edge node.
-The header is only trustworthy once the SG is locked to CF (otherwise it can be
-spoofed by a direct request) — which is why the origin lock matters.
+Behind Cloudflare the real client IP arrives in `CF-Connecting-IP`. **Done:** when
+`TRUST_CLOUDFLARE_IP=true` the rate limiter keys off that header
+(`keyByCloudflareIP` in `backend/internal/server/server.go`), falling back to the
+connecting IP when the header is absent or not a valid IP, so limits apply per
+real visitor rather than per Cloudflare edge node. The header is only trustworthy
+once the SG is locked to CF (otherwise it can be spoofed by a direct request), so
+the flag rides on `lock_origin_to_cloudflare` — Terraform sets `TRUST_CLOUDFLARE_IP`
+to match, keeping the spoofable-header path inert until the origin lock is live.
 
 ## Contact form: CAPTCHA with Turnstile
 

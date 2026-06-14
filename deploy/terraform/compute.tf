@@ -24,6 +24,11 @@ locals {
     "mkdir -p ${local.project_dir}/deploy/tls && chmod 700 ${local.project_dir}/deploy/tls",
     "aws ssm get-parameter --name ${local.ssm_tls_path}/origin_cert --with-decryption --region ${var.aws_region} --query Parameter.Value --output text > ${local.project_dir}/deploy/tls/origin.crt",
     "aws ssm get-parameter --name ${local.ssm_tls_path}/origin_key --with-decryption --region ${var.aws_region} --query Parameter.Value --output text > ${local.project_dir}/deploy/tls/origin.key",
+    # Fail fast if the params still hold the SSM placeholder (CHANGE_ME) rather
+    # than real PEM material — otherwise Caddy would start with a bad cert and
+    # take the proxied API down. Seed the certs before cutover (see README.md).
+    "grep -q 'BEGIN CERTIFICATE' ${local.project_dir}/deploy/tls/origin.crt || { echo 'FATAL: ${local.ssm_tls_path}/origin_cert is missing/placeholder; seed the Cloudflare origin cert before the proxy cutover' >&2; exit 1; }",
+    "grep -q 'PRIVATE KEY' ${local.project_dir}/deploy/tls/origin.key || { echo 'FATAL: ${local.ssm_tls_path}/origin_key is missing/placeholder; seed the Cloudflare origin key before the proxy cutover' >&2; exit 1; }",
     "chmod 600 ${local.project_dir}/deploy/tls/origin.crt ${local.project_dir}/deploy/tls/origin.key",
   ]) : ""
 }

@@ -26,6 +26,10 @@ locals {
     SES_SENDER_EMAIL     = var.ses_sender_email
     CONTACT_NOTIFY_TO    = var.alert_email
     DOMAIN               = local.api_fqdn
+    # The limiter may only trust CF-Connecting-IP once the origin SG is locked to
+    # Cloudflare's ranges (otherwise the header is spoofable by a direct request),
+    # so this rides on lock_origin_to_cloudflare, not proxy_api. Default false.
+    TRUST_CLOUDFLARE_IP = var.lock_origin_to_cloudflare ? "true" : "false"
   }
 
   # Secret slots. Seeded with a placeholder, then pushed out-of-band.
