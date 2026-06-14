@@ -103,10 +103,13 @@ user, locally) plus a scoped Cloudflare API token.
    ```
 
 7. **Create the `production` Environment.** In repo Settings > Environments,
-   create `production` (no protection rules needed). It exists only so the apply
-   role's OIDC trust (sub `...:environment:production`) matches. The apply
-   workflow is manual (`workflow_dispatch`), so it never runs unattended.
-   Required-reviewer protection is a paid/public-repo feature and is not used.
+   create `production`. It pins the apply role's OIDC trust
+   (sub `...:environment:production`) and, now that the repo is public, carries a
+   **required-reviewer** rule: a dispatched `terraform apply` pauses for an
+   explicit approval before it runs (self-review is allowed for the solo
+   maintainer). The apply workflow is also manual (`workflow_dispatch`), so infra
+   never mutates unattended. See [ADR 9](../../docs/adr/0009-terraform-provisioning.md)
+   and the `terraform.yml` header.
 
 8. **Request SES production access.** New accounts are sandboxed (can only send
    to verified addresses). In the SES console (ap-southeast-2), submit the
