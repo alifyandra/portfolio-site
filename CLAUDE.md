@@ -67,7 +67,7 @@ make fe-dev    # Next.js at :3000 (separate terminal)
 - ✅ SES email-on-contact via the SQS worker seam; LinkedIn link; security hardening
   (honeypot, rate limit, headers, govulncheck, Dependabot).
 - ✅ Résumé PDF removed and **scrubbed from git history**; `*.pdf` gitignored.
-- ✅ **Pivot decided:** site becomes **aliflab** — a tools platform; portfolio
+- ✅ **Pivot decided:** site becomes **aliflabs** — a tools platform; portfolio
   becomes the about area. Path-based routing (not subdomains). Domain
   **`aliflabs.dev`** bought (Cloudflare, DNSSEC on). Platform shell deferred
   until Tool #1; see memory `aliflab-rebrand`. Hero now reads just "Alif".
@@ -78,6 +78,12 @@ make fe-dev    # Next.js at :3000 (separate terminal)
     (refresh token in `.env`). Setup + dead endpoints: `docs/spotify.md`.
   - **Photography** — static masonry of curated photos (`frontend/public/photos/`
     + `src/lib/photos.ts`); originals in gitignored `pics/`.
+- ✅ **Deploy IaC plan decided** ([ADR 9](docs/adr/0009-terraform-provisioning.md)):
+  Terraform in `deploy/terraform/` (flat root), S3 remote state, hybrid CI apply
+  (bootstrap local, then plan-on-PR + gated apply-on-merge), fully-codified host
+  (`user_data` + SSM Parameter Store for `.env`), minimal custom VPC (2 subnets /
+  2 AZs, EIP), DNS + SES as code (Cloudflare provider), on-box Postgres
+  reaffirmed, nightly `pg_dump` to S3. **Next step: scaffold the Terraform.**
 - ⏳ **Not yet done:** actual EC2 deploy (needs AWS secrets — see deployment.md),
   Cloudflare proxy/security setup (security.md), and **auth** (deferred for v1).
   Auth is the unlock for: dynamic DB-backed Photography + curated playlists +
