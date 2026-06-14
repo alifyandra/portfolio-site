@@ -140,8 +140,10 @@ gated `apply` on merge to main. App image deploys stay on the separate
 ## Cloudflare proxy cutover (origin lock)
 
 Putting `api.<domain>` behind the Cloudflare proxy and locking the origin to
-Cloudflare is gated by two flags (both default `false`, so the committed config
-is the pre-proxy posture). Caddy switches from Let's Encrypt/ACME to a Cloudflare
+Cloudflare is gated by two flags (`proxy_api`, `lock_origin_to_cloudflare`). The
+cutover below is complete, so their defaults are now `true`; set a flag to `false`
+(via the dispatch input or by editing the default) to roll back. Caddy switches
+from Let's Encrypt/ACME to a Cloudflare
 **origin certificate** so it never needs to reach the public internet once the
 security group is locked. SSM Session Manager is always available, so a wrong SG
 never locks you out. Do the steps in order.

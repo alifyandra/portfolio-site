@@ -99,11 +99,11 @@ variable "backup_retention_days" {
 variable "proxy_api" {
   description = "Route api.<domain> through the Cloudflare proxy (orange cloud). Requires the CF origin cert installed in Caddy + SSL/TLS mode Full (strict) first."
   type        = bool
-  default     = false
+  default     = true # cutover complete; set false to roll back the proxy
 }
 
 variable "lock_origin_to_cloudflare" {
   description = "Restrict the web SG (80/443) to Cloudflare's published IP ranges instead of the public internet. Turn on only after proxy_api is live and verified."
   type        = bool
-  default     = false
+  default     = true # cutover complete; set false to roll back the origin lock
 }
