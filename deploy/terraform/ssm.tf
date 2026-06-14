@@ -18,7 +18,7 @@ locals {
     POSTGRES_USER        = "portfolio"
     POSTGRES_DB          = "portfolio"
     REDIS_URL            = "redis://redis:6379/0"
-    CORS_ALLOWED_ORIGINS = "https://${var.domain}"
+    CORS_ALLOWED_ORIGINS = "https://${var.domain},https://www.${var.domain}"
     AWS_REGION           = var.aws_region
     S3_BUCKET            = aws_s3_bucket.assets.bucket
     S3_FORCE_PATH_STYLE  = "false"
