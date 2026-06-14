@@ -80,20 +80,25 @@ make fe-dev    # Next.js at :3000 (separate terminal)
     + `src/lib/photos.ts`); originals in gitignored `pics/`.
 - ✅ **Deploy IaC built + applied** ([ADR 9](docs/adr/0009-terraform-provisioning.md),
   `deploy/terraform/`): Terraform flat root, S3 remote state (native locking,
-  needs TF >= 1.10), hybrid apply (local bootstrap, then plan-on-PR + gated
-  apply-on-merge), fully-codified host (`user_data` + SSM Parameter Store for
+  needs TF >= 1.10), fully-codified host (`user_data` + SSM Parameter Store for
   `.env`), minimal custom VPC (2 subnets/2 AZs, EIP), DNS + SES via Cloudflare
-  provider, on-box Postgres, `pg_dump`-to-S3 backups bucket.
+  provider, on-box Postgres, `pg_dump`-to-S3 backups bucket. CI: `plan` on PRs,
+  **manual `apply` via workflow_dispatch** (free-plan private repos can't gate
+  Environments; manual trigger is the gate). Bootstrap is two-phase (seed SSM
+  secrets before the host boots) — see `deploy/terraform/README.md`.
 - ✅ **Backend is LIVE** at `https://api.aliflabs.dev` (EC2 `t4g.micro` arm64 on
   a stable EIP, ap-southeast-2; IDs/IPs via `terraform output`). Verified
-  `/healthz`, `/api/projects`, `/docs`, valid TLS. SSM Session Manager works.
-  Bootstrap gotchas hit + fixed (see git): instance policy needs
+  `/healthz`, `/api/projects`, `/docs`, valid TLS. SSM works; the **full CI/CD
+  seam is validated** (deploy-backend.yml builds multi-arch + redeploys over
+  SSM, green). Bootstrap gotchas hit + fixed (see git): instance policy needs
   `ssm:GetParametersByPath` on the **path** ARN not just `/*`; AMI must be the
   **standard** AL2023 (`al2023-ami-2023.*`), not `minimal` (no SSM agent); the
   GHCR image must be **arm64/multi-arch** (Dockerfile cross-compiles, CI builds
   `linux/amd64,linux/arm64`). `prod` Postgres is empty (not seeded).
-- ⏳ **Not yet done:** push this branch to `main` (will trigger gated CI apply —
-  create the `production` GitHub Environment w/ required reviewer first); Vercel
-  `NEXT_PUBLIC_API_URL=https://api.aliflabs.dev`; SES production-access request;
-  Cloudflare proxy/security setup (security.md); **auth** (deferred for v1, the
-  unlock for dynamic Photography + curated playlists + admin page).
+- ✅ **Repo is now PUBLIC** (`alifyandra/portfolio-site`); git history was
+  rewritten to gmail authorship before going public; GHCR package public.
+- ⏳ **Not yet done:** Vercel `NEXT_PUBLIC_API_URL=https://api.aliflabs.dev`;
+  SES production-access request (DKIM already verifying); rotate the Cloudflare
+  API token (was exposed in a chat transcript); optional `prod` seed; Cloudflare
+  proxy/security setup (security.md); **auth** (deferred for v1, the unlock for
+  dynamic Photography + curated playlists + admin page).
