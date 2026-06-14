@@ -94,14 +94,19 @@ Terraform. DKIM CNAMEs are published automatically via the Cloudflare provider
 and verify once DNS propagates. The SQS queue and the instance profile
 `ses:SendEmail` permission are also created by Terraform.
 
-To finish enabling email:
+Sender and recipient are **Terraform-managed** (`ses_sender_email` →
+`noreply@aliflabs.dev`, `alert_email` → `alifyandra@gmail.com`), written to SSM
+as `SES_SENDER_EMAIL` / `CONTACT_NOTIFY_TO`. Change them in `variables.tf` (or
+tfvars) and `terraform apply` — not by hand: these are `String` params, so a
+manual `aws ssm put-parameter` is clobbered on the next apply.
 
-1. Set `SES_SENDER_EMAIL` (e.g. `noreply@aliflabs.dev`) in Parameter Store
-   (`/portfolio/env/SES_SENDER_EMAIL`), then re-pull on the box.
-2. New SES accounts are **sandboxed** (can only send to verified addresses).
-   Either verify `CONTACT_NOTIFY_TO`, or request **production access** via the
-   SES console (ap-southeast-2) to send freely. Default recipient is
-   `alifyandra@gmail.com` (`CONTACT_NOTIFY_TO`).
+The one manual step is leaving the SES **sandbox** (new accounts can only send
+to verified addresses):
+
+- To send to arbitrary recipients, request **production access** in the SES
+  console (**ap-southeast-2** — the region the stack runs in).
+- Until that's granted, verifying the recipient is enough: `alifyandra@gmail.com`
+  is verified, so contact-form mail already delivers from the sandbox.
 
 Until SES and the queue are configured, messages are still stored and the app
 logs and skips the email.

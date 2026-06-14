@@ -53,7 +53,7 @@ aws ssm get-parameters-by-path \
     echo "$${key}=$${value}" >> "$${ENV_FILE}"
   done
 echo "IMAGE_TAG=latest" >> "$${ENV_FILE}"
-
+${cert_fetch}
 # --- Start the stack ---
 cd "$${PROJECT_DIR}"
 docker compose -f docker-compose.prod.yml pull

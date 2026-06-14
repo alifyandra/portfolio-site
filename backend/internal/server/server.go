@@ -1,7 +1,9 @@
 package server
 
 import (
+	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -44,8 +46,17 @@ func New(deps *Deps) (http.Handler, huma.API) {
 	r.Use(middleware.Recoverer)
 
 	// App-layer rate limit per client IP (a speed bump; Cloudflare is the real
-	// DDoS layer in prod). RealIP above sets the IP from X-Forwarded-For.
-	r.Use(httprate.LimitByIP(100, time.Minute))
+	// DDoS layer in prod). When TrustCloudflareIP is set (only at the proxy
+	// cutover, once the origin SG is locked to Cloudflare's ranges) the limiter
+	// keys off CF-Connecting-IP, the real visitor IP Cloudflare sets; otherwise it
+	// keys off the connecting IP. Gating on an explicit flag rather than
+	// IsProduction keeps the spoofable-header path inert until the origin lock is
+	// live. RealIP above still normalizes RemoteAddr for logging.
+	rateLimitKey := httprate.KeyByIP
+	if deps.Config.TrustCloudflareIP {
+		rateLimitKey = keyByCloudflareIP
+	}
+	r.Use(httprate.Limit(100, time.Minute, httprate.WithKeyFuncs(rateLimitKey)))
 
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   deps.Config.CORSAllowedOrigins,
@@ -76,4 +87,20 @@ func New(deps *Deps) (http.Handler, huma.API) {
 	h.Register(humaAPI)
 
 	return r, humaAPI
+}
+
+// keyByCloudflareIP rate-limits per real visitor IP when running behind
+// Cloudflare. CF sets CF-Connecting-IP to the originating client's address; it
+// is only trustworthy once the origin security group is locked to Cloudflare's
+// ranges (otherwise a client could spoof the header to evade the limit). When
+// the header is absent or not a valid IP (e.g. a direct request) it falls back
+// to the connecting IP, so the limiter degrades safely.
+func keyByCloudflareIP(r *http.Request) (string, error) {
+	// Validate the header is a single IP before trusting it as the limiter key.
+	// A malformed or oversized value (spoofed, or just junk) would otherwise
+	// bloat the limiter's key map; fall back to the connecting IP when invalid.
+	if ip := strings.TrimSpace(r.Header.Get("CF-Connecting-IP")); net.ParseIP(ip) != nil {
+		return ip, nil
+	}
+	return httprate.KeyByIP(r)
 }

@@ -26,6 +26,10 @@ locals {
     SES_SENDER_EMAIL     = var.ses_sender_email
     CONTACT_NOTIFY_TO    = var.alert_email
     DOMAIN               = local.api_fqdn
+    # The limiter may only trust CF-Connecting-IP once the origin SG is locked to
+    # Cloudflare's ranges (otherwise the header is spoofable by a direct request),
+    # so this rides on lock_origin_to_cloudflare, not proxy_api. Default false.
+    TRUST_CLOUDFLARE_IP = var.lock_origin_to_cloudflare ? "true" : "false"
   }
 
   # Secret slots. Seeded with a placeholder, then pushed out-of-band.
@@ -52,6 +56,24 @@ resource "aws_ssm_parameter" "secret" {
   name  = "${local.ssm_env_path}/${each.value}"
   type  = "SecureString"
   value = "CHANGE_ME" # placeholder; real value pushed via aws ssm put-parameter
+
+  lifecycle {
+    ignore_changes = [value]
+  }
+}
+
+# Cloudflare origin certificate + private key for Caddy, used only when the api
+# is proxied (var.proxy_api). Multi-line PEM, so kept off the flat /env path and
+# fetched to files by user_data. Seeded with a placeholder; the real PEMs are
+# pushed once out-of-band (see deploy/terraform/README.md), e.g.:
+#   aws ssm put-parameter --name /portfolio/tls/origin_cert --type SecureString \
+#     --overwrite --value file://origin.pem
+resource "aws_ssm_parameter" "origin_tls" {
+  for_each = toset(["origin_cert", "origin_key"])
+
+  name  = "${local.ssm_tls_path}/${each.value}"
+  type  = "SecureString"
+  value = "CHANGE_ME" # placeholder; real PEM pushed via aws ssm put-parameter
 
   lifecycle {
     ignore_changes = [value]

@@ -83,8 +83,9 @@ make fe-dev    # Next.js at :3000 (separate terminal)
   needs TF >= 1.10), fully-codified host (`user_data` + SSM Parameter Store for
   `.env`), minimal custom VPC (2 subnets/2 AZs, EIP), DNS + SES via Cloudflare
   provider, on-box Postgres, `pg_dump`-to-S3 backups bucket. CI: `plan` on PRs,
-  **manual `apply` via workflow_dispatch** (free-plan private repos can't gate
-  Environments; manual trigger is the gate). Bootstrap is two-phase (seed SSM
+  **manual `apply` via workflow_dispatch** gated by a required-reviewer rule on
+  the `production` Environment (free on public repos; self-review allowed for the
+  solo maintainer). Bootstrap is two-phase (seed SSM
   secrets before the host boots) — see `deploy/terraform/README.md`.
 - ✅ **Backend is LIVE** at `https://api.aliflabs.dev` (EC2 `t4g.micro` arm64 on
   a stable EIP, ap-southeast-2; IDs/IPs via `terraform output`). Verified

@@ -3,10 +3,11 @@ name: Terraform
 # Plan on PRs that touch the IaC (read-only role). Apply is manual via
 # workflow_dispatch (write role) so infra never mutates unattended on merge.
 #
-# ADR 9 envisioned a required-reviewer gate on the `production` Environment, but
-# that protection is unavailable for a private repo on the Free plan. The manual
-# trigger is the gate instead; the `production` Environment is still referenced
-# so the apply role's OIDC trust (sub = ...:environment:production) holds.
+# The apply job runs in the `production` GitHub Environment, which now carries a
+# required-reviewer rule (free on public repos): a dispatched apply pauses for an
+# explicit approval before running. While the repo was private on the Free plan
+# that rule was unavailable and the manual trigger alone was the gate. The
+# Environment also pins the apply role's OIDC trust (sub = ...:environment:production).
 
 on:
   pull_request:
@@ -65,8 +66,9 @@ jobs:
   apply:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    # Manual trigger is the gate (see header). The Environment is kept so the
-    # apply role's OIDC sub remains ...:environment:production.
+    # Gated by this Environment's required-reviewer rule plus the manual trigger
+    # (see header). The Environment also pins the apply role's OIDC sub
+    # (...:environment:production).
     environment: production
     permissions:
       id-token: write # OIDC

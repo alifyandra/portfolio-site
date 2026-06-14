@@ -49,6 +49,13 @@ Visitor ──▶ Cloudflare edge (DDoS, WAF, cache, challenges) ──▶ EC2 o
             (domain DNS points here)                          (SG: Cloudflare IPs only)
 ```
 
+> **Now codified.** The proxy + origin lock are Terraform flags (`proxy_api`,
+> `lock_origin_to_cloudflare`, both default off) with Caddy switched to a
+> Cloudflare origin certificate so it no longer needs ACME once locked. See the
+> step-by-step cutover in
+> [`deploy/terraform/README.md`](../deploy/terraform/README.md#cloudflare-proxy-cutover-origin-lock).
+> The manual narrative below explains the *why*.
+
 ### Setup order (do the SG lock LAST so you don't lock yourself out)
 
 1. **Deploy + verify the origin first.** Bring up the backend on EC2 with the
@@ -79,9 +86,14 @@ Visitor ──▶ Cloudflare edge (DDoS, WAF, cache, challenges) ──▶ EC2 o
 
 ### Code tweak when Cloudflare is live
 
-Behind Cloudflare the real client IP arrives in `CF-Connecting-IP`. Update the
-rate limiter to key off that header (trustworthy once the SG is locked to CF), so
-limits apply per real visitor rather than per Cloudflare edge node.
+Behind Cloudflare the real client IP arrives in `CF-Connecting-IP`. **Done:** when
+`TRUST_CLOUDFLARE_IP=true` the rate limiter keys off that header
+(`keyByCloudflareIP` in `backend/internal/server/server.go`), falling back to the
+connecting IP when the header is absent or not a valid IP, so limits apply per
+real visitor rather than per Cloudflare edge node. The header is only trustworthy
+once the SG is locked to CF (otherwise it can be spoofed by a direct request), so
+the flag rides on `lock_origin_to_cloudflare` — Terraform sets `TRUST_CLOUDFLARE_IP`
+to match, keeping the spoofable-header path inert until the origin lock is live.
 
 ## Contact form: CAPTCHA with Turnstile
 

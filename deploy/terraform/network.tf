@@ -44,18 +44,28 @@ resource "aws_route_table_association" "public" {
   route_table_id = aws_route_table.public.id
 }
 
+# Cloudflare's published edge IP ranges. Used to lock the origin so the box is
+# only reachable through Cloudflare once the api record is proxied (orange cloud)
+# and TLS is served via the CF origin cert. Kept current by the provider.
+data "cloudflare_ip_ranges" "cloudflare" {}
+
 resource "aws_security_group" "web" {
   name        = "${var.project}-web"
   description = "HTTP/HTTPS in, all out. SSH is via SSM Session Manager only."
   vpc_id      = aws_vpc.main.id
 
+  # When lock_origin_to_cloudflare is true, 80/443 accept traffic only from
+  # Cloudflare's ranges (the box is unreachable except via the CF proxy);
+  # otherwise they are open to the internet (the pre-proxy default). Flip the
+  # flag on only AFTER the proxy + origin cert are verified, or you cut off
+  # direct access (and Caddy's ACME) to a box you can still reach via SSM.
   ingress {
     description      = "HTTP (ACME + redirect)"
     from_port        = 80
     to_port          = 80
     protocol         = "tcp"
-    cidr_blocks      = ["0.0.0.0/0"]
-    ipv6_cidr_blocks = ["::/0"]
+    cidr_blocks      = var.lock_origin_to_cloudflare ? data.cloudflare_ip_ranges.cloudflare.ipv4_cidr_blocks : ["0.0.0.0/0"]
+    ipv6_cidr_blocks = var.lock_origin_to_cloudflare ? data.cloudflare_ip_ranges.cloudflare.ipv6_cidr_blocks : ["::/0"]
   }
 
   ingress {
@@ -63,8 +73,8 @@ resource "aws_security_group" "web" {
     from_port        = 443
     to_port          = 443
     protocol         = "tcp"
-    cidr_blocks      = ["0.0.0.0/0"]
-    ipv6_cidr_blocks = ["::/0"]
+    cidr_blocks      = var.lock_origin_to_cloudflare ? data.cloudflare_ip_ranges.cloudflare.ipv4_cidr_blocks : ["0.0.0.0/0"]
+    ipv6_cidr_blocks = var.lock_origin_to_cloudflare ? data.cloudflare_ip_ranges.cloudflare.ipv6_cidr_blocks : ["::/0"]
   }
 
   egress {

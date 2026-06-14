@@ -86,3 +86,24 @@ variable "backup_retention_days" {
   type        = number
   default     = 30
 }
+
+# --- Cloudflare proxy cutover (two-step; see docs/security.md) -----------------
+# Default off = today's posture (grey-cloud api record, origin open to the
+# internet, Caddy runs ACME). Flip these on deliberately, in order, during the
+# proxy cutover:
+#   1. proxy_api = true               -> orange-cloud the api record
+#   2. lock_origin_to_cloudflare=true -> restrict the SG to Cloudflare's ranges
+# Do step 2 LAST, only after the proxy + origin TLS are verified. SSM Session
+# Manager remains the way onto the box, so a wrong SG never locks you out.
+
+variable "proxy_api" {
+  description = "Route api.<domain> through the Cloudflare proxy (orange cloud). Requires the CF origin cert installed in Caddy + SSL/TLS mode Full (strict) first."
+  type        = bool
+  default     = false
+}
+
+variable "lock_origin_to_cloudflare" {
+  description = "Restrict the web SG (80/443) to Cloudflare's published IP ranges instead of the public internet. Turn on only after proxy_api is live and verified."
+  type        = bool
+  default     = false
+}
