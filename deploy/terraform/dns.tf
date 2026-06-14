@@ -7,9 +7,10 @@ resource "cloudflare_record" "api" {
   name    = var.api_subdomain
   type    = "A"
   content = aws_eip.app.public_ip
-  proxied = false
-  ttl     = 300
-  comment = "Backend API origin (DNS-only; Caddy terminates TLS)."
+  proxied = var.proxy_api
+  # ttl must be 1 (automatic) when proxied; 300 when DNS-only.
+  ttl     = var.proxy_api ? 1 : 300
+  comment = var.proxy_api ? "Backend API origin (proxied; CF origin cert)." : "Backend API origin (DNS-only; Caddy terminates TLS)."
 }
 
 resource "cloudflare_record" "ses_dkim" {
