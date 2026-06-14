@@ -27,11 +27,11 @@ resource "aws_instance" "app" {
   iam_instance_profile   = aws_iam_instance_profile.instance.name
 
   user_data = templatefile("${path.module}/user_data.sh.tftpl", {
-    project_dir    = "/opt/portfolio"
-    aws_region     = var.aws_region
-    ssm_path       = local.ssm_env_path
-    compose_b64    = base64encode(file("${path.module}/../../docker-compose.prod.yml"))
-    caddyfile_b64  = base64encode(file("${path.module}/../../deploy/Caddyfile"))
+    project_dir   = "/opt/portfolio"
+    aws_region    = var.aws_region
+    ssm_path      = local.ssm_env_path
+    compose_b64   = base64encode(file("${path.module}/../../docker-compose.prod.yml"))
+    caddyfile_b64 = base64encode(file("${path.module}/../../deploy/Caddyfile"))
   })
 
   # Re-runs user_data on a fresh instance if the compose/Caddyfile/env path

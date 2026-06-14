@@ -10,8 +10,8 @@
 #                      manages this stack, so it gets broad write access.
 
 resource "aws_iam_openid_connect_provider" "github" {
-  url             = "https://token.actions.githubusercontent.com"
-  client_id_list  = ["sts.amazonaws.com"]
+  url            = "https://token.actions.githubusercontent.com"
+  client_id_list = ["sts.amazonaws.com"]
   thumbprint_list = [
     "6938fd4d98bab03faadb97b34396831e3780aea1",
     "1c58a3a8518e8759bf075b76b750d4f2df264fcd",
@@ -210,9 +210,9 @@ resource "aws_iam_role" "app_deploy" {
 
 data "aws_iam_policy_document" "app_deploy" {
   statement {
-    sid       = "SendDeployCommand"
-    effect    = "Allow"
-    actions   = ["ssm:SendCommand"]
+    sid     = "SendDeployCommand"
+    effect  = "Allow"
+    actions = ["ssm:SendCommand"]
     resources = [
       "arn:aws:ec2:${var.aws_region}:${local.account_id}:instance/${aws_instance.app.id}",
       "arn:aws:ssm:${var.aws_region}::document/AWS-RunShellScript",
@@ -254,8 +254,8 @@ resource "aws_iam_role_policy_attachment" "terraform_plan_readonly" {
 # Both CI roles need to read/write the remote state object.
 data "aws_iam_policy_document" "state_read" {
   statement {
-    effect    = "Allow"
-    actions   = ["s3:ListBucket", "s3:GetObject"]
+    effect  = "Allow"
+    actions = ["s3:ListBucket", "s3:GetObject"]
     resources = [
       "arn:aws:s3:::aliflabs-terraform-state",
       "arn:aws:s3:::aliflabs-terraform-state/${var.project}/*",

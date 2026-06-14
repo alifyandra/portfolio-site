@@ -48,8 +48,8 @@ data "aws_availability_zones" "available" {
 }
 
 locals {
-  api_fqdn    = "${var.api_subdomain}.${var.domain}"
-  account_id  = data.aws_caller_identity.current.account_id
-  oidc_sub    = "repo:${var.github_repo}"
+  api_fqdn     = "${var.api_subdomain}.${var.domain}"
+  account_id   = data.aws_caller_identity.current.account_id
+  oidc_sub     = "repo:${var.github_repo}"
   ssm_env_path = "/${var.project}/env"
 }
