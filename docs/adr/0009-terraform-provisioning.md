@@ -19,9 +19,17 @@ flat root (one box, one environment, no module indirection). Specifics:
 - **State** in a private, versioned, encrypted S3 bucket with native S3 locking
   (no DynamoDB). The bucket is bootstrapped once by hand (chicken-and-egg).
 - **Apply model is hybrid.** The first apply runs locally to seed the resources;
-  thereafter a CI workflow runs `terraform plan` on pull requests and a gated
-  `apply` on merge to main. Infra (Terraform) and app deploys (the existing
-  `deploy-backend.yml` SSM container pull) stay separate seams.
+  thereafter a CI workflow runs `terraform plan` on pull requests and a
+  manually-dispatched `apply` (`workflow_dispatch`), so infra never mutates
+  unattended on merge. The `apply` job runs in a `production` GitHub Environment
+  whose required-reviewer rule is the approval gate. While the repo was private
+  on the Free plan that rule was unavailable, so the manual dispatch alone was
+  the gate; now the repo is public, Environment protection rules are free, so a
+  required reviewer is enabled (self-review allowed, since the maintainer is
+  solo) and a dispatched apply pauses for an explicit approval before running.
+  The Environment also pins the apply role's OIDC trust
+  (sub = `...:environment:production`). Infra (Terraform) and app deploys (the
+  existing `deploy-backend.yml` SSM container pull) stay separate seams.
 - **Host is fully codified.** `user_data` installs Docker and the swap file,
   pulls the app `.env` from SSM Parameter Store, writes it to `/opt/portfolio`,
   and starts compose. The box is reproducible from zero. Secret values are
