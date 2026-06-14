@@ -57,3 +57,21 @@ resource "aws_ssm_parameter" "secret" {
     ignore_changes = [value]
   }
 }
+
+# Cloudflare origin certificate + private key for Caddy, used only when the api
+# is proxied (var.proxy_api). Multi-line PEM, so kept off the flat /env path and
+# fetched to files by user_data. Seeded with a placeholder; the real PEMs are
+# pushed once out-of-band (see deploy/terraform/README.md), e.g.:
+#   aws ssm put-parameter --name /portfolio/tls/origin_cert --type SecureString \
+#     --overwrite --value file://origin.pem
+resource "aws_ssm_parameter" "origin_tls" {
+  for_each = toset(["origin_cert", "origin_key"])
+
+  name  = "${local.ssm_tls_path}/${each.value}"
+  type  = "SecureString"
+  value = "CHANGE_ME" # placeholder; real PEM pushed via aws ssm put-parameter
+
+  lifecycle {
+    ignore_changes = [value]
+  }
+}

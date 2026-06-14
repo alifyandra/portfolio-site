@@ -53,4 +53,8 @@ locals {
   account_id   = data.aws_caller_identity.current.account_id
   oidc_sub     = "repo:${var.github_repo}"
   ssm_env_path = "/${var.project}/env"
+  # Origin TLS material (Cloudflare origin cert + key) lives off the flat env
+  # path because it is multi-line PEM; user_data fetches it to files.
+  ssm_tls_path = "/${var.project}/tls"
+  project_dir  = "/opt/portfolio"
 }

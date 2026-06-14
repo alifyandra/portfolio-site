@@ -103,9 +103,11 @@ data "aws_iam_policy_document" "instance" {
     ]
     # GetParameter[s] authorize against the individual parameter ARNs (.../env/*),
     # but GetParametersByPath authorizes against the path ARN itself (.../env).
+    # The /tls/* params hold the Cloudflare origin cert + key (read by user_data).
     resources = [
       "arn:aws:ssm:${var.aws_region}:${local.account_id}:parameter${local.ssm_env_path}",
       "arn:aws:ssm:${var.aws_region}:${local.account_id}:parameter${local.ssm_env_path}/*",
+      "arn:aws:ssm:${var.aws_region}:${local.account_id}:parameter${local.ssm_tls_path}/*",
     ]
   }
 

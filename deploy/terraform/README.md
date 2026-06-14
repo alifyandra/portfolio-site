@@ -20,8 +20,8 @@ DNS does not move.
 | `compute.tf` | AMI lookup, instance, EIP association, `user_data` |
 | `iam.tf` | GitHub OIDC provider, instance + deploy + plan/apply roles |
 | `storage.tf` | assets bucket, backups bucket (+lifecycle), SQS queue |
-| `ssm.tf` | `/portfolio/env/*` parameters (config + secret slots) |
-| `dns.tf` | Cloudflare `api` A record + SES DKIM CNAMEs |
+| `ssm.tf` | `/portfolio/env/*` parameters (config + secret slots) + `/portfolio/tls/*` origin cert/key |
+| `dns.tf` | Cloudflare `api` A record (proxy via `proxy_api`) + SES DKIM CNAMEs |
 | `ses.tf` | SES domain identity + Easy DKIM |
 | `budget.tf` | ~25 AUD/month budget with email alerts |
 | `variables.tf` / `outputs.tf` | inputs and exported ARNs/IDs |
@@ -133,3 +133,42 @@ gated `apply` on merge to main. App image deploys stay on the separate
     --parameters 'commands=["cd /opt/portfolio","docker compose -f docker-compose.prod.yml up -d --force-recreate"]'
   ```
 - CI runs `terraform fmt -check` and `validate` on every PR.
+
+## Cloudflare proxy cutover (origin lock)
+
+Putting `api.<domain>` behind the Cloudflare proxy and locking the origin to
+Cloudflare is gated by two flags (both default `false`, so the committed config
+is the pre-proxy posture). Caddy switches from Let's Encrypt/ACME to a Cloudflare
+**origin certificate** so it never needs to reach the public internet once the
+security group is locked. SSM Session Manager is always available, so a wrong SG
+never locks you out. Do the steps in order:
+
+1. **Generate a Cloudflare Origin Certificate** (dashboard → SSL/TLS → Origin
+   Server → Create Certificate). Cover `aliflabs.dev` and `*.aliflabs.dev`. Save
+   the certificate PEM and the private key.
+
+2. **Push the cert + key** to the `/portfolio/tls/*` SecureString slots (real
+   values never enter Terraform state):
+
+   ```bash
+   aws ssm put-parameter --name /portfolio/tls/origin_cert --type SecureString \
+     --overwrite --region ap-southeast-2 --value file://origin.pem
+   aws ssm put-parameter --name /portfolio/tls/origin_key --type SecureString \
+     --overwrite --region ap-southeast-2 --value file://origin.key
+   ```
+
+3. **Set SSL/TLS mode to Full (strict)** in the Cloudflare dashboard (never
+   Flexible). The origin cert satisfies strict validation.
+
+4. **Proxy the api + apply.** Set `proxy_api = true` (tfvars or
+   `-var proxy_api=true`) and apply. This orange-clouds the api record and
+   replaces the box so Caddy boots serving the origin cert. The EIP stays, so
+   DNS does not move. Verify `https://api.<domain>/healthz` through Cloudflare
+   before continuing.
+
+5. **Lock the origin + apply.** Set `lock_origin_to_cloudflare = true` and apply.
+   The web SG now accepts 80/443 only from `cloudflare_ip_ranges`; the box is
+   unreachable except via Cloudflare (manage it via SSM). This is an in-place SG
+   change, not a box replacement.
+
+To roll back, flip the flags off and apply (lock first, then proxy).
