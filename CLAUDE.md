@@ -83,9 +83,9 @@ make fe-dev    # Next.js at :3000 (separate terminal)
   needs TF >= 1.10), fully-codified host (`user_data` + SSM Parameter Store for
   `.env`), minimal custom VPC (2 subnets/2 AZs, EIP), DNS + SES via Cloudflare
   provider, on-box Postgres, `pg_dump`-to-S3 backups bucket. CI: `plan` on PRs,
-  **manual `apply` via workflow_dispatch** gated by a required-reviewer rule on
-  the `production` Environment (free on public repos; self-review allowed for the
-  solo maintainer). Bootstrap is two-phase (seed SSM
+  **manual two-stage (`plan-dispatch` → `apply`) `workflow_dispatch`** gated by a
+  required-reviewer rule on the `production` Environment (free on public repos;
+  self-review allowed for the solo maintainer). Bootstrap is two-phase (seed SSM
   secrets before the host boots) — see `deploy/terraform/README.md`.
 - ✅ **Backend is LIVE** at `https://api.aliflabs.dev` (EC2 `t4g.micro` arm64 on
   a stable EIP, ap-southeast-2; IDs/IPs via `terraform output`). Verified
@@ -98,8 +98,20 @@ make fe-dev    # Next.js at :3000 (separate terminal)
   `linux/amd64,linux/arm64`). `prod` Postgres is empty (not seeded).
 - ✅ **Repo is now PUBLIC** (`alifyandra/portfolio-site`); git history was
   rewritten to gmail authorship before going public; GHCR package public.
-- ⏳ **Not yet done:** Vercel `NEXT_PUBLIC_API_URL=https://api.aliflabs.dev`;
-  SES production-access request (DKIM already verifying); rotate the Cloudflare
-  API token (was exposed in a chat transcript); optional `prod` seed; Cloudflare
-  proxy/security setup (security.md); **auth** (deferred for v1, the unlock for
-  dynamic Photography + curated playlists + admin page).
+- ✅ **Cloudflare proxy cutover complete** (see `docs/security.md`,
+  `deploy/terraform/README.md`): `api.aliflabs.dev` is behind the CF proxy
+  (orange-cloud) with the origin security group locked to Cloudflare's published
+  IP ranges; Caddy serves a CF **Origin certificate** (stored in `/portfolio/tls/*`
+  SSM, fetched on boot) instead of ACME; SSL/TLS mode is **Full (strict)**;
+  `TRUST_CLOUDFLARE_IP=true` so the rate limiter keys off the real visitor IP.
+  Direct (non-CF) origin access is dropped at the SG; SSM Session Manager is still
+  the way onto the box. Flags `proxy_api` + `lock_origin_to_cloudflare` (both now
+  default `true`) are applied through a gated two-stage **`plan-dispatch → apply`**
+  `workflow_dispatch` with per-flag inputs, so a cutover can stage without
+  committing first or putting CF creds in a local shell.
+- ⏳ **Not yet done:** Vercel `NEXT_PUBLIC_API_URL=https://api.aliflabs.dev`
+  (verify it points at the proxied origin); SES production-access request (DKIM
+  already verifying); remaining Cloudflare freebies (Bot Fight Mode is a dashboard
+  toggle; the `/api/contact` edge rate-limit rule is codified in Terraform;
+  managed WAF rulesets need a paid plan); optional `prod` seed; **auth** (deferred
+  for v1, the unlock for dynamic Photography + curated playlists + admin page).
