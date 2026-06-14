@@ -216,6 +216,16 @@ resource "aws_iam_role" "app_deploy" {
 }
 
 data "aws_iam_policy_document" "app_deploy" {
+  # The deploy workflow resolves the live instance ID by tag at runtime (so a box
+  # replacement doesn't strand the deploy on a stale ID). DescribeInstances has no
+  # resource-level authorization, so it must be its own "*" statement.
+  statement {
+    sid       = "ResolveInstanceByTag"
+    effect    = "Allow"
+    actions   = ["ec2:DescribeInstances"]
+    resources = ["*"]
+  }
+
   statement {
     sid     = "SendDeployCommand"
     effect  = "Allow"

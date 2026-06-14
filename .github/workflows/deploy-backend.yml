@@ -70,10 +70,32 @@ jobs:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ secrets.AWS_REGION }}
 
+      # Resolve the live instance by tag rather than a static secret. The box is
+      # cattle: a Terraform user_data change replaces it (the EIP stays put), and
+      # a hardcoded EC2_INSTANCE_ID would then point at a terminated instance the
+      # app-deploy role no longer permits. The Name tag is set in compute.tf.
+      - name: Resolve EC2 instance ID by tag
+        id: target
+        run: |
+          INSTANCE_ID=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=portfolio-app" \
+                      "Name=instance-state-name,Values=running" \
+            --query "Reservations[].Instances[].InstanceId" --output text)
+          if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" = "None" ]; then
+            echo "::error::No running instance found for tag:Name=portfolio-app"; exit 1
+          fi
+          if [ "$(echo "$INSTANCE_ID" | wc -w)" -ne 1 ]; then
+            echo "::error::Expected exactly one running instance, got: $INSTANCE_ID"; exit 1
+          fi
+          echo "Resolved instance: $INSTANCE_ID"
+          echo "instance_id=$INSTANCE_ID" >> "$GITHUB_OUTPUT"
+
       - name: Trigger redeploy on EC2 via SSM
+        env:
+          INSTANCE_ID: ${{ steps.target.outputs.instance_id }}
         run: |
           CMD_ID=$(aws ssm send-command \
-            --instance-ids "${{ secrets.EC2_INSTANCE_ID }}" \
+            --instance-ids "$INSTANCE_ID" \
             --document-name "AWS-RunShellScript" \
             --comment "Deploy ${{ github.sha }}" \
             --parameters '{"commands":[
@@ -87,9 +109,9 @@ jobs:
           echo "Sent SSM command $CMD_ID; waiting for completion…"
           aws ssm wait command-executed \
             --command-id "$CMD_ID" \
-            --instance-id "${{ secrets.EC2_INSTANCE_ID }}" || true
+            --instance-id "$INSTANCE_ID" || true
           aws ssm get-command-invocation \
             --command-id "$CMD_ID" \
-            --instance-id "${{ secrets.EC2_INSTANCE_ID }}" \
+            --instance-id "$INSTANCE_ID" \
             --query "{Status:Status,Output:StandardOutputContent,Err:StandardErrorContent}" \
             --output json

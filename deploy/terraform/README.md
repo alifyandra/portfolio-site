@@ -94,13 +94,18 @@ user, locally) plus a scoped Cloudflare API token.
 
    ```bash
    gh secret set AWS_REGION            --body "$(terraform output -raw region)"
-   gh secret set EC2_INSTANCE_ID       --body "$(terraform output -raw instance_id)"
    gh secret set AWS_DEPLOY_ROLE_ARN   --body "$(terraform output -raw app_deploy_role_arn)"
    gh secret set TF_PLAN_ROLE_ARN      --body "$(terraform output -raw terraform_plan_role_arn)"
    gh secret set TF_APPLY_ROLE_ARN     --body "$(terraform output -raw terraform_apply_role_arn)"
    gh secret set CLOUDFLARE_API_TOKEN  --body "$CLOUDFLARE_API_TOKEN"
    gh secret set CLOUDFLARE_ZONE_ID    --body "$TF_VAR_cloudflare_zone_id"
    ```
+
+   There is no `EC2_INSTANCE_ID` secret: `deploy-backend.yml` resolves the live
+   instance by `tag:Name=portfolio-app` at runtime (the `app-deploy` role carries
+   `ec2:DescribeInstances`), so a box replacement never strands the deploy on a
+   stale ID. If an old `EC2_INSTANCE_ID` secret exists from a prior bootstrap, it
+   is unused and can be removed (`gh secret delete EC2_INSTANCE_ID`).
 
 7. **Create the `production` Environment.** In repo Settings > Environments,
    create `production`. It pins the apply role's OIDC trust

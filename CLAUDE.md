@@ -91,7 +91,10 @@ make fe-dev    # Next.js at :3000 (separate terminal)
   a stable EIP, ap-southeast-2; IDs/IPs via `terraform output`). Verified
   `/healthz`, `/api/projects`, `/docs`, valid TLS. SSM works; the **full CI/CD
   seam is validated** (deploy-backend.yml builds multi-arch + redeploys over
-  SSM, green). Bootstrap gotchas hit + fixed (see git): instance policy needs
+  SSM, green). The deploy job **resolves the live instance by `tag:Name=
+  portfolio-app` at runtime** (the `app-deploy` role carries `ec2:DescribeInstances`),
+  so a box replacement never strands the deploy on a stale ID — there is no
+  `EC2_INSTANCE_ID` secret. Bootstrap gotchas hit + fixed (see git): instance policy needs
   `ssm:GetParametersByPath` on the **path** ARN not just `/*`; AMI must be the
   **standard** AL2023 (`al2023-ami-2023.*`), not `minimal` (no SSM agent); the
   GHCR image must be **arm64/multi-arch** (Dockerfile cross-compiles, CI builds
