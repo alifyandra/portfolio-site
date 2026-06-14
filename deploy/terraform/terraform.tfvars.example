@@ -1,0 +1,12 @@
+# Copy to terraform.tfvars (gitignored) and fill in, or export TF_VAR_* instead.
+# Only cloudflare_zone_id is required; everything else has a sane default.
+
+cloudflare_zone_id = "your-cloudflare-zone-id"
+
+# Overridable defaults (shown with their current values):
+# aws_region       = "ap-southeast-2"
+# domain           = "aliflabs.dev"
+# api_subdomain    = "api"
+# alert_email      = "alifyandra@gmail.com"
+# ses_sender_email = "noreply@aliflabs.dev"
+# budget_amount_aud = "25"

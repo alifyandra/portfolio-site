@@ -25,3 +25,11 @@ backend/ent/*
 
 # original full-res photo sources (resized copies live in frontend/public/photos)
 pics/
+
+# Terraform: local state, provider plugins, and any real tfvars
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+# .terraform.lock.hcl stays committed (pins provider versions)
