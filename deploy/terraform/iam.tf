@@ -258,7 +258,10 @@ resource "aws_iam_role_policy_attachment" "terraform_plan_readonly" {
   policy_arn = "arn:aws:iam::aws:policy/ReadOnlyAccess"
 }
 
-# Both CI roles need to read/write the remote state object.
+# The plan role reads the remote state, plus puts/deletes the native-locking
+# .tflock object. S3 native locking (use_lockfile, TF >= 1.10) writes that lock
+# object even on a read-only plan, so without these the plan job 403s at lock
+# acquisition. Scope the write to the lock file only — plan never writes state.
 data "aws_iam_policy_document" "state_read" {
   statement {
     effect  = "Allow"
@@ -266,6 +269,13 @@ data "aws_iam_policy_document" "state_read" {
     resources = [
       "arn:aws:s3:::aliflabs-terraform-state",
       "arn:aws:s3:::aliflabs-terraform-state/${var.project}/*",
+    ]
+  }
+  statement {
+    effect  = "Allow"
+    actions = ["s3:PutObject", "s3:DeleteObject"]
+    resources = [
+      "arn:aws:s3:::aliflabs-terraform-state/${var.project}/terraform.tfstate.tflock",
     ]
   }
 }
