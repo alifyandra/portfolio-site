@@ -5,9 +5,12 @@ data "aws_ami" "al2023_arm64" {
   most_recent = true
   owners      = ["amazon"]
 
+  # Standard AL2023 only. "al2023-ami-2023.*" excludes the "al2023-ami-minimal-*"
+  # variant, which omits the SSM agent (and would break Session Manager / the
+  # SSM-based deploy path).
   filter {
     name   = "name"
-    values = ["al2023-ami-*-arm64"]
+    values = ["al2023-ami-2023.*-arm64"]
   }
   filter {
     name   = "architecture"

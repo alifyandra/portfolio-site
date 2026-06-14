@@ -31,6 +31,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # QEMU emulates the tiny apk/adduser RUN in the arm64 runtime stage. The
+      # Go build itself cross-compiles natively (CGO_ENABLED=0), so it stays fast.
+      - uses: docker/setup-qemu-action@v3
+
       - uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR
@@ -45,6 +49,8 @@ jobs:
         with:
           context: ./backend
           push: true
+          # arm64 for the t4g.micro host; amd64 kept for local/dev parity.
+          platforms: linux/amd64,linux/arm64
           tags: |
             ${{ env.IMAGE }}:latest
             ${{ env.IMAGE }}:${{ github.sha }}
