@@ -40,24 +40,27 @@ func New(clientID, clientSecret, refreshToken string) *Client {
 // ErrNotConfigured is returned when Spotify credentials are absent.
 var ErrNotConfigured = fmt.Errorf("spotify: not configured")
 
-// RateLimitError is returned when Spotify responds 429. RetryAfter carries the
-// Retry-After header (0 if absent) so callers can back off for exactly as long
-// as Spotify asks instead of re-polling and escalating the penalty (Spotify
-// grows Retry-After into the hours when an app keeps hammering through a 429).
+// RateLimitError is returned when Spotify responds 429. Endpoint names the call
+// that hit the limit (so 429 logs stay as actionable as other status errors),
+// and RetryAfter carries the Retry-After header (0 if absent) so callers can
+// back off for exactly as long as Spotify asks instead of re-polling and
+// escalating the penalty (Spotify grows Retry-After into the hours when an app
+// keeps hammering through a 429).
 type RateLimitError struct {
+	Endpoint   string
 	RetryAfter time.Duration
 }
 
 func (e *RateLimitError) Error() string {
-	return fmt.Sprintf("spotify: rate limited (retry after %s)", e.RetryAfter)
+	return fmt.Sprintf("spotify %s: rate limited (retry after %s)", e.Endpoint, e.RetryAfter)
 }
 
 // statusError maps a non-OK Spotify response to an error. A 429 becomes a
-// *RateLimitError carrying Retry-After; anything else is a generic status error
-// labelled with the calling endpoint.
+// *RateLimitError carrying the endpoint label and Retry-After; anything else is
+// a generic status error labelled with the calling endpoint.
 func statusError(resp *http.Response, label string) error {
 	if resp.StatusCode == http.StatusTooManyRequests {
-		return &RateLimitError{RetryAfter: parseRetryAfter(resp)}
+		return &RateLimitError{Endpoint: label, RetryAfter: parseRetryAfter(resp)}
 	}
 	return fmt.Errorf("spotify %s: status %d", label, resp.StatusCode)
 }
