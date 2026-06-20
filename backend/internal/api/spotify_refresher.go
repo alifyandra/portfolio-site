@@ -60,6 +60,10 @@ func (r *SpotifyRefresher) Run(ctx context.Context) {
 		return
 	}
 
+	// Recover the last-known track from Redis so a restart (e.g. a deploy) during
+	// a long backoff doesn't lose it and let the panel expire to blank.
+	r.hydrateLastTrack(ctx)
+
 	// Warm immediately so the panel isn't empty for a full interval after boot.
 	r.refreshNowPlaying(ctx)
 	r.refreshSlow(ctx)
@@ -109,7 +113,7 @@ func (r *SpotifyRefresher) refreshNowPlaying(ctx context.Context) {
 			wait = defaultBackoff
 		}
 		r.backoffUntil = time.Now().Add(wait)
-		slog.Warn("spotify rate limited; backing off", "retry_after", wait)
+		slog.Warn("spotify rate limited; backing off", "endpoint", rl.Endpoint, "retry_after", wait)
 		r.writeLastKnown(ctx)
 		return
 	}
@@ -152,6 +156,26 @@ func (r *SpotifyRefresher) writeLastKnown(ctx context.Context) {
 	out.Body.Track = &fallback
 	out.Body.Source = "recently-played"
 	r.write(ctx, nowPlayingCacheKey, out.Body, nowPlayingCacheTTL)
+}
+
+// hydrateLastTrack seeds lastTrack from whatever the previous process left in
+// the now-playing cache. Without this, a restart wipes the in-memory last-known
+// track, and an idle/backoff tick would then have nothing to keep warm until a
+// live track is seen — blanking the panel once the old value's TTL expires.
+func (r *SpotifyRefresher) hydrateLastTrack(ctx context.Context) {
+	cached, err := r.redis.Get(ctx, nowPlayingCacheKey).Bytes()
+	if err != nil {
+		return
+	}
+	var body struct {
+		Track *trackBody `json:"track"`
+	}
+	if err := json.Unmarshal(cached, &body); err != nil || body.Track == nil {
+		return
+	}
+	t := *body.Track
+	t.IsPlaying = false
+	r.lastTrack = &t
 }
 
 func (r *SpotifyRefresher) refreshTopTracks(ctx context.Context) {
