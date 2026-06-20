@@ -10,8 +10,10 @@ Backend proxies Alif's public listening data (token never reaches the browser):
 
 - `GET /api/spotify/now-playing` — live track. When nothing is live it re-shows
   the **last track the poller saw playing** (not the recently-played endpoint, see
-  Rate limiting), so the view is never dead. `source` = `now-playing` |
-  `recently-played` | `""` (`recently-played` now means "last seen live").
+  Rate limiting), so the view stays populated once any track has been seen. It's
+  empty only on a cold start before the first live track (or after the warm Redis
+  value has expired). `source` = `now-playing` | `recently-played` | `""`
+  (`recently-played` now means "last seen live").
 - `GET /api/spotify/top-tracks` — top tracks, `short_term` (~4 weeks).
 - `GET /api/spotify/top-artists` — top artists, `short_term`.
 - `GET /api/spotify/playlists` — hand-curated list. IDs live in the
@@ -66,6 +68,10 @@ user-top-read
 playlist-read-private
 ```
 
+`user-read-recently-played` is no longer used at runtime (the idle fallback is
+the last seen-live track). It's harmless to keep on the existing token; include
+it when minting only if you might want the endpoint back.
+
 ### Mint the refresh token (one-time)
 
 1. Authorize in a browser (fill in client id):
@@ -105,6 +111,7 @@ Tested 403 / empty on this app — do NOT build features on these:
   30s preview URLs.
 
 Rule of thumb: assume any "classic Spotify stats app" trick is dead until you
-curl it with a real token. What still works for us: now-playing,
-recently-played, top tracks, top artists (names+images, no genres), single
-playlist lookup by id.
+curl it with a real token. What still works: now-playing, top tracks, top
+artists (names+images, no genres), single playlist lookup by id. The
+recently-played endpoint also still works, but the backend no longer calls it
+(the idle fallback is the last seen-live track now, see Rate limiting).
