@@ -11,9 +11,11 @@ go 1.25.0
 //   github.com/redis/go-redis/v9      — Redis client
 //   github.com/aws/aws-sdk-go-v2/...  — S3 + SQS
 //   github.com/caarlos0/env/v11       — env config
+//   github.com/alicebob/miniredis/v2  — in-memory Redis for tests
 
 require (
 	entgo.io/ent v0.14.6
+	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/aws/aws-sdk-go-v2/config v1.32.25
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.103.3
 	github.com/aws/aws-sdk-go-v2/service/sesv2 v1.62.4
@@ -59,6 +61,7 @@ require (
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
 	github.com/mitchellh/go-wordwrap v1.0.1 // indirect
 	github.com/rogpeppe/go-internal v1.15.0 // indirect
+	github.com/yuin/gopher-lua v1.1.1 // indirect
 	github.com/zclconf/go-cty v1.14.4 // indirect
 	github.com/zclconf/go-cty-yaml v1.1.0 // indirect
 	github.com/zeebo/xxh3 v1.1.0 // indirect

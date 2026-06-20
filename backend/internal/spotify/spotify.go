@@ -26,15 +26,28 @@ type Client struct {
 	expiresAt   time.Time
 }
 
+// Option customizes a Client at construction.
+type Option func(*Client)
+
+// WithHTTPClient overrides the underlying *http.Client. Mainly a test seam for
+// injecting a transport that stubs the Spotify API.
+func WithHTTPClient(hc *http.Client) Option {
+	return func(c *Client) { c.http = hc }
+}
+
 // New constructs a Spotify client. Credentials may be empty in local dev, in
 // which case calls return ErrNotConfigured.
-func New(clientID, clientSecret, refreshToken string) *Client {
-	return &Client{
+func New(clientID, clientSecret, refreshToken string, opts ...Option) *Client {
+	c := &Client{
 		clientID:     clientID,
 		clientSecret: clientSecret,
 		refreshToken: refreshToken,
 		http:         &http.Client{Timeout: 10 * time.Second},
 	}
+	for _, o := range opts {
+		o(c)
+	}
+	return c
 }
 
 // ErrNotConfigured is returned when Spotify credentials are absent.
