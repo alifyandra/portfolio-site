@@ -65,13 +65,27 @@ func statusError(resp *http.Response, label string) error {
 	return fmt.Errorf("spotify %s: status %d", label, resp.StatusCode)
 }
 
+// parseRetryAfter reads the Retry-After header in either RFC 9110 form:
+// delta-seconds (what Spotify sends) or an HTTP-date (in case a proxy ever uses
+// it). Returns 0 when absent or unparseable, leaving the caller to apply its
+// backoff floor.
 func parseRetryAfter(resp *http.Response) time.Duration {
 	v := strings.TrimSpace(resp.Header.Get("Retry-After"))
-	secs, err := strconv.Atoi(v)
-	if err != nil || secs < 0 {
+	if v == "" {
 		return 0
 	}
-	return time.Duration(secs) * time.Second
+	if secs, err := strconv.Atoi(v); err == nil {
+		if secs < 0 {
+			return 0
+		}
+		return time.Duration(secs) * time.Second
+	}
+	if t, err := http.ParseTime(v); err == nil {
+		if d := time.Until(t); d > 0 {
+			return d
+		}
+	}
+	return 0
 }
 
 // Track is the trimmed, frontend-facing shape we expose.
