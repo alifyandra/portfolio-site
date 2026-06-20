@@ -19,9 +19,10 @@ import (
 const (
 	nowPlayingRefreshInterval = 60 * time.Second
 	slowRefreshInterval       = 24 * time.Hour
-	// defaultBackoff is used when Spotify 429s without a Retry-After header. We
-	// honor the header when present (it can be hours during a penalty), and only
-	// fall back to this floor otherwise.
+	// defaultBackoff is the minimum 429 backoff. We honor Retry-After when it's
+	// larger (it can be hours during a penalty), but never back off for less than
+	// this — a small Retry-After would otherwise let us re-poll within seconds and
+	// re-trigger/escalate the penalty. Also used when the header is absent.
 	defaultBackoff = 5 * time.Minute
 )
 
@@ -101,8 +102,10 @@ func (r *SpotifyRefresher) refreshNowPlaying(ctx context.Context) {
 	}
 	var rl *spotify.RateLimitError
 	if errors.As(err, &rl) {
+		// Clamp to defaultBackoff: honor a longer Retry-After, but never re-poll
+		// sooner than the floor even if Spotify hands back a small value.
 		wait := rl.RetryAfter
-		if wait <= 0 {
+		if wait < defaultBackoff {
 			wait = defaultBackoff
 		}
 		r.backoffUntil = time.Now().Add(wait)
@@ -131,18 +134,23 @@ func (r *SpotifyRefresher) refreshNowPlaying(ctx context.Context) {
 	r.writeLastKnown(ctx)
 }
 
-// writeLastKnown caches lastTrack as the idle "last played" view (or an empty
-// body if we've never seen a live track yet), refreshing the TTL. The source
-// stays "recently-played" so the frontend's "Last played" label is unchanged —
-// it now means "last track we saw live", not the recently-played endpoint.
+// writeLastKnown caches lastTrack as the idle "last played" view, refreshing the
+// TTL. No-ops when we've never seen a live track, so it never blanks a warm
+// cache. The source stays "recently-played" so the frontend's "Last played"
+// label is unchanged — it now means "last track we saw live", not the
+// recently-played endpoint.
 func (r *SpotifyRefresher) writeLastKnown(ctx context.Context) {
-	var out nowPlayingOutput
-	if r.lastTrack != nil {
-		fallback := *r.lastTrack
-		fallback.IsPlaying = false
-		out.Body.Track = &fallback
-		out.Body.Source = "recently-played"
+	// Cold start (or just after a deploy): we haven't seen a live track yet, so
+	// we have nothing to write. Leave any value already in Redis to ride its TTL
+	// rather than clobbering a still-warm panel with an empty body.
+	if r.lastTrack == nil {
+		return
 	}
+	fallback := *r.lastTrack
+	fallback.IsPlaying = false
+	var out nowPlayingOutput
+	out.Body.Track = &fallback
+	out.Body.Source = "recently-played"
 	r.write(ctx, nowPlayingCacheKey, out.Body, nowPlayingCacheTTL)
 }
 
