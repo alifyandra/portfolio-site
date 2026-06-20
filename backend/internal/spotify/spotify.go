@@ -211,7 +211,7 @@ func (c *Client) NowPlaying(ctx context.Context) (*Track, error) {
 	}
 	// Spotify returns 200 with the paused track and is_playing:false when you
 	// pause (it only 204s when no device is active). Treat paused as "nothing
-	// live" so the caller falls back to recently-played instead of showing a
+	// live" so the caller re-shows the last track seen playing instead of a
 	// stale LIVE state.
 	if !raw.IsPlaying {
 		return nil, nil
