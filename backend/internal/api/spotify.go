@@ -18,7 +18,7 @@ import (
 // data fresh.
 const (
 	nowPlayingCacheKey = "spotify:now-playing"
-	nowPlayingCacheTTL = 90 * time.Second // refreshed every 30s
+	nowPlayingCacheTTL = 10 * time.Minute // refreshed every 60s; long TTL rides out a backoff/refresher gap
 	topTracksCacheKey  = "spotify:top-tracks"
 	topTracksCacheTTL  = 48 * time.Hour // refreshed daily
 	topTracksLimit     = 5

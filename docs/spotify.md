@@ -8,16 +8,31 @@ definition.
 
 Backend proxies Alif's public listening data (token never reaches the browser):
 
-- `GET /api/spotify/now-playing` — live track, falls back to recently-played so
-  the view is never dead. `source` = `now-playing` | `recently-played` | `""`.
+- `GET /api/spotify/now-playing` — live track. When nothing is live it re-shows
+  the **last track the poller saw playing** (not the recently-played endpoint, see
+  Rate limiting), so the view is never dead. `source` = `now-playing` |
+  `recently-played` | `""` (`recently-played` now means "last seen live").
 - `GET /api/spotify/top-tracks` — top tracks, `short_term` (~4 weeks).
 - `GET /api/spotify/top-artists` — top artists, `short_term`.
 - `GET /api/spotify/playlists` — hand-curated list. IDs live in the
   `featuredPlaylistIDs` slice in `backend/internal/api/spotify.go` (edit =
   rebuild). Future: move to DB once auth exists.
 
-All cached in Redis (now-playing 30s, rest 1h). No creds => endpoints degrade to
-empty, no error.
+All cached in Redis. No creds => endpoints degrade to empty, no error.
+
+## Rate limiting
+
+Spotify's quota is **per app**, shared across all endpoints, on a rolling window.
+When an app keeps polling through a 429, Spotify escalates `Retry-After` into the
+hours. The refresher (`spotify_refresher.go`) avoids that:
+
+- now-playing polls every **60s** (one call/tick).
+- When nothing is live it re-shows the last track it saw playing, instead of a
+  second call to the recently-played endpoint. That endpoint is no longer used;
+  the old design doubled the idle call volume on the exact path that 429s.
+- On a 429 it reads `Retry-After` and **backs off** for that long (honoring the
+  header, floored at 5m), keeping the cache warm with the last known track so the
+  panel survives even a multi-hour penalty.
 
 ## Creds
 

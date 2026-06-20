@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -38,6 +39,37 @@ func New(clientID, clientSecret, refreshToken string) *Client {
 
 // ErrNotConfigured is returned when Spotify credentials are absent.
 var ErrNotConfigured = fmt.Errorf("spotify: not configured")
+
+// RateLimitError is returned when Spotify responds 429. RetryAfter carries the
+// Retry-After header (0 if absent) so callers can back off for exactly as long
+// as Spotify asks instead of re-polling and escalating the penalty (Spotify
+// grows Retry-After into the hours when an app keeps hammering through a 429).
+type RateLimitError struct {
+	RetryAfter time.Duration
+}
+
+func (e *RateLimitError) Error() string {
+	return fmt.Sprintf("spotify: rate limited (retry after %s)", e.RetryAfter)
+}
+
+// statusError maps a non-OK Spotify response to an error. A 429 becomes a
+// *RateLimitError carrying Retry-After; anything else is a generic status error
+// labelled with the calling endpoint.
+func statusError(resp *http.Response, label string) error {
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return &RateLimitError{RetryAfter: parseRetryAfter(resp)}
+	}
+	return fmt.Errorf("spotify %s: status %d", label, resp.StatusCode)
+}
+
+func parseRetryAfter(resp *http.Response) time.Duration {
+	v := strings.TrimSpace(resp.Header.Get("Retry-After"))
+	secs, err := strconv.Atoi(v)
+	if err != nil || secs < 0 {
+		return 0
+	}
+	return time.Duration(secs) * time.Second
+}
 
 // Track is the trimmed, frontend-facing shape we expose.
 type Track struct {
@@ -154,7 +186,7 @@ func (c *Client) token(ctx context.Context) (string, error) {
 }
 
 // NowPlaying returns the currently-playing track, or (nil, nil) if nothing is
-// playing. Callers fall back to RecentlyPlayed to avoid a dead view.
+// playing. Callers re-show the last track seen live to avoid a dead view.
 func (c *Client) NowPlaying(ctx context.Context) (*Track, error) {
 	resp, err := c.get(ctx, "https://api.spotify.com/v1/me/player/currently-playing")
 	if err != nil {
@@ -167,7 +199,7 @@ func (c *Client) NowPlaying(ctx context.Context) (*Track, error) {
 		return nil, nil
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("spotify now-playing: status %d", resp.StatusCode)
+		return nil, statusError(resp, "now-playing")
 	}
 
 	var raw struct {
@@ -187,32 +219,6 @@ func (c *Client) NowPlaying(ctx context.Context) (*Track, error) {
 	return raw.Item.toTrack(raw.IsPlaying), nil
 }
 
-// RecentlyPlayed returns the most recently played track, or (nil, nil) if
-// Spotify reports no history. Requires the user-read-recently-played scope.
-func (c *Client) RecentlyPlayed(ctx context.Context) (*Track, error) {
-	resp, err := c.get(ctx, "https://api.spotify.com/v1/me/player/recently-played?limit=1")
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("spotify recently-played: status %d", resp.StatusCode)
-	}
-
-	var raw struct {
-		Items []struct {
-			Track rawTrack `json:"track"`
-		} `json:"items"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
-		return nil, err
-	}
-	if len(raw.Items) == 0 {
-		return nil, nil
-	}
-	return raw.Items[0].Track.toTrack(false), nil
-}
-
 // TopTracks returns Alif's top tracks for the given time range
 // (short_term ~4 weeks, medium_term ~6 months, long_term ~1 year).
 // Requires the user-top-read scope.
@@ -225,7 +231,7 @@ func (c *Client) TopTracks(ctx context.Context, limit int, timeRange string) ([]
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("spotify top-tracks: status %d", resp.StatusCode)
+		return nil, statusError(resp, "top-tracks")
 	}
 
 	var raw struct {
@@ -260,7 +266,7 @@ func (c *Client) TopArtists(ctx context.Context, limit int, timeRange string) ([
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("spotify top-artists: status %d", resp.StatusCode)
+		return nil, statusError(resp, "top-artists")
 	}
 
 	var raw struct {
@@ -311,7 +317,7 @@ func (c *Client) PlaylistByID(ctx context.Context, id string) (*Playlist, error)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("spotify playlist %s: status %d", id, resp.StatusCode)
+		return nil, statusError(resp, "playlist "+id)
 	}
 
 	var raw struct {

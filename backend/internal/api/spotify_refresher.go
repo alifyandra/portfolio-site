@@ -17,8 +17,12 @@ import (
 // inside their cache TTLs (see spotify.go), so a missed tick never blanks the
 // panel — stale data just lingers until the next successful refresh.
 const (
-	nowPlayingRefreshInterval = 30 * time.Second
+	nowPlayingRefreshInterval = 60 * time.Second
 	slowRefreshInterval       = 24 * time.Hour
+	// defaultBackoff is used when Spotify 429s without a Retry-After header. We
+	// honor the header when present (it can be hours during a penalty), and only
+	// fall back to this floor otherwise.
+	defaultBackoff = 5 * time.Minute
 )
 
 // SpotifyRefresher periodically pulls Alif's Spotify data into Redis on the
@@ -29,6 +33,16 @@ const (
 type SpotifyRefresher struct {
 	redis *redis.Client
 	sp    *spotify.Client
+
+	// lastTrack is the most recent track we saw playing live. When nothing is
+	// live we re-show it as the "last played" view instead of calling Spotify's
+	// recently-played endpoint — one fewer call per tick on the rate-limited
+	// budget, and no second endpoint to get 429'd. Process-local: empty until the
+	// first live track after boot. Only touched from Run's single goroutine.
+	lastTrack *trackBody
+	// backoffUntil is set from a 429's Retry-After; we skip hitting Spotify until
+	// it passes so we don't re-trigger and escalate the penalty.
+	backoffUntil time.Time
 }
 
 // NewSpotifyRefresher builds a refresher. A nil Spotify client (local dev
@@ -73,36 +87,62 @@ func (r *SpotifyRefresher) refreshSlow(ctx context.Context) {
 }
 
 func (r *SpotifyRefresher) refreshNowPlaying(ctx context.Context) {
-	var out nowPlayingOutput
+	// Inside a rate-limit backoff: don't touch Spotify, but keep the cache warm
+	// with the last known track so the panel doesn't blank while we wait out the
+	// penalty (the TTL would otherwise expire it).
+	if time.Now().Before(r.backoffUntil) {
+		r.writeLastKnown(ctx)
+		return
+	}
 
 	track, err := r.sp.NowPlaying(ctx)
 	if errors.Is(err, spotify.ErrNotConfigured) {
 		return
 	}
+	var rl *spotify.RateLimitError
+	if errors.As(err, &rl) {
+		wait := rl.RetryAfter
+		if wait <= 0 {
+			wait = defaultBackoff
+		}
+		r.backoffUntil = time.Now().Add(wait)
+		slog.Warn("spotify rate limited; backing off", "retry_after", wait)
+		r.writeLastKnown(ctx)
+		return
+	}
 	if err != nil {
+		// Transient error: keep the last known track on screen rather than
+		// letting the cache expire to empty.
 		slog.Warn("spotify refresh now-playing", "err", err)
+		r.writeLastKnown(ctx)
 		return
 	}
 
 	if track != nil {
 		tb := trackBodyFrom(track)
+		r.lastTrack = &tb
+		var out nowPlayingOutput
 		out.Body.Track = &tb
 		out.Body.Source = "now-playing"
-	} else {
-		// Nothing live — fall back to most recently played so the panel is
-		// never dead.
-		recent, err := r.sp.RecentlyPlayed(ctx)
-		if err != nil {
-			slog.Warn("spotify refresh recently-played", "err", err)
-			return
-		}
-		if recent != nil {
-			tb := trackBodyFrom(recent)
-			out.Body.Track = &tb
-			out.Body.Source = "recently-played"
-		}
+		r.write(ctx, nowPlayingCacheKey, out.Body, nowPlayingCacheTTL)
+		return
 	}
+	// Nothing live — re-show the last track we saw playing.
+	r.writeLastKnown(ctx)
+}
 
+// writeLastKnown caches lastTrack as the idle "last played" view (or an empty
+// body if we've never seen a live track yet), refreshing the TTL. The source
+// stays "recently-played" so the frontend's "Last played" label is unchanged —
+// it now means "last track we saw live", not the recently-played endpoint.
+func (r *SpotifyRefresher) writeLastKnown(ctx context.Context) {
+	var out nowPlayingOutput
+	if r.lastTrack != nil {
+		fallback := *r.lastTrack
+		fallback.IsPlaying = false
+		out.Body.Track = &fallback
+		out.Body.Source = "recently-played"
+	}
 	r.write(ctx, nowPlayingCacheKey, out.Body, nowPlayingCacheTTL)
 }
 
