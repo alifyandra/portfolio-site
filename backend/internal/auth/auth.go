@@ -15,6 +15,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -249,26 +250,22 @@ func (s *Service) upsertUser(ctx context.Context, c googleClaims) (*ent.User, er
 		return nil, err
 	}
 
-	// No identity yet. Reuse a User with the same email if one exists, else
-	// create one, then attach the new identity.
-	u, err := tx.User.Query().Where(user.Email(c.email)).Only(ctx)
-	switch {
-	case err == nil:
-		u, err = tx.User.UpdateOne(u).SetName(c.name).SetAvatarURL(c.picture).SetRole(role).Save(ctx)
-		if err != nil {
-			return nil, err
+	// No identity for this provider sub: a brand-new login. Create a fresh User
+	// and Identity. We deliberately do NOT reuse an existing User that merely
+	// shares the email: email is mutable and reusable, so linking by it is an
+	// account-takeover footgun (ADR 10 keys identity on the provider sub, not the
+	// email). A collision on the unique email surfaces as a constraint error
+	// instead of silently linking two accounts.
+	u, err := tx.User.Create().
+		SetEmail(c.email).
+		SetName(c.name).
+		SetAvatarURL(c.picture).
+		SetRole(role).
+		Save(ctx)
+	if err != nil {
+		if ent.IsConstraintError(err) {
+			return nil, fmt.Errorf("an account already exists for %s", c.email)
 		}
-	case ent.IsNotFound(err):
-		u, err = tx.User.Create().
-			SetEmail(c.email).
-			SetName(c.name).
-			SetAvatarURL(c.picture).
-			SetRole(role).
-			Save(ctx)
-		if err != nil {
-			return nil, err
-		}
-	default:
 		return nil, err
 	}
 
