@@ -15,7 +15,12 @@ import (
 func newAuthTestAPI(t *testing.T) humatest.TestAPI {
 	t.Helper()
 	_, api := humatest.New(t)
-	h := New(Deps{Auth: auth.New(nil, auth.Config{})})
+	svc := auth.New(nil, auth.Config{})
+	// Wire the real auth middleware so the harness mirrors production (server.go).
+	// The cases here send no session cookie, so the middleware no-ops without
+	// touching the DB; DB-backed flows are covered in internal/auth's tests.
+	api.UseMiddleware(svc.Middleware)
+	h := New(Deps{Auth: svc})
 	h.registerAuth(api)
 	return api
 }

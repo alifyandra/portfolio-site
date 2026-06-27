@@ -50,6 +50,11 @@ const (
 // ErrNotConfigured is returned when Google OAuth credentials are absent.
 var ErrNotConfigured = errors.New("auth: not configured")
 
+// ErrEmailInUse is returned from a sign-in whose verified email already belongs
+// to a different account (a different provider sub). Callers map it to a clear
+// "account already exists" response rather than a generic failure.
+var ErrEmailInUse = errors.New("auth: email already associated with another account")
+
 // Config holds the inputs the auth service needs from application config.
 type Config struct {
 	ClientID     string
@@ -138,7 +143,11 @@ func shouldBump(expiresAt, now time.Time) bool {
 
 // --- cookies ---
 
-func (s *Service) buildCookie(name, value string, maxAge int) http.Cookie {
+// buildCookie builds a cookie with the standard security attributes. When scoped
+// is true it also carries the configured Domain (so the session is shared across
+// aliflabs.dev subdomains); the transient state cookie passes false to stay
+// host-only and avoid exposing the CSRF nonce to sibling subdomains.
+func (s *Service) buildCookie(name, value string, maxAge int, scoped bool) http.Cookie {
 	c := http.Cookie{
 		Name:     name,
 		Value:    value,
@@ -148,7 +157,7 @@ func (s *Service) buildCookie(name, value string, maxAge int) http.Cookie {
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   maxAge,
 	}
-	if s.cookieDomain != "" {
+	if scoped && s.cookieDomain != "" {
 		c.Domain = s.cookieDomain
 	}
 	return c
@@ -156,12 +165,22 @@ func (s *Service) buildCookie(name, value string, maxAge int) http.Cookie {
 
 // SessionCookie builds the cookie that carries a raw session token.
 func (s *Service) SessionCookie(rawToken string) http.Cookie {
-	return s.buildCookie(sessionCookieName, rawToken, int(sessionDuration.Seconds()))
+	return s.buildCookie(sessionCookieName, rawToken, int(sessionDuration.Seconds()), true)
 }
 
 // ClearSessionCookie builds a cookie that expires the session cookie.
 func (s *Service) ClearSessionCookie() http.Cookie {
-	return s.buildCookie(sessionCookieName, "", -1)
+	return s.buildCookie(sessionCookieName, "", -1, true)
+}
+
+// StateCookie / ClearStateCookie build the short-lived, host-only CSRF state
+// cookie used during the OAuth redirect dance.
+func (s *Service) StateCookie(state string) http.Cookie {
+	return s.buildCookie(stateCookieName, state, int(stateTTL.Seconds()), false)
+}
+
+func (s *Service) ClearStateCookie() http.Cookie {
+	return s.buildCookie(stateCookieName, "", -1, false)
 }
 
 // --- OAuth flow ---
@@ -204,14 +223,27 @@ func parseClaims(p *idtoken.Payload) (googleClaims, error) {
 	if c.sub == "" {
 		return c, errors.New("auth: id token missing sub")
 	}
-	emailVerified, _ := p.Claims["email_verified"].(bool)
 	c.email, _ = p.Claims["email"].(string)
-	if c.email == "" || !emailVerified {
+	if c.email == "" || !claimIsTrue(p.Claims["email_verified"]) {
 		return c, errors.New("auth: google account email missing or unverified")
 	}
 	c.name, _ = p.Claims["name"].(string)
 	c.picture, _ = p.Claims["picture"].(string)
 	return c, nil
+}
+
+// claimIsTrue treats a claim as true whether it is a JSON bool or the string
+// "true": email_verified is a bool in Google ID tokens but a string in some
+// other token/userinfo formats, and a string would otherwise silently read false.
+func claimIsTrue(v any) bool {
+	switch t := v.(type) {
+	case bool:
+		return t
+	case string:
+		return t == "true"
+	default:
+		return false
+	}
 }
 
 // upsertUser finds or creates the User and Identity for a set of claims, and
@@ -233,12 +265,28 @@ func (s *Service) upsertUser(ctx context.Context, c googleClaims) (*ent.User, er
 		Only(ctx)
 	switch {
 	case err == nil:
-		u, err := tx.User.UpdateOne(id.Edges.Owner).
-			SetEmail(c.email).
+		owner := id.Edges.Owner
+		upd := tx.User.UpdateOne(owner).
 			SetName(c.name).
 			SetAvatarURL(c.picture).
-			SetRole(role).
-			Save(ctx)
+			SetRole(role)
+		// Re-assert the canonical email only when it changed and is not already
+		// taken by a different account: otherwise the unique-email constraint
+		// would abort the whole login and lock the user out of their own account.
+		if owner.Email != c.email {
+			taken, err := tx.User.Query().
+				Where(user.Email(c.email), user.IDNEQ(owner.ID)).
+				Exist(ctx)
+			if err != nil {
+				return nil, err
+			}
+			if taken {
+				slog.WarnContext(ctx, "auth: verified email already belongs to another account; keeping existing email", "user_id", owner.ID)
+			} else {
+				upd.SetEmail(c.email)
+			}
+		}
+		u, err := upd.Save(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -264,7 +312,7 @@ func (s *Service) upsertUser(ctx context.Context, c googleClaims) (*ent.User, er
 		Save(ctx)
 	if err != nil {
 		if ent.IsConstraintError(err) {
-			return nil, fmt.Errorf("an account already exists for %s", c.email)
+			return nil, fmt.Errorf("%w: %s", ErrEmailInUse, c.email)
 		}
 		return nil, err
 	}
