@@ -304,11 +304,14 @@ func (s *Service) createSession(ctx context.Context, u *ent.User, userAgent stri
 // --- session resolution and revocation ---
 
 // Authenticate resolves a raw session token to its User, sliding the expiry
-// forward when due. An absent, unknown, or expired token returns (nil, nil):
-// callers treat that as anonymous, not an error.
-func (s *Service) Authenticate(ctx context.Context, rawToken string) (*ent.User, error) {
+// forward when due. An absent, unknown, or expired token returns (nil, false,
+// nil): callers treat that as anonymous, not an error. The bumped return reports
+// whether the DB expiry was slid this call, so the caller can refresh the
+// cookie's client-side expiry to match (otherwise the cookie would still die at
+// its original Max-Age and the session would not actually slide for the user).
+func (s *Service) Authenticate(ctx context.Context, rawToken string) (u *ent.User, bumped bool, err error) {
 	if rawToken == "" {
-		return nil, nil
+		return nil, false, nil
 	}
 	sess, err := s.ent.Session.Query().
 		Where(session.TokenHash(hashToken(rawToken))).
@@ -316,23 +319,25 @@ func (s *Service) Authenticate(ctx context.Context, rawToken string) (*ent.User,
 		Only(ctx)
 	if err != nil {
 		if ent.IsNotFound(err) {
-			return nil, nil
+			return nil, false, nil
 		}
-		return nil, err
+		return nil, false, err
 	}
 
 	now := time.Now()
 	if !sess.ExpiresAt.After(now) {
 		// Expired: best-effort cleanup, treated as logged out.
 		_ = s.ent.Session.DeleteOne(sess).Exec(ctx)
-		return nil, nil
+		return nil, false, nil
 	}
 	if shouldBump(sess.ExpiresAt, now) {
 		if _, err := s.ent.Session.UpdateOne(sess).SetExpiresAt(now.Add(sessionDuration)).Save(ctx); err != nil {
 			slog.WarnContext(ctx, "auth: failed to slide session expiry", "err", err)
+		} else {
+			bumped = true
 		}
 	}
-	return sess.Edges.Owner, nil
+	return sess.Edges.Owner, bumped, nil
 }
 
 // RevokeSession deletes the session identified by a raw token (logout). It is

@@ -48,6 +48,17 @@ type messageOutput struct {
 	}
 }
 
+// requireAuth returns the auth service, or a 503 when it is not wired in. The
+// only build with a nil Auth is cmd/spec, which registers operations to emit the
+// spec but never serves requests; the guard keeps these handlers from panicking
+// and mirrors the nil-checks in server.New.
+func (h *Handler) requireAuth() (*auth.Service, error) {
+	if h.deps.Auth == nil {
+		return nil, huma.Error503ServiceUnavailable("authentication is not available")
+	}
+	return h.deps.Auth, nil
+}
+
 func (h *Handler) registerAuth(api huma.API) {
 	tags := []string{"auth"}
 
@@ -75,10 +86,14 @@ func (h *Handler) registerAuth(api huma.API) {
 		Security:      cookieAuthSecurity,
 		DefaultStatus: http.StatusOK,
 	}, func(ctx context.Context, in *sessionCookieInput) (*messageOutput, error) {
-		if err := h.deps.Auth.RevokeSession(ctx, in.Session); err != nil {
+		svc, err := h.requireAuth()
+		if err != nil {
+			return nil, err
+		}
+		if err := svc.RevokeSession(ctx, in.Session); err != nil {
 			return nil, huma.Error500InternalServerError("logout failed", err)
 		}
-		out := &messageOutput{SetCookie: h.deps.Auth.ClearSessionCookie()}
+		out := &messageOutput{SetCookie: svc.ClearSessionCookie()}
 		out.Body.Message = "Logged out."
 		return out, nil
 	})
@@ -92,14 +107,18 @@ func (h *Handler) registerAuth(api huma.API) {
 		Security:      cookieAuthSecurity,
 		DefaultStatus: http.StatusOK,
 	}, func(ctx context.Context, _ *struct{}) (*messageOutput, error) {
+		svc, err := h.requireAuth()
+		if err != nil {
+			return nil, err
+		}
 		u := auth.UserFromContext(ctx)
 		if u == nil {
 			return nil, huma.Error401Unauthorized("not authenticated")
 		}
-		if err := h.deps.Auth.RevokeAllForUser(ctx, u.ID); err != nil {
+		if err := svc.RevokeAllForUser(ctx, u.ID); err != nil {
 			return nil, huma.Error500InternalServerError("logout failed", err)
 		}
-		out := &messageOutput{SetCookie: h.deps.Auth.ClearSessionCookie()}
+		out := &messageOutput{SetCookie: svc.ClearSessionCookie()}
 		out.Body.Message = "Logged out everywhere."
 		return out, nil
 	})
@@ -113,21 +132,25 @@ func (h *Handler) registerAuth(api huma.API) {
 		Security:      cookieAuthSecurity,
 		DefaultStatus: http.StatusOK,
 	}, func(ctx context.Context, _ *struct{}) (*messageOutput, error) {
+		svc, err := h.requireAuth()
+		if err != nil {
+			return nil, err
+		}
 		u := auth.UserFromContext(ctx)
 		if u == nil {
 			return nil, huma.Error401Unauthorized("not authenticated")
 		}
-		sole, err := h.deps.Auth.IsSoleAdmin(ctx, u)
+		sole, err := svc.IsSoleAdmin(ctx, u)
 		if err != nil {
 			return nil, huma.Error500InternalServerError("could not delete account", err)
 		}
 		if sole {
 			return nil, huma.Error409Conflict("the sole admin cannot delete their own account")
 		}
-		if err := h.deps.Auth.DeleteUser(ctx, u.ID); err != nil {
+		if err := svc.DeleteUser(ctx, u.ID); err != nil {
 			return nil, huma.Error500InternalServerError("could not delete account", err)
 		}
-		out := &messageOutput{SetCookie: h.deps.Auth.ClearSessionCookie()}
+		out := &messageOutput{SetCookie: svc.ClearSessionCookie()}
 		out.Body.Message = "Account deleted."
 		return out, nil
 	})

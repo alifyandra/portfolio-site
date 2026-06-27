@@ -26,10 +26,16 @@ func UserFromContext(ctx context.Context) *ent.User {
 // untouched. Protected operations do the actual rejecting in their handlers.
 func (s *Service) Middleware(ctx huma.Context, next func(huma.Context)) {
 	if raw := readCookie(ctx, sessionCookieName); raw != "" {
-		if u, err := s.Authenticate(ctx.Context(), raw); err != nil {
+		if u, bumped, err := s.Authenticate(ctx.Context(), raw); err != nil {
 			slog.WarnContext(ctx.Context(), "auth: session lookup failed", "err", err)
 		} else if u != nil {
 			ctx = huma.WithValue(ctx, userCtxKey, u)
+			if bumped {
+				// The DB expiry slid forward; refresh the cookie's client-side
+				// expiry to match so the session actually slides for the user.
+				c := s.SessionCookie(raw)
+				ctx.AppendHeader("Set-Cookie", c.String())
+			}
 		}
 	}
 	next(ctx)
