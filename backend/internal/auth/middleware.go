@@ -44,15 +44,31 @@ func (s *Service) Middleware(ctx huma.Context, next func(huma.Context)) {
 		} else if u != nil {
 			ctx = huma.WithValue(ctx, userCtxKey, u)
 			ctx = huma.WithValue(ctx, tokenCtxKey, raw)
-			if bumped {
-				// The DB expiry slid forward; refresh the cookie's client-side
-				// expiry to match so the session actually slides for the user.
+			// The DB expiry slid forward; refresh the cookie's client-side expiry
+			// to match so the session actually slides for the user. Skip this on
+			// operations that clear the cookie (logout/delete): a revive header
+			// would race the handler's clearing header on the same response.
+			if bumped && !clearsSessionCookie(ctx.Operation()) {
 				c := s.SessionCookie(raw)
 				ctx.AppendHeader("Set-Cookie", c.String())
 			}
 		}
 	}
 	next(ctx)
+}
+
+// clearsSessionCookie reports whether an operation expires the session cookie,
+// so the sliding middleware must not emit a competing revive header on the same
+// response.
+func clearsSessionCookie(op *huma.Operation) bool {
+	if op == nil {
+		return false
+	}
+	switch op.OperationID {
+	case "logout", "logout-all", "delete-account":
+		return true
+	}
+	return false
 }
 
 // readCookie pulls a single cookie value out of a Huma request context by
