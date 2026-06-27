@@ -34,11 +34,6 @@ func toUserOutput(u *ent.User) *userOutput {
 	return out
 }
 
-// sessionCookieInput reads the raw session token from the request cookie.
-type sessionCookieInput struct {
-	Session string `cookie:"session"`
-}
-
 // messageOutput is a small JSON acknowledgement that may also clear the session
 // cookie via Set-Cookie.
 type messageOutput struct {
@@ -85,12 +80,14 @@ func (h *Handler) registerAuth(api huma.API) {
 		Tags:          tags,
 		Security:      cookieAuthSecurity,
 		DefaultStatus: http.StatusOK,
-	}, func(ctx context.Context, in *sessionCookieInput) (*messageOutput, error) {
+	}, func(ctx context.Context, _ *struct{}) (*messageOutput, error) {
 		svc, err := h.requireAuth()
 		if err != nil {
 			return nil, err
 		}
-		if err := svc.RevokeSession(ctx, in.Session); err != nil {
+		// The raw token is stashed on the context by the auth middleware; the
+		// HttpOnly cookie is never an operation input.
+		if err := svc.RevokeSession(ctx, auth.TokenFromContext(ctx)); err != nil {
 			return nil, huma.Error500InternalServerError("logout failed", err)
 		}
 		out := &messageOutput{SetCookie: svc.ClearSessionCookie()}

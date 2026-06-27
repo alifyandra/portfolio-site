@@ -347,11 +347,6 @@ paths:
   /api/auth/logout:
     post:
       operationId: logout
-      parameters:
-        - in: cookie
-          name: session
-          schema:
-            type: string
       responses:
         "200":
           content:

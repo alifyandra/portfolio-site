@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/caarlos0/env/v11"
 )
@@ -75,6 +76,14 @@ func Load() (*Config, error) {
 	cfg, err := env.ParseAs[Config]()
 	if err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
+	}
+	// Credentialed CORS (cookies) requires exact origins: a wildcard would be
+	// rejected by browsers and is unsafe, so fail fast rather than silently
+	// breaking the auth flow in prod. See ADR 10.
+	for _, o := range cfg.CORSAllowedOrigins {
+		if strings.Contains(o, "*") {
+			return nil, fmt.Errorf("CORS_ALLOWED_ORIGINS must list exact origins (no wildcards) because credentialed CORS is enabled; got %q", o)
+		}
 	}
 	return &cfg, nil
 }
