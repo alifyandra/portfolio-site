@@ -5,6 +5,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/alifyandra/portfolio-site/backend/ent"
+	"github.com/alifyandra/portfolio-site/backend/internal/auth"
 	"github.com/alifyandra/portfolio-site/backend/internal/queue"
 	"github.com/alifyandra/portfolio-site/backend/internal/spotify"
 	"github.com/alifyandra/portfolio-site/backend/internal/storage"
@@ -17,6 +18,7 @@ type Deps struct {
 	Spotify *spotify.Client
 	Storage *storage.Store
 	Queue   *queue.Client
+	Auth    *auth.Service
 }
 
 // Handler holds dependencies and registers operations against a Huma API.
@@ -35,4 +37,5 @@ func (h *Handler) Register(api huma.API) {
 	h.registerProjects(api)
 	h.registerContact(api)
 	h.registerSpotify(api)
+	h.registerAuth(api)
 }

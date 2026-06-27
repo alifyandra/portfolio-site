@@ -34,12 +34,12 @@ type Config struct {
 	TrustCloudflareIP bool `env:"TRUST_CLOUDFLARE_IP" envDefault:"false"`
 
 	// AWS / S3 / SQS. Endpoint overrides let us point at LocalStack/MinIO/ElasticMQ locally.
-	AWSRegion    string `env:"AWS_REGION" envDefault:"ap-southeast-2"`
-	S3Bucket     string `env:"S3_BUCKET" envDefault:"portfolio-assets"`
-	S3Endpoint   string `env:"S3_ENDPOINT_URL"`  // empty in prod (real S3); set locally for MinIO
-	SQSEndpoint  string `env:"SQS_ENDPOINT_URL"` // empty in prod (real SQS); set locally for ElasticMQ
-	SQSQueueURL  string `env:"SQS_QUEUE_URL"`
-	S3PathStyle  bool   `env:"S3_FORCE_PATH_STYLE" envDefault:"false"` // true for MinIO
+	AWSRegion   string `env:"AWS_REGION" envDefault:"ap-southeast-2"`
+	S3Bucket    string `env:"S3_BUCKET" envDefault:"portfolio-assets"`
+	S3Endpoint  string `env:"S3_ENDPOINT_URL"`  // empty in prod (real S3); set locally for MinIO
+	SQSEndpoint string `env:"SQS_ENDPOINT_URL"` // empty in prod (real SQS); set locally for ElasticMQ
+	SQSQueueURL string `env:"SQS_QUEUE_URL"`
+	S3PathStyle bool   `env:"S3_FORCE_PATH_STYLE" envDefault:"false"` // true for MinIO
 
 	// Spotify proxy (see CONTEXT.md). Client credentials + a long-lived refresh token.
 	SpotifyClientID     string `env:"SPOTIFY_CLIENT_ID"`
@@ -49,8 +49,25 @@ type Config struct {
 	// Email (AWS SES). The sender must be a verified SES identity. ContactNotifyTo
 	// is where contact-form notifications are delivered. Both blank => email
 	// disabled (the contact form still stores messages).
-	SESSenderEmail string `env:"SES_SENDER_EMAIL"`
+	SESSenderEmail  string `env:"SES_SENDER_EMAIL"`
 	ContactNotifyTo string `env:"CONTACT_NOTIFY_TO" envDefault:"alifyandra@gmail.com"`
+
+	// Auth / Google OAuth (see ADR 10). Blank client id/secret => auth disabled:
+	// the app still boots and the auth endpoints report "not configured".
+	GoogleClientID     string `env:"GOOGLE_CLIENT_ID"`
+	GoogleClientSecret string `env:"GOOGLE_CLIENT_SECRET"`
+	// GoogleRedirectURL is the backend callback Google returns to. It must match a
+	// redirect URI registered on the Google OAuth client.
+	GoogleRedirectURL string `env:"GOOGLE_REDIRECT_URL" envDefault:"http://localhost:8080/api/auth/google/callback"`
+	// AdminEmails are the verified Google emails granted the admin role. Matched on
+	// every login so the role self-heals and a fresh prod DB needs no manual step.
+	AdminEmails []string `env:"ADMIN_EMAILS" envSeparator:","`
+	// SessionCookieDomain scopes the session cookie. Set to ".aliflabs.dev" in prod
+	// so it is shared across the apex and the api subdomain; blank in local dev
+	// yields a host-only cookie.
+	SessionCookieDomain string `env:"SESSION_COOKIE_DOMAIN"`
+	// FrontendURL is where the OAuth callback redirects the browser after sign-in.
+	FrontendURL string `env:"FRONTEND_URL" envDefault:"http://localhost:3000"`
 }
 
 // Load reads and validates configuration from the environment.
