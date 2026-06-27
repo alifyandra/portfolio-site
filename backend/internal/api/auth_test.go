@@ -1,0 +1,55 @@
+package api
+
+import (
+	"net/http"
+	"testing"
+
+	"github.com/danielgtaylor/huma/v2/humatest"
+
+	"github.com/alifyandra/portfolio-site/backend/internal/auth"
+)
+
+// newAuthTestAPI wires only the auth operations onto a humatest API, backed by
+// an auth service with no DB. The paths exercised here (logout with no cookie,
+// anonymous me) never touch the database.
+func newAuthTestAPI(t *testing.T) humatest.TestAPI {
+	t.Helper()
+	_, api := humatest.New(t)
+	h := New(Deps{Auth: auth.New(nil, auth.Config{})})
+	h.registerAuth(api)
+	return api
+}
+
+// TestLogoutClearsSessionCookie verifies the response actually emits a valid,
+// parseable Set-Cookie that expires the session cookie (guards against the
+// header being rendered as a Go struct rather than a cookie string).
+func TestLogoutClearsSessionCookie(t *testing.T) {
+	api := newAuthTestAPI(t)
+	resp := api.Post("/api/auth/logout")
+	if resp.Code != http.StatusOK {
+		t.Fatalf("logout status = %d, want 200; body=%s", resp.Code, resp.Body.String())
+	}
+
+	var session *http.Cookie
+	for _, c := range resp.Result().Cookies() {
+		if c.Name == "session" {
+			session = c
+		}
+	}
+	if session == nil {
+		t.Fatalf("no parseable session cookie cleared; raw Set-Cookie=%q", resp.Header().Get("Set-Cookie"))
+	}
+	if session.MaxAge >= 0 {
+		t.Fatalf("session cookie not expired: MaxAge=%d", session.MaxAge)
+	}
+}
+
+// TestMeRequiresAuth verifies an anonymous request to the protected endpoint is
+// rejected (no middleware sets a user, so the handler must 401).
+func TestMeRequiresAuth(t *testing.T) {
+	api := newAuthTestAPI(t)
+	resp := api.Get("/api/auth/me")
+	if resp.Code != http.StatusUnauthorized {
+		t.Fatalf("me status = %d, want 401; body=%s", resp.Code, resp.Body.String())
+	}
+}
