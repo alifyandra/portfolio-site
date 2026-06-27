@@ -18,9 +18,9 @@ var ErrNotConfigured = fmt.Errorf("email: SES sender not configured")
 // Mailer sends email through SES. When no sender is configured it is still
 // constructed, but Send returns ErrNotConfigured so callers can degrade.
 type Mailer struct {
-	client    *sesv2.Client
-	sender    string
-	notifyTo  string
+	client   *sesv2.Client
+	sender   string
+	notifyTo string
 }
 
 // New builds a Mailer from config.
