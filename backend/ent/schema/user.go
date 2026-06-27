@@ -20,7 +20,7 @@ func (User) Fields() []ent.Field {
 			NotEmpty().
 			MaxLen(254).
 			Unique().
-			Comment("Canonical email, re-asserted from the verified provider email on each login"),
+			Comment("Canonical email; re-asserted from the verified provider email on login, unless that value already belongs to another account (then the existing email is kept so the user is not locked out)"),
 		field.String("name").
 			Optional(),
 		field.String("avatar_url").
