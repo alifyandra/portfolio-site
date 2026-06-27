@@ -116,5 +116,11 @@ make fe-dev    # Next.js at :3000 (separate terminal)
   (verify it points at the proxied origin); SES production-access request (DKIM
   already verifying); remaining Cloudflare freebies (Bot Fight Mode is a dashboard
   toggle; the `/api/contact` edge rate-limit rule is codified in Terraform;
-  managed WAF rulesets need a paid plan); optional `prod` seed; **auth** (deferred
-  for v1, the unlock for dynamic Photography + curated playlists + admin page).
+  managed WAF rulesets need a paid plan); optional `prod` seed.
+- 🔜 **Auth design accepted** ([ADR 10](docs/adr/0010-authentication-session-model.md)):
+  backend-owned Google OAuth, **open registration** (multi-user), opaque
+  server-side sessions in Postgres (`User`/`Identity`/`Session` Ent entities),
+  admin role via env email allowlist. This **supersedes** the earlier
+  "auth deferred / admin-only" framing. Auth unlocks the later write features
+  (admin page, dynamic Photography, curated playlists), which remain separate
+  follow-on work; the auth system itself is the current build.
