@@ -11,6 +11,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib" // register the "pgx" database/sql driver
 
 	"github.com/alifyandra/portfolio-site/backend/ent"
+	"github.com/alifyandra/portfolio-site/backend/internal/auth"
 	"github.com/alifyandra/portfolio-site/backend/internal/cache"
 	"github.com/alifyandra/portfolio-site/backend/internal/config"
 	"github.com/alifyandra/portfolio-site/backend/internal/email"
@@ -77,6 +78,16 @@ func New(ctx context.Context, cfg *config.Config) (*App, error) {
 		return nil, err
 	}
 
+	authSvc := auth.New(entClient, auth.Config{
+		ClientID:     cfg.GoogleClientID,
+		ClientSecret: cfg.GoogleClientSecret,
+		RedirectURL:  cfg.GoogleRedirectURL,
+		AdminEmails:  cfg.AdminEmails,
+		CookieDomain: cfg.SessionCookieDomain,
+		CookieSecure: cfg.IsProduction(),
+		FrontendURL:  cfg.FrontendURL,
+	})
+
 	deps := &server.Deps{
 		Config:  cfg,
 		Ent:     entClient,
@@ -85,6 +96,7 @@ func New(ctx context.Context, cfg *config.Config) (*App, error) {
 		Storage: store,
 		Queue:   q,
 		Email:   mailer,
+		Auth:    authSvc,
 	}
 
 	return &App{

@@ -137,6 +137,21 @@ components:
       required:
         - projects
       type: object
+    MessageOutputBody:
+      additionalProperties: false
+      properties:
+        $schema:
+          description: A URL to the JSON Schema for this object.
+          examples:
+            - https://example.com/schemas/MessageOutputBody.json
+          format: uri
+          readOnly: true
+          type: string
+        message:
+          type: string
+      required:
+        - message
+      type: object
     NowPlayingOutputBody:
       additionalProperties: false
       properties:
@@ -290,12 +305,145 @@ components:
       required:
         - is_playing
       type: object
+    UserOutputBody:
+      additionalProperties: false
+      properties:
+        $schema:
+          description: A URL to the JSON Schema for this object.
+          examples:
+            - https://example.com/schemas/UserOutputBody.json
+          format: uri
+          readOnly: true
+          type: string
+        avatar_url:
+          type: string
+        email:
+          type: string
+        id:
+          format: int64
+          type: integer
+        name:
+          type: string
+        role:
+          type: string
+      required:
+        - id
+        - email
+        - name
+        - avatar_url
+        - role
+      type: object
+  securitySchemes:
+    cookieAuth:
+      in: cookie
+      name: session
+      type: apiKey
 info:
   description: Backend API for alifyandra's portfolio site.
   title: Portfolio API
   version: 0.1.0
 openapi: 3.1.0
 paths:
+  /api/auth/logout:
+    post:
+      operationId: logout
+      parameters:
+        - in: cookie
+          name: session
+          schema:
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageOutputBody"
+          description: OK
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ErrorModel"
+          description: Error
+      security:
+        - cookieAuth: []
+      summary: Log out the current device
+      tags:
+        - auth
+  /api/auth/logout-all:
+    post:
+      operationId: logout-all
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageOutputBody"
+          description: OK
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ErrorModel"
+          description: Error
+      security:
+        - cookieAuth: []
+      summary: Log out every device for the current user
+      tags:
+        - auth
+  /api/auth/me:
+    delete:
+      operationId: delete-account
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageOutputBody"
+          description: OK
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ErrorModel"
+          description: Error
+      security:
+        - cookieAuth: []
+      summary: Permanently delete the current user's account
+      tags:
+        - auth
+    get:
+      operationId: get-current-user
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserOutputBody"
+          description: OK
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ErrorModel"
+          description: Error
+      security:
+        - cookieAuth: []
+      summary: Get the current authenticated user
+      tags:
+        - auth
   /api/contact:
     post:
       operationId: create-contact-message

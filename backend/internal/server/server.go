@@ -15,6 +15,7 @@ import (
 
 	"github.com/alifyandra/portfolio-site/backend/ent"
 	"github.com/alifyandra/portfolio-site/backend/internal/api"
+	"github.com/alifyandra/portfolio-site/backend/internal/auth"
 	"github.com/alifyandra/portfolio-site/backend/internal/config"
 	"github.com/alifyandra/portfolio-site/backend/internal/email"
 	"github.com/alifyandra/portfolio-site/backend/internal/queue"
@@ -32,6 +33,7 @@ type Deps struct {
 	Storage *storage.Store
 	Queue   *queue.Client
 	Email   *email.Mailer
+	Auth    *auth.Service
 }
 
 // New builds the Chi router with Huma mounted on it and all routes registered.
@@ -58,11 +60,14 @@ func New(deps *Deps) (http.Handler, huma.API) {
 	}
 	r.Use(httprate.Limit(100, time.Minute, httprate.WithKeyFuncs(rateLimitKey)))
 
+	// Credentials are enabled so the browser sends the session cookie on
+	// cross-subdomain API calls (aliflabs.dev -> api.aliflabs.dev). For that to
+	// work the allowed-origins list must stay exact (no wildcards). See ADR 10.
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   deps.Config.CORSAllowedOrigins,
 		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"Accept", "Content-Type", "Authorization"},
-		AllowCredentials: false,
+		AllowCredentials: true,
 		MaxAge:           300,
 	}))
 
@@ -75,7 +80,25 @@ func New(deps *Deps) (http.Handler, huma.API) {
 	humaCfg := huma.DefaultConfig("Portfolio API", "0.1.0")
 	humaCfg.DocsPath = "/docs"
 	humaCfg.Info.Description = "Backend API for alifyandra's portfolio site."
+
+	// Register the cookie security scheme so protected operations show a lock in
+	// /docs and the generated client knows they need the session cookie (ADR 10).
+	if humaCfg.Components.SecuritySchemes == nil {
+		humaCfg.Components.SecuritySchemes = map[string]*huma.SecurityScheme{}
+	}
+	humaCfg.Components.SecuritySchemes["cookieAuth"] = &huma.SecurityScheme{
+		Type: "apiKey",
+		In:   "cookie",
+		Name: "session",
+	}
+
 	humaAPI := humachi.New(r, humaCfg)
+
+	// Resolve the session cookie to a User on every request (best-effort). Guarded
+	// because cmd/spec builds the API with a nil Auth purely to emit the spec.
+	if deps.Auth != nil {
+		humaAPI.UseMiddleware(deps.Auth.Middleware)
+	}
 
 	h := api.New(api.Deps{
 		Ent:     deps.Ent,
@@ -83,8 +106,16 @@ func New(deps *Deps) (http.Handler, huma.API) {
 		Spotify: deps.Spotify,
 		Storage: deps.Storage,
 		Queue:   deps.Queue,
+		Auth:    deps.Auth,
 	})
 	h.Register(humaAPI)
+
+	// OAuth redirect flows are browser navigations, not JSON operations, so they
+	// are plain Chi routes rather than Huma operations (no generated client hook).
+	if deps.Auth != nil {
+		r.Get("/api/auth/google/login", deps.Auth.LoginHandler)
+		r.Get("/api/auth/google/callback", deps.Auth.CallbackHandler)
+	}
 
 	return r, humaAPI
 }
