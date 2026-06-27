@@ -50,6 +50,31 @@ not the database: hero/about, experience timeline, education, skills, résumé P
 link. Deliberately *not* modelled as domain entities — putting it behind an API
 would add cost with no benefit.
 
+### Visitor
+Anyone using the site without having authenticated. Visitors are anonymous: they
+read Projects, view About Panels, and submit Contact Messages. The default
+audience of the site. Contrast with [User].
+
+### User
+A person who has authenticated. A User has a canonical `email`, display `name`,
+avatar, a `role` (see [Role]), and one or more [Identity]s. Distinct from a
+[Visitor] (anonymous) and from **Alif** (the site's owner, who is *a* User with
+the admin role). Anyone may become a User by signing in (open registration);
+having a User record does not by itself grant any elevated capability.
+
+### Identity
+A single external login credential belonging to a [User]: a `(provider,
+provider_sub)` pair (e.g. Google + the stable `sub` claim) plus the email that
+provider asserts. A User may have several Identities (one per login method);
+each Identity belongs to exactly one User. The durable key is the provider's
+`sub`, never the email (emails are mutable and reusable).
+
+### Role
+The authorization level of a [User]. Two roles exist: **admin** (Alif — full
+read/write over Projects, Photography, playlists, and the admin area) and
+**member** (every other User — currently no capabilities beyond being signed
+in). Roles gate *what a User may do*; authentication only proves *who they are*.
+
 ### Job (async)
 A unit of background work placed on a queue and processed by a worker out of
 band from the web request. The first real Job is **`contact.notify`** — emailing
