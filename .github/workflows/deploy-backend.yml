@@ -101,9 +101,14 @@ jobs:
             --parameters '{"commands":[
               "set -e",
               "cd /opt/portfolio",
-              "export IMAGE_TAG=${{ github.sha }}",
+              "TMP=$(mktemp)",
+              "aws ssm get-parameters-by-path --path /portfolio/env --with-decryption --recursive --region ap-southeast-2 --query \"Parameters[].[Name,Value]\" --output text | while read -r name value; do echo \"${name##*/}=${value}\" >> \"$TMP\"; done",
+              "echo \"IMAGE_TAG=${{ github.sha }}\" >> \"$TMP\"",
+              "grep -q \"^DATABASE_URL=\" \"$TMP\" || { echo MISSING_DATABASE_URL; exit 1; }",
+              "mv \"$TMP\" /opt/portfolio/.env",
+              "chmod 600 /opt/portfolio/.env",
               "docker compose -f docker-compose.prod.yml pull api worker",
-              "docker compose -f docker-compose.prod.yml up -d"
+              "docker compose -f docker-compose.prod.yml up -d --force-recreate api worker"
             ]}' \
             --query "Command.CommandId" --output text)
           echo "Sent SSM command $CMD_ID; waiting for completion…"
@@ -115,3 +120,7 @@ jobs:
             --instance-id "$INSTANCE_ID" \
             --query "{Status:Status,Output:StandardOutputContent,Err:StandardErrorContent}" \
             --output json
+          STATUS=$(aws ssm get-command-invocation \
+            --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" \
+            --query "Status" --output text)
+          [ "$STATUS" = "Success" ] || { echo "::error::On-box deploy command status: $STATUS"; exit 1; }
