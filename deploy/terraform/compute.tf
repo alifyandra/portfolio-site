@@ -74,6 +74,15 @@ resource "aws_instance" "app" {
   # change, replacing the box (the EIP stays put).
   user_data_replace_on_change = true
 
+  # Pin to the AMI the box launched with. data.aws_ami.al2023_arm64 tracks the
+  # newest AL2023 release, so without this every apply would replace the box
+  # (downtime + wipes the on-box Postgres root volume) merely because AWS
+  # published a newer AMI. Deliberate AMI upgrades are done by tainting the
+  # instance (terraform apply -replace=aws_instance.app) after taking a backup.
+  lifecycle {
+    ignore_changes = [ami]
+  }
+
   metadata_options {
     http_tokens   = "required" # IMDSv2 only
     http_endpoint = "enabled"
