@@ -1,7 +1,7 @@
 # 11. WhatsApp sender tool and the whatsapp-web.js sidecar
 
 Date: 2026-06-28
-Status: Proposed
+Status: Accepted
 
 ## Context
 
@@ -103,12 +103,15 @@ repo (no secrets; they call an internal API). The sidecar is private.
   micro, but the send must run in the Node/Chromium sidecar, so the queue seam
   does not fit the engine (the backend may still use a Job to kick off a batch).
 
-## Open questions (to settle before Accepted)
+## Settled
 
-1. **Sidecar hosting**: where the Node plus Chromium service runs. Occasional use
-   favours a cheap, scale-to-zero host; a small dedicated VPS or a second EC2 are
-   alternatives with an always-on cost.
-2. **MVP cut**: a tracer bullet first (link, one template, one list, send, live
-   progress with an aggregate result), with multiple templates and lists, batch
-   history, and per-recipient logs as fast-follows.
-3. **Caps**: concrete per-batch and per-day limits.
+1. **MVP**: a tracer bullet first, a single end-to-end slice (link by QR, one
+   template, one recipient list, send, live progress with an aggregate result).
+   Multiple templates and lists, batch history, and per-recipient logs are
+   fast-follows.
+2. **Caps**: 250 recipients per batch and 3 batches per day to start, adjustable.
+3. **Sidecar hosting**: a free-tier host, leaning Oracle Cloud Always Free (an
+   ARM VM with ample RAM for Chromium, free indefinitely), with Fly.io auto-stop
+   as a low-effort near-free alternative. This is a deploy-time concern: the
+   sidecar runs locally during development, so the host is finalized before it
+   goes live and does not gate the build.
