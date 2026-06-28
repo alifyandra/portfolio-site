@@ -3,7 +3,7 @@
 // the base URL is configured via NEXT_PUBLIC_API_URL.
 //
 // Lives outside src/lib/api/ because orval's `clean: true` wipes that folder.
-const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080';
+export const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080';
 
 export const customFetch = async <T>(
   url: string,
@@ -11,6 +11,11 @@ export const customFetch = async <T>(
 ): Promise<T> => {
   const res = await fetch(`${BASE_URL}${url}`, {
     ...options,
+    // Send the session cookie cross-origin (frontend and API are different
+    // origins per ADR 0003; the opaque session cookie is scoped to
+    // .aliflabs.dev per ADR 10). Without this the auth cookie is never
+    // attached and every authenticated request reads as anonymous.
+    credentials: 'include',
     headers: {
       'Content-Type': 'application/json',
       ...(options?.headers ?? {}),

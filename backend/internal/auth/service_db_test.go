@@ -20,6 +20,13 @@ import (
 // with the Ent schema migrated. Each test gets its own isolated DB.
 func newTestService(t *testing.T, adminEmails ...string) (*Service, *ent.Client) {
 	t.Helper()
+	return newTestServiceCfg(t, Config{AdminEmails: adminEmails})
+}
+
+// newTestServiceCfg is newTestService with a caller-supplied Config (e.g. to set
+// FriendEmails). Each test still gets its own isolated in-memory SQLite DB.
+func newTestServiceCfg(t *testing.T, cfg Config) (*Service, *ent.Client) {
+	t.Helper()
 	dsn := "file:" + strings.ReplaceAll(t.Name(), "/", "_") + "?mode=memory&cache=shared&_pragma=foreign_keys(1)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -31,7 +38,7 @@ func newTestService(t *testing.T, adminEmails ...string) (*Service, *ent.Client)
 	if err := client.Schema.Create(context.Background()); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	return New(client, Config{AdminEmails: adminEmails}), client
+	return New(client, cfg), client
 }
 
 func TestUpsertUser_RolesIdentitiesAndReturningLogin(t *testing.T) {
@@ -70,6 +77,29 @@ func TestUpsertUser_RolesIdentitiesAndReturningLogin(t *testing.T) {
 	}
 	if client.User.Query().CountX(ctx) != 2 {
 		t.Errorf("expected exactly two users, got %d", client.User.Query().CountX(ctx))
+	}
+}
+
+func TestUpsertUser_FriendRoleAssignedAndReasserted(t *testing.T) {
+	ctx := context.Background()
+	svc, client := newTestServiceCfg(t, Config{FriendEmails: []string{"nayla@x.com"}})
+
+	u, err := svc.upsertUser(ctx, googleClaims{sub: "sub-n", email: "nayla@x.com", name: "Nayla"})
+	if err != nil {
+		t.Fatalf("friend login: %v", err)
+	}
+	if u.Role != user.RoleFriend {
+		t.Errorf("friend-allowlisted user role = %v, want friend", u.Role)
+	}
+
+	// A stray DB edit demotes the friend; the next login must re-assert the role.
+	client.User.UpdateOne(u).SetRole(user.RoleMember).ExecX(ctx)
+	u2, err := svc.upsertUser(ctx, googleClaims{sub: "sub-n", email: "nayla@x.com", name: "Nayla"})
+	if err != nil {
+		t.Fatalf("returning friend login: %v", err)
+	}
+	if u2.Role != user.RoleFriend {
+		t.Errorf("friend role not re-asserted on login: got %v, want friend", u2.Role)
 	}
 }
 

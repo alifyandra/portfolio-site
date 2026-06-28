@@ -61,6 +61,7 @@ type Config struct {
 	ClientSecret string
 	RedirectURL  string
 	AdminEmails  []string
+	FriendEmails []string
 	CookieDomain string
 	CookieSecure bool
 	FrontendURL  string
@@ -72,6 +73,7 @@ type Service struct {
 	oauth        *oauth2.Config // nil when not configured
 	clientID     string
 	adminEmails  map[string]struct{}
+	friendEmails map[string]struct{}
 	cookieDomain string
 	cookieSecure bool
 	frontendURL  string
@@ -84,6 +86,7 @@ func New(entClient *ent.Client, cfg Config) *Service {
 		ent:          entClient,
 		clientID:     cfg.ClientID,
 		adminEmails:  make(map[string]struct{}, len(cfg.AdminEmails)),
+		friendEmails: make(map[string]struct{}, len(cfg.FriendEmails)),
 		cookieDomain: cfg.CookieDomain,
 		cookieSecure: cfg.CookieSecure,
 		frontendURL:  cfg.FrontendURL,
@@ -91,6 +94,11 @@ func New(entClient *ent.Client, cfg Config) *Service {
 	for _, e := range cfg.AdminEmails {
 		if e = normalizeEmail(e); e != "" {
 			s.adminEmails[e] = struct{}{}
+		}
+	}
+	for _, e := range cfg.FriendEmails {
+		if e = normalizeEmail(e); e != "" {
+			s.friendEmails[e] = struct{}{}
 		}
 	}
 	if cfg.ClientID != "" && cfg.ClientSecret != "" {
@@ -127,10 +135,15 @@ func hashToken(raw string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// roleFor resolves the role for an email against the admin allowlist.
+// roleFor resolves the role for an email against the admin and friend
+// allowlists. Admin takes precedence over friend; everyone else is a member.
 func (s *Service) roleFor(email string) user.Role {
-	if _, ok := s.adminEmails[normalizeEmail(email)]; ok {
+	e := normalizeEmail(email)
+	if _, ok := s.adminEmails[e]; ok {
 		return user.RoleAdmin
+	}
+	if _, ok := s.friendEmails[e]; ok {
+		return user.RoleFriend
 	}
 	return user.RoleMember
 }

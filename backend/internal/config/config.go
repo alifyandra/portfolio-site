@@ -63,6 +63,11 @@ type Config struct {
 	// AdminEmails are the verified Google emails granted the admin role. Matched on
 	// every login so the role self-heals and a fresh prod DB needs no manual step.
 	AdminEmails []string `env:"ADMIN_EMAILS" envSeparator:","`
+	// FriendEmails are the verified Google emails granted the friend role: the tier
+	// between member and admin with access to friends-only tools (e.g. the WhatsApp
+	// sender). Matched on every login like AdminEmails so the role self-heals; admin
+	// takes precedence over friend. See ADR 10.
+	FriendEmails []string `env:"FRIEND_EMAILS" envSeparator:","`
 	// SessionCookieDomain scopes the session cookie. Set to ".aliflabs.dev" in prod
 	// so it is shared across the apex and the api subdomain; blank in local dev
 	// yields a host-only cookie.

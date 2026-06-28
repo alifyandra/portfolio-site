@@ -26,9 +26,9 @@ func (User) Fields() []ent.Field {
 		field.String("avatar_url").
 			Optional(),
 		field.Enum("role").
-			Values("admin", "member").
+			Values("admin", "friend", "member").
 			Default("member").
-			Comment("admin is conferred by the ADMIN_EMAILS allowlist, re-checked on every login"),
+			Comment("Access tier, re-checked on every login: admin (ADMIN_EMAILS) and friend (FRIEND_EMAILS) are conferred by allowlists, everyone else is a member. Admin takes precedence over friend"),
 		field.Time("created_at").
 			Default(time.Now).
 			Immutable(),

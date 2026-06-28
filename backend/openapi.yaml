@@ -325,6 +325,11 @@ components:
         name:
           type: string
         role:
+          description: "Access tier (see ADR 10): admin and friend are allowlist-conferred, everyone else is member"
+          enum:
+            - admin
+            - friend
+            - member
           type: string
       required:
         - id
