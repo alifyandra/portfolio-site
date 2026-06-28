@@ -112,15 +112,29 @@ make fe-dev    # Next.js at :3000 (separate terminal)
   default `true`) are applied through a gated two-stage **`plan-dispatch → apply`**
   `workflow_dispatch` with per-flag inputs, so a cutover can stage without
   committing first or putting CF creds in a local shell.
-- ⏳ **Not yet done:** Vercel `NEXT_PUBLIC_API_URL=https://api.aliflabs.dev`
-  (verify it points at the proxied origin); SES production-access request (DKIM
-  already verifying); remaining Cloudflare freebies (Bot Fight Mode is a dashboard
-  toggle; the `/api/contact` edge rate-limit rule is codified in Terraform;
-  managed WAF rulesets need a paid plan); optional `prod` seed.
-- 🔜 **Auth design accepted** ([ADR 10](docs/adr/0010-authentication-session-model.md)):
-  backend-owned Google OAuth, **open registration** (multi-user), opaque
-  server-side sessions in Postgres (`User`/`Identity`/`Session` Ent entities),
-  admin role via env email allowlist. This **supersedes** the earlier
-  "auth deferred / admin-only" framing. Auth unlocks the later write features
-  (admin page, dynamic Photography, curated playlists), which remain separate
-  follow-on work; the auth system itself is the current build.
+- ✅ Vercel `NEXT_PUBLIC_API_URL=https://api.aliflabs.dev` confirmed live (baked
+  into the prod bundle; frontend auto-deploys from `main`).
+- ⏳ **Not yet done:** SES production-access request (DKIM already verifying);
+  remaining Cloudflare freebies (Bot Fight Mode is a dashboard toggle; the
+  `/api/contact` edge rate-limit rule is codified in Terraform; managed WAF
+  rulesets need a paid plan); optional `prod` seed.
+- ✅ **Auth is LIVE in prod** ([ADR 10](docs/adr/0010-authentication-session-model.md)):
+  backend-owned Google OAuth, **open registration**, opaque server-side sessions
+  in Postgres (`User`/`Identity`/`Session`). **Tiered access** (ADR 10 amendment):
+  `admin` (`ADMIN_EMAILS`) / `friend` (`FRIEND_EMAILS`) / `member`, allowlists
+  re-asserted each login with admin precedence. Frontend wiring + `/account` page
+  shipped; verified end-to-end in prod (admin login confirmed, `friend` set for
+  Nayla). Auth env lives in SSM, and **`deploy-backend.yml` now rebuilds `.env`
+  from SSM on every deploy** (config ships with code); the instance `ami` is
+  pinned (`ignore_changes`) so an apply never silently replaces the box.
+  **Outstanding (external):** add Nayla (`munarohmantab99@gmail.com`) as a Google
+  OAuth **test user** if the consent screen is in Testing, else she cannot sign in.
+- 🚧 **Phase 2 in progress — WhatsApp Sender, the first Tool**
+  ([ADR 11](docs/adr/0011-whatsapp-sender-tool.md), friend-gated): branch
+  `feat/whatsapp-tool` (draft PR #53). Gated `/whatsapp` route + Go backend
+  (data + orchestration) + a separate **private** `whatsapp-web.js` sidecar
+  (Node + Chromium, off the micro) with ephemeral QR-linked sessions. Tracer-bullet
+  MVP, caps 250/batch + 3/day, free-tier host (Oracle Always Free leaning).
+  **Slice 1 done** (Ent data model: `WaTemplate`/`WaRecipientList`/`WaRecipient`/
+  `WaBatch`); slices 2-5 (backend CRUD + orchestration, sidecar, frontend, deploy)
+  remain. See memory `whatsapp-sender-tool`.

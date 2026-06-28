@@ -44,5 +44,9 @@ func (User) Edges() []ent.Edge {
 	return []ent.Edge{
 		edge.To("identities", Identity.Type),
 		edge.To("sessions", Session.Type),
+		// WhatsApp Sender tool (ADR 11), friend-tier owned.
+		edge.To("wa_templates", WaTemplate.Type),
+		edge.To("wa_recipient_lists", WaRecipientList.Type),
+		edge.To("wa_batches", WaBatch.Type),
 	}
 }
