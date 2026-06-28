@@ -30,15 +30,30 @@ locals {
     # Cloudflare's ranges (otherwise the header is spoofable by a direct request),
     # so this rides on lock_origin_to_cloudflare, not proxy_api. Default false.
     TRUST_CLOUDFLARE_IP = var.lock_origin_to_cloudflare ? "true" : "false"
+
+    # Auth / Google OAuth (see ADR 10). Non-secret, derived from the domain.
+    # The redirect URL must also be registered on the Google OAuth client. The
+    # cookie is scoped to the registrable domain so it is shared across the www
+    # frontend and the api subdomain. The post-login landing is the canonical
+    # www host (the apex 308s to www).
+    GOOGLE_REDIRECT_URL   = "https://${local.api_fqdn}/api/auth/google/callback"
+    SESSION_COOKIE_DOMAIN = ".${var.domain}"
+    FRONTEND_URL          = "https://www.${var.domain}/account"
   }
 
   # Secret slots. Seeded with a placeholder, then pushed out-of-band.
+  # GOOGLE_CLIENT_* are the OAuth credentials; ADMIN_EMAILS / FRIEND_EMAILS are
+  # kept here (not in env_config) so personal emails stay out of this public repo.
   env_secrets = [
     "POSTGRES_PASSWORD",
     "DATABASE_URL",
     "SPOTIFY_CLIENT_ID",
     "SPOTIFY_CLIENT_SECRET",
     "SPOTIFY_REFRESH_TOKEN",
+    "GOOGLE_CLIENT_ID",
+    "GOOGLE_CLIENT_SECRET",
+    "ADMIN_EMAILS",
+    "FRIEND_EMAILS",
   ]
 }
 
