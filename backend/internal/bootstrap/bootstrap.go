@@ -83,6 +83,7 @@ func New(ctx context.Context, cfg *config.Config) (*App, error) {
 		ClientSecret: cfg.GoogleClientSecret,
 		RedirectURL:  cfg.GoogleRedirectURL,
 		AdminEmails:  cfg.AdminEmails,
+		FriendEmails: cfg.FriendEmails,
 		CookieDomain: cfg.SessionCookieDomain,
 		CookieSecure: cfg.IsProduction(),
 		FrontendURL:  cfg.FrontendURL,

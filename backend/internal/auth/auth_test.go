@@ -46,12 +46,18 @@ func TestRandomTokenUniqueAndURLSafe(t *testing.T) {
 }
 
 func TestRoleFor(t *testing.T) {
-	svc := New(nil, Config{AdminEmails: []string{"Alif@Example.com", "  spaced@example.com "}})
+	svc := New(nil, Config{
+		AdminEmails:  []string{"Alif@Example.com", "  spaced@example.com ", "both@example.com"},
+		FriendEmails: []string{"Nayla@Example.com", "both@example.com"},
+	})
 
 	cases := map[string]string{
 		"alif@example.com":    "admin", // case-insensitive match
 		"ALIF@EXAMPLE.COM":    "admin",
-		"spaced@example.com":  "admin", // allowlist entry was trimmed
+		"spaced@example.com":  "admin",  // allowlist entry was trimmed
+		"nayla@example.com":   "friend", // friend allowlist, case-insensitive
+		"NAYLA@EXAMPLE.COM":   "friend",
+		"both@example.com":    "admin", // admin takes precedence over friend
 		"someone@example.com": "member",
 		"":                    "member",
 	}

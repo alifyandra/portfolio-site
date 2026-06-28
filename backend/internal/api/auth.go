@@ -20,7 +20,7 @@ type userOutput struct {
 		Email     string `json:"email"`
 		Name      string `json:"name"`
 		AvatarURL string `json:"avatar_url"`
-		Role      string `json:"role"`
+		Role      string `json:"role" enum:"admin,friend,member" doc:"Access tier (see ADR 10): admin and friend are allowlist-conferred, everyone else is member"`
 	}
 }
 

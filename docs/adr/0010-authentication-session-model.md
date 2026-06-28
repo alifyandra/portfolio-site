@@ -1,7 +1,7 @@
 # 10. Authentication and session model
 
 Date: 2026-06-20
-Status: Accepted
+Status: Accepted (amended 2026-06-28, see Amendment below)
 
 ## Context
 
@@ -82,3 +82,24 @@ Policy choices:
   it as the session of record would log everyone out on a flush.
 - **Email as the identity key**: emails are mutable and reusable, which enables
   account orphaning and hijack. Keyed on the Google `sub` instead.
+
+## Amendment (2026-06-28): tiered access via a friend role
+
+The two-role model (`admin`, `member`) is extended to three: `admin`, `friend`,
+`member`. The `friend` tier sits between the other two and is conferred by a
+`FRIEND_EMAILS` allowlist, matched on every login exactly like `ADMIN_EMAILS`,
+so it self-heals against a stray DB edit and needs no manual step on a fresh DB.
+Precedence is admin, then friend, then member: an email on both allowlists
+resolves to admin.
+
+Open registration is unchanged: anyone who signs in with Google still gets a
+User record. What the tiers gate is tool access, not account creation. Each tool
+declares the tier it needs; the launcher shows each person the set their tier
+allows, and the backend enforces the requirement per tool (frontend filtering is
+UX only). The first gated tool is the friends-only WhatsApp sender; public tools
+stay open to any signed-in member.
+
+This supersedes the binary admin/member framing in the Decision above. The
+session, cookie, and OAuth machinery are untouched; only the `User.role` enum
+and the role-resolution step changed. The enum and the API `role` field now
+carry `admin | friend | member`.
