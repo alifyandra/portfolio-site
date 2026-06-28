@@ -44,6 +44,14 @@ The About Panel showing Alif's listening life, powered by the [Spotify Proxy]
 ### Photography
 The About Panel showcasing a curated set of Alif's photos (image + caption).
 
+### Tool
+An app a [User] operates on the platform, distinct from a read-only [About Panel]
+and from a [Project] (which is portfolio work). Tools may be gated by [Role]. The
+first Tool is the **WhatsApp Sender** (friend-gated): a friend links their own
+WhatsApp by QR, stores message templates and recipient lists, and triggers
+personalized batch sends. Its sending engine runs in a separate, private
+whatsapp-web.js sidecar service, off the main host. See ADR 11.
+
 ### Static Content
 Résumé-derived material that changes rarely and lives in the frontend codebase,
 not the database: hero/about, experience timeline, education, skills, résumé PDF
@@ -70,10 +78,14 @@ each Identity belongs to exactly one User. The durable key is the provider's
 `sub`, never the email (emails are mutable and reusable).
 
 ### Role
-The authorization level of a [User]. Two roles exist: **admin** (Alif — full
-read/write over Projects, Photography, playlists, and the admin area) and
-**member** (every other User — currently no capabilities beyond being signed
-in). Roles gate *what a User may do*; authentication only proves *who they are*.
+The authorization level of a [User]. Three tiers exist: **admin** (Alif: full
+read/write over Projects, Photography, playlists, and the admin area), **friend**
+(allowlisted users who may use friends-only [Tool]s such as the WhatsApp Sender),
+and **member** (every other signed-in User: no capabilities beyond being signed
+in). admin and friend are conferred by env allowlists (`ADMIN_EMAILS`,
+`FRIEND_EMAILS`), re-asserted on every login, with admin taking precedence over
+friend. Roles gate *what a User may do*; authentication only proves *who they
+are*. See ADR 10.
 
 ### Job (async)
 A unit of background work placed on a queue and processed by a worker out of
