@@ -74,6 +74,14 @@ type Config struct {
 	SessionCookieDomain string `env:"SESSION_COOKIE_DOMAIN"`
 	// FrontendURL is where the OAuth callback redirects the browser after sign-in.
 	FrontendURL string `env:"FRONTEND_URL" envDefault:"http://localhost:3000"`
+
+	// WhatsApp Sender sidecar (see ADR 11). The sidecar runs whatsapp-web.js +
+	// Chromium off-box; the backend dials it over a shared secret. A blank URL
+	// disables the send path only: template and recipient-list CRUD keep working,
+	// and POST /api/wa/batches reports "not configured". The secret is required
+	// whenever the URL is set (validated in Load).
+	WaSidecarURL    string `env:"WA_SIDECAR_URL"`
+	WaSidecarSecret string `env:"WA_SIDECAR_SECRET"`
 }
 
 // Load reads and validates configuration from the environment.
@@ -89,6 +97,11 @@ func Load() (*Config, error) {
 		if strings.Contains(o, "*") {
 			return nil, fmt.Errorf("CORS_ALLOWED_ORIGINS must list exact origins (no wildcards) because credentialed CORS is enabled; got %q", o)
 		}
+	}
+	// The sidecar is dialed with a bearer secret; a URL without a secret would send
+	// unauthenticated requests it will reject, so fail fast rather than at runtime.
+	if cfg.WaSidecarURL != "" && cfg.WaSidecarSecret == "" {
+		return nil, fmt.Errorf("WA_SIDECAR_SECRET is required when WA_SIDECAR_URL is set")
 	}
 	return &cfg, nil
 }

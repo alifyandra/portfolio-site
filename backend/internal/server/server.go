@@ -21,6 +21,7 @@ import (
 	"github.com/alifyandra/portfolio-site/backend/internal/queue"
 	"github.com/alifyandra/portfolio-site/backend/internal/spotify"
 	"github.com/alifyandra/portfolio-site/backend/internal/storage"
+	"github.com/alifyandra/portfolio-site/backend/internal/whatsapp"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -107,6 +108,7 @@ func New(deps *Deps) (http.Handler, huma.API) {
 		Storage: deps.Storage,
 		Queue:   deps.Queue,
 		Auth:    deps.Auth,
+		WA:      whatsapp.NewClient(deps.Config.WaSidecarURL, deps.Config.WaSidecarSecret),
 	})
 	h.Register(humaAPI)
 
