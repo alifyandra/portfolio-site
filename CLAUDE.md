@@ -129,12 +129,24 @@ make fe-dev    # Next.js at :3000 (separate terminal)
   pinned (`ignore_changes`) so an apply never silently replaces the box.
   **Outstanding (external):** add Nayla (`munarohmantab99@gmail.com`) as a Google
   OAuth **test user** if the consent screen is in Testing, else she cannot sign in.
-- 🚧 **Phase 2 in progress — WhatsApp Sender, the first Tool**
-  ([ADR 11](docs/adr/0011-whatsapp-sender-tool.md), friend-gated): branch
-  `feat/whatsapp-tool` (draft PR #53). Gated `/whatsapp` route + Go backend
-  (data + orchestration) + a separate **private** `whatsapp-web.js` sidecar
-  (Node + Chromium, off the micro) with ephemeral QR-linked sessions. Tracer-bullet
-  MVP, caps 250/batch + 3/day, free-tier host (Oracle Always Free leaning).
-  **Slice 1 done** (Ent data model: `WaTemplate`/`WaRecipientList`/`WaRecipient`/
-  `WaBatch`); slices 2-5 (backend CRUD + orchestration, sidecar, frontend, deploy)
-  remain. See memory `whatsapp-sender-tool`.
+- 🚧 **Phase 2 — WhatsApp Sender, the first Tool** (feature-complete, not yet
+  deployed) ([ADR 11](docs/adr/0011-whatsapp-sender-tool.md), friend-gated):
+  branch `feat/whatsapp-tool` (draft PR #53, **CI green**). Gated `/whatsapp`
+  route + Go backend (data + orchestration) + a separate **private**
+  `whatsapp-web.js` sidecar (Node + Chromium, off the micro) with ephemeral
+  QR-linked sessions. Batch-anchored flow (create Batch → QR-link → send);
+  browser↔backend and backend↔sidecar both stream NDJSON over POST (not SSE).
+  Tracer-bullet MVP, caps 250/batch + 3/day. Contract:
+  `docs/whatsapp-sidecar-contract.md`.
+  - ✅ **Slice 1** Ent data model (`WaTemplate`/`WaRecipientList`/`WaRecipient`/
+    `WaBatch`). ✅ **Slice 2** backend: friend gate, owner-scoped CRUD,
+    `POST /api/wa/batches` streaming orchestration + caps (`internal/whatsapp/`,
+    `internal/api/whatsapp*.go`). ✅ **Slice 3** sidecar: private repo
+    **`alifyandra/whatsapp-sidecar`** (Docker image verified — streams a real QR
+    from containerized Chromium). ✅ **Slice 4** frontend: `/whatsapp` panels +
+    `qrcode.react` QR + streaming reader (`src/lib/wa-stream.ts`).
+  - ⏳ **Slice 5 remains (needs Alif):** a live QR scan to confirm delivery, then
+    provision the free host (Oracle Always Free) + deploy the sidecar + set prod
+    `WA_SIDECAR_URL/SECRET` in SSM. Local wiring seam done (sidecar
+    `docker compose up` + backend at `host.docker.internal:8081`).
+  See memory `whatsapp-sender-tool`.
