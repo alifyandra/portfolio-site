@@ -82,6 +82,11 @@ type Config struct {
 	// whenever the URL is set (validated in Load).
 	WaSidecarURL    string `env:"WA_SIDECAR_URL"`
 	WaSidecarSecret string `env:"WA_SIDECAR_SECRET"`
+	// WhatsApp send caps (ADR 11), tunable so a number can be ramped conservatively
+	// and raised as it proves stable. Defaults match the ADR: 250 recipients per
+	// batch, 3 sent-batches per rolling 24h.
+	WaMaxBatchRecipients int `env:"WA_MAX_BATCH_RECIPIENTS" envDefault:"250"`
+	WaMaxBatchesPerDay   int `env:"WA_MAX_BATCHES_PER_DAY" envDefault:"3"`
 }
 
 // Load reads and validates configuration from the environment.

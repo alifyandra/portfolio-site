@@ -34,8 +34,8 @@ func wabatchHasList(id int) predicate.WaBatch {
 	return wabatch.HasListWith(warecipientlist.ID(id))
 }
 
-func tooManyRecipientsMsg(n int) string {
-	return fmt.Sprintf("a list may hold at most %d recipients (got %d)", maxBatchRecipients, n)
+func tooManyRecipientsMsg(n, limit int) string {
+	return fmt.Sprintf("a list may hold at most %d recipients (got %d)", limit, n)
 }
 
 // BatchDTO is the frontend-facing shape of a WaBatch for the history view.
@@ -122,7 +122,7 @@ func (h *Handler) registerWhatsAppBatches(api huma.API) {
 		for _, b := range rows {
 			out.Body.Batches = append(out.Body.Batches, toBatchDTO(b))
 		}
-		out.Body.DailyRemaining = max(0, maxBatchesPer24h-used)
+		out.Body.DailyRemaining = max(0, h.deps.WaMaxBatchesPerDay-used)
 		return out, nil
 	})
 
@@ -165,17 +165,17 @@ func (h *Handler) createBatchHandler(ctx context.Context, in *createBatchInput) 
 	if len(recs) == 0 {
 		return nil, huma.Error422UnprocessableEntity("the recipient list is empty")
 	}
-	if len(recs) > maxBatchRecipients {
-		return nil, huma.Error422UnprocessableEntity(tooManyRecipientsMsg(len(recs)))
+	if len(recs) > h.deps.WaMaxBatchRecipients {
+		return nil, huma.Error422UnprocessableEntity(tooManyRecipientsMsg(len(recs), h.deps.WaMaxBatchRecipients))
 	}
 
 	used, err := h.batchesUsedToday(ctx, u.ID)
 	if err != nil {
 		return nil, huma.Error500InternalServerError("failed to check the daily limit", err)
 	}
-	if used >= maxBatchesPer24h {
+	if used >= h.deps.WaMaxBatchesPerDay {
 		return nil, huma.NewError(http.StatusTooManyRequests,
-			fmt.Sprintf("daily limit reached: at most %d batches per 24 hours", maxBatchesPer24h))
+			fmt.Sprintf("daily limit reached: at most %d batches per 24 hours", h.deps.WaMaxBatchesPerDay))
 	}
 
 	batch, err := h.deps.Ent.WaBatch.Create().
