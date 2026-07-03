@@ -15,14 +15,6 @@ import (
 	"github.com/alifyandra/portfolio-site/backend/internal/whatsapp"
 )
 
-// WhatsApp Sender caps (ADR 11). A batch sends a whole list, so a list that
-// exceeds the per-batch cap could never be sent; the cap is enforced both when a
-// list is built and when a batch is created.
-const (
-	maxBatchRecipients = 250
-	maxBatchesPer24h   = 3
-)
-
 // requireFriend enforces the friend-or-admin gate shared by every WhatsApp
 // operation: anonymous is 401, a plain member is 403. It returns the authenticated
 // user on success. See ADR 10 (tiered access) and ADR 11 (friend-gated tool).
@@ -398,8 +390,8 @@ func (h *Handler) registerWhatsAppLists(api huma.API) {
 			return nil, err
 		}
 		parsed, invalid := whatsapp.ParseRecipients(in.Body.RecipientsText)
-		if len(parsed) > maxBatchRecipients {
-			return nil, huma.Error422UnprocessableEntity(tooManyRecipientsMsg(len(parsed)))
+		if len(parsed) > h.deps.WaMaxBatchRecipients {
+			return nil, huma.Error422UnprocessableEntity(tooManyRecipientsMsg(len(parsed), h.deps.WaMaxBatchRecipients))
 		}
 
 		tx, err := h.deps.Ent.Tx(ctx)
@@ -446,8 +438,8 @@ func (h *Handler) registerWhatsAppLists(api huma.API) {
 			return nil, err
 		}
 		parsed, invalid := whatsapp.ParseRecipients(in.Body.RecipientsText)
-		if len(parsed) > maxBatchRecipients {
-			return nil, huma.Error422UnprocessableEntity(tooManyRecipientsMsg(len(parsed)))
+		if len(parsed) > h.deps.WaMaxBatchRecipients {
+			return nil, huma.Error422UnprocessableEntity(tooManyRecipientsMsg(len(parsed), h.deps.WaMaxBatchRecipients))
 		}
 
 		tx, err := h.deps.Ent.Tx(ctx)

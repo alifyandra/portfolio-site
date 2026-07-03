@@ -21,6 +21,10 @@ type Deps struct {
 	Queue   *queue.Client
 	Auth    *auth.Service
 	WA      *whatsapp.Client
+	// WhatsApp send caps (ADR 11), sourced from config so they can be tuned per
+	// environment. Zero means the default is not wired; server.New always sets them.
+	WaMaxBatchRecipients int
+	WaMaxBatchesPerDay   int
 }
 
 // Handler holds dependencies and registers operations against a Huma API.

@@ -167,3 +167,33 @@ as a Chromium memory backstop.
 `WaRecipientList`, `WaRecipient`, `WaBatch`). The per-recipient `BatchItem` named in
 the Decision is deferred: the MVP persists aggregate counts only and relays
 per-recipient progress live without storing it.
+
+## Amendment (2026-07-03): ban risk and mitigations
+
+Automating a personal number with an unofficial client carries a real risk of that
+number being banned by WhatsApp. This risk cannot be eliminated with this approach,
+only reduced; the official WhatsApp Cloud API is the only ban-safe path but it
+forbids the free-form, personal-number broadcast this tool exists to do (and adds
+business verification, template approval, and per-message cost). We accept the risk
+and reduce it, revisiting the Cloud API only if usage moves toward cold or
+large-scale marketing.
+
+**Audience assumption.** The intended use is an **opt-in / warm audience** — the
+friend messages people who already expect it (e.g. members of an event she is
+marketing). Recipient blocks and reports are the dominant ban trigger, so a warm
+audience is what makes this acceptable. Cold outreach would change the calculus and
+is out of scope.
+
+**Behavioural playbook** (the parts no code enforces, documented for the operator):
+the first line should identify the sender and context so recipients recognise it;
+recipients ideally have the sender saved as a contact; use a dedicated, already-active
+("warmed") number, never a primary/irreplaceable one; and spread large lists over
+days, especially for a newer number.
+
+**Tunable caps.** The per-batch (250) and per-day (3) caps are now environment
+variables (`WA_MAX_BATCH_RECIPIENTS`, `WA_MAX_BATCHES_PER_DAY`) so a number can start
+conservative and be ramped up as it proves stable, without a code change. The
+sidecar's inter-message delay defaults were widened to roughly 20-90s for the same
+reason. Per-message `{name}` substitution already keeps messages from being
+byte-identical. An opt-out ("reply STOP") list is a tracked follow-up for recurring
+use.

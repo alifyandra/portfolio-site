@@ -109,6 +109,9 @@ func New(deps *Deps) (http.Handler, huma.API) {
 		Queue:   deps.Queue,
 		Auth:    deps.Auth,
 		WA:      whatsapp.NewClient(deps.Config.WaSidecarURL, deps.Config.WaSidecarSecret),
+
+		WaMaxBatchRecipients: deps.Config.WaMaxBatchRecipients,
+		WaMaxBatchesPerDay:   deps.Config.WaMaxBatchesPerDay,
 	})
 	h.Register(humaAPI)
 
