@@ -93,6 +93,34 @@ band from the web request. The first real Job is **`contact.notify`** — emaili
 Alif (via SES) when a Contact Message arrives. Further Jobs (e.g. an LLM-powered
 task) slot into the same seam. See `docs/adr/0007-sqs-async-queue.md`.
 
+### Template
+A reusable WhatsApp message body owned by a [User], optionally containing a
+`{name}` placeholder substituted per recipient at send time. One of the two
+durable inputs to a [Batch] in the WhatsApp Sender [Tool]. See ADR 11.
+
+### Recipient List
+A named, [User]-owned set of [Recipient]s; the other durable input to a [Batch].
+Recipient data is PII — it lives only in the database, never in git.
+
+### Recipient
+One entry in a [Recipient List]: a phone number in canonical international form
+(digits only, no `+`, no leading zero) plus an optional name. Numbers are
+normalized on entry against a default country code (a bare leading `0` is read as
+that country's local number).
+
+### Batch
+One send run of the WhatsApp Sender: a [Template] applied to a [Recipient List],
+carrying a status and aggregate counts (sent / skipped / failed). Distinct from a
+[Job (async)] — a Batch is a [User]-triggered, role-gated send watched live, not a
+queued background task. _Avoid_: blast, campaign.
+
+### Link
+The ephemeral, QR-established connection to a friend's own WhatsApp, held only by
+the private sidecar for the lifetime of a single [Batch] and destroyed afterward;
+never persisted server-side. Distinct from the auth session that proves a [User]'s
+identity (ADR 10): a Link connects WhatsApp, the auth session proves who you are.
+_Avoid_: session.
+
 ## Naming conventions
 
 - The owner / subject of the site is **Alif** (Ahmad Alifyandra).

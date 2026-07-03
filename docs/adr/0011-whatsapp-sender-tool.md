@@ -115,3 +115,55 @@ repo (no secrets; they call an internal API). The sidecar is private.
    as a low-effort near-free alternative. This is a deploy-time concern: the
    sidecar runs locally during development, so the host is finalized before it
    goes live and does not gate the build.
+
+## Amendment (2026-06-30): batch-anchored model and the streaming contract
+
+A design pass before building slices 2 to 5 refined the flow above. The original
+Flow paragraph described linking first and creating the Batch afterward. The build
+inverts that: the Batch anchors the whole run.
+
+**Batch-anchored flow.** The friend picks a stored Template and Recipient List and
+sends. The backend creates a Batch (status `pending`), then asks the sidecar to
+start a session for that Batch. The QR, the ready signal, and per-recipient
+progress all travel back over a single stream. Status moves `pending` to `linking`
+(QR shown) to `running` (linked, sending) to `completed` or `failed`. The user
+configures before scanning, so the scan is the last action and sending begins the
+moment the device links. This matches the shipped `WaBatch` status enum and
+shortens the window in which a ready session can idle out.
+
+**Two transports, both streaming.**
+
+- Backend to sidecar: one dial-out `POST /sessions` carrying the template body and
+  the resolved recipients. The sidecar streams newline-delimited JSON events back
+  as the chunked response body, then closes and tears the session down. The sidecar
+  keeps no public ingress; every connection is dialed by the backend.
+- Browser to backend: one streaming `POST /api/wa/batches`, consumed in the browser
+  with `fetch` and a `ReadableStream` reader rather than `EventSource`. A send has
+  side effects, so it must not ride a GET, where a prefetch, proxy retry, or
+  EventSource reconnect could re-fire it. The operation is registered in Huma so it
+  stays in `openapi.yaml` (ADR 5), though the frontend reads it with a hand-written
+  reader, not a generated React Query hook. Templates and lists keep normal
+  orval-generated CRUD.
+
+The full request and event schema lives in `docs/whatsapp-sidecar-contract.md`,
+which doubles as the build spec for the private sidecar repo.
+
+**Caps.** 250 recipients per Batch, checked at creation. At most 3 Batches per
+rolling 24 hours, counting only Batches that actually sent (`sent + skipped +
+failed > 0`), so a failed QR scan does not consume a daily slot.
+
+**Recipients.** Lists are populated by bulk paste. The backend normalizes numbers
+to canonical international form against a default country code of `+61` (Australia):
+a bare leading `0` is read as an Australian local number, so any non-Australian
+number must be pasted with its country code. Invalid lines are rejected per line.
+
+**Sessions.** The sidecar holds no persistent WhatsApp credentials (no `LocalAuth`).
+Each session is fresh-linked by QR and destroyed after the Batch or a roughly
+10 minute hard cap, with a roughly 90 second window to scan the QR. One live session
+per user (a second concurrent Batch gets a 409), plus a small global concurrency cap
+as a Chromium memory backstop.
+
+**Entity names.** The shipped Ent entities are `Wa`-prefixed (`WaTemplate`,
+`WaRecipientList`, `WaRecipient`, `WaBatch`). The per-recipient `BatchItem` named in
+the Decision is deferred: the MVP persists aggregate counts only and relays
+per-recipient progress live without storing it.
