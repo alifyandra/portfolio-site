@@ -9,6 +9,7 @@ import (
 	"github.com/alifyandra/portfolio-site/backend/internal/queue"
 	"github.com/alifyandra/portfolio-site/backend/internal/spotify"
 	"github.com/alifyandra/portfolio-site/backend/internal/storage"
+	"github.com/alifyandra/portfolio-site/backend/internal/whatsapp"
 )
 
 // Deps are the dependencies the API handlers need.
@@ -19,6 +20,7 @@ type Deps struct {
 	Storage *storage.Store
 	Queue   *queue.Client
 	Auth    *auth.Service
+	WA      *whatsapp.Client
 }
 
 // Handler holds dependencies and registers operations against a Huma API.
@@ -38,4 +40,5 @@ func (h *Handler) Register(api huma.API) {
 	h.registerContact(api)
 	h.registerSpotify(api)
 	h.registerAuth(api)
+	h.registerWhatsApp(api)
 }
