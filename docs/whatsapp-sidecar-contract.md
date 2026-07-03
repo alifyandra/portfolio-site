@@ -69,6 +69,7 @@ Same events on both hops; the backend relays them. One JSON object per line.
 | `qr`       | `value` (string) | The WhatsApp linking payload. May repeat as WhatsApp refreshes it (~20s); render the latest. |
 | `ready`    | none | Device linked; sending begins. |
 | `progress` | `phone`, `name`, `status` (`sent` \| `skipped` \| `failed`), `reason`?, `error`? | One per recipient. `skipped` carries a `reason` (e.g. `not_registered`); `failed` carries an `error`. |
+| `waiting`  | `ms` (int), `next_phone`, `next_name` | The randomized pause before the next recipient. Lets the UI count down `ms` and name who is next. Relayed to the browser only; no batch effect. |
 | `done`     | `sent`, `skipped`, `failed` (ints) | Terminal success. Final aggregate. Stream closes. |
 | `error`    | `message` (string) | Terminal failure (e.g. link timeout). Stream closes. |
 
@@ -78,6 +79,7 @@ Examples:
 {"type":"qr","value":"2@abc..."}
 {"type":"ready"}
 {"type":"progress","phone":"61412345678","name":"Budi","status":"sent"}
+{"type":"waiting","ms":23000,"next_phone":"61498765432","next_name":"Siti"}
 {"type":"progress","phone":"61498765432","status":"skipped","reason":"not_registered"}
 {"type":"progress","phone":"61400000000","status":"failed","error":"send timeout"}
 {"type":"done","sent":1,"skipped":1,"failed":1}
@@ -91,6 +93,7 @@ Examples:
 | `qr` | status `linking` (first QR only) |
 | `ready` | status `running` |
 | `progress` | increment the matching aggregate count (`sent` / `skipped` / `failed`) |
+| `waiting` | none (relayed to the browser only) |
 | `done` | status `completed`, final counts persisted |
 | `error` | status `failed`, `error` field set |
 

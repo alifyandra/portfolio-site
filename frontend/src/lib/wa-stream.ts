@@ -18,6 +18,7 @@ export type WaEvent =
       reason?: string;
       error?: string;
     }
+  | { type: 'waiting'; ms: number; next_phone?: string; next_name?: string }
   | { type: 'done'; sent: number; skipped: number; failed: number }
   | { type: 'error'; message: string };
 
