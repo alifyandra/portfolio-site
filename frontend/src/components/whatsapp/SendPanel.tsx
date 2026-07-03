@@ -1,6 +1,6 @@
 'use client';
 
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { QRCodeSVG } from 'qrcode.react';
 
@@ -8,17 +8,19 @@ import {
   useListWaTemplates,
   useListWaLists,
   useListWaBatches,
+  getWaList,
   getListWaBatchesQueryKey,
 } from '@/lib/api/generated';
 import type { BatchDTO } from '@/lib/api/model';
 import { streamBatch, type WaEvent } from '@/lib/wa-stream';
 
 type Phase = 'idle' | 'starting' | 'linking' | 'running' | 'done' | 'error';
+type RowStatus = 'pending' | 'sent' | 'skipped' | 'failed';
 
-interface ProgressRow {
+interface Row {
   phone: string;
   name?: string;
-  status: 'sent' | 'skipped' | 'failed';
+  status: RowStatus;
   reason?: string;
   error?: string;
 }
@@ -30,6 +32,30 @@ const statusColor: Record<string, string> = {
   linking: 'text-sky',
   pending: 'text-slate-400',
 };
+
+const rowStatusStyle: Record<RowStatus, string> = {
+  pending: 'text-slate-500',
+  sent: 'text-mint',
+  skipped: 'text-slate-400',
+  failed: 'text-coral',
+};
+
+function updateRow(prev: Row[], ev: Extract<WaEvent, { type: 'progress' }>): Row[] {
+  const idx = prev.findIndex((r) => r.phone === ev.phone && r.status === 'pending');
+  if (idx === -1) {
+    // Prefetch missed this number (or it was empty): append it.
+    return [...prev, { phone: ev.phone, name: ev.name, status: ev.status, reason: ev.reason, error: ev.error }];
+  }
+  const copy = prev.slice();
+  copy[idx] = {
+    ...copy[idx],
+    name: copy[idx].name || ev.name,
+    status: ev.status,
+    reason: ev.reason,
+    error: ev.error,
+  };
+  return copy;
+}
 
 export function SendPanel() {
   const queryClient = useQueryClient();
@@ -47,31 +73,64 @@ export function SendPanel() {
 
   const [phase, setPhase] = useState<Phase>('idle');
   const [qr, setQr] = useState<string | null>(null);
-  const [counts, setCounts] = useState({ sent: 0, skipped: 0, failed: 0 });
-  const [log, setLog] = useState<ProgressRow[]>([]);
+  const [rows, setRows] = useState<Row[]>([]);
   const [message, setMessage] = useState<string | null>(null);
+  const [countdown, setCountdown] = useState<number | null>(null);
+  const [nextPhone, setNextPhone] = useState<string | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const stopCountdown = () => {
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+    setCountdown(null);
+  };
+
+  const startCountdown = (ms: number) => {
+    stopCountdown();
+    let remaining = Math.max(1, Math.ceil(ms / 1000));
+    setCountdown(remaining);
+    timerRef.current = setInterval(() => {
+      remaining -= 1;
+      if (remaining <= 0) stopCountdown();
+      else setCountdown(remaining);
+    }, 1000);
+  };
+
+  // Clear the interval if the component unmounts mid-send.
+  useEffect(() => () => stopCountdown(), []);
 
   const selectedList = lists.find((l) => l.id === listId);
-  const total = selectedList?.recipient_count ?? 0;
+  const counts = {
+    sent: rows.filter((r) => r.status === 'sent').length,
+    skipped: rows.filter((r) => r.status === 'skipped').length,
+    failed: rows.filter((r) => r.status === 'failed').length,
+  };
+  const total = rows.length || selectedList?.recipient_count || 0;
   const processed = counts.sent + counts.skipped + counts.failed;
   const active = phase === 'starting' || phase === 'linking' || phase === 'running';
   const canSend =
-    !active && templateId !== '' && listId !== '' && total > 0 && dailyRemaining > 0;
+    !active && templateId !== '' && listId !== '' && (selectedList?.recipient_count ?? 0) > 0 && dailyRemaining > 0;
+
+  const nextRow = nextPhone ? rows.find((r) => r.phone === nextPhone) : null;
+  const nextLabel = nextRow ? nextRow.name || nextRow.phone : nextPhone;
 
   const invalidateBatches = () =>
     queryClient.invalidateQueries({ queryKey: getListWaBatchesQueryKey() });
 
   const reset = () => {
+    stopCountdown();
     setPhase('idle');
     setQr(null);
-    setCounts({ sent: 0, skipped: 0, failed: 0 });
-    setLog([]);
+    setRows([]);
     setMessage(null);
+    setNextPhone(null);
   };
 
-  const onEvent = (ev: WaEvent) => {
+  const onEvent = (ev: WaEvent, recips: Row[]) => {
     switch (ev.type) {
       case 'qr':
         setQr(ev.value);
@@ -79,21 +138,26 @@ export function SendPanel() {
         break;
       case 'ready':
         setPhase('running');
+        setNextPhone(recips[0]?.phone ?? null); // the first send starts immediately
         break;
       case 'progress':
-        setLog((prev) => [...prev, ev].slice(-200));
-        setCounts((prev) => ({
-          sent: prev.sent + (ev.status === 'sent' ? 1 : 0),
-          skipped: prev.skipped + (ev.status === 'skipped' ? 1 : 0),
-          failed: prev.failed + (ev.status === 'failed' ? 1 : 0),
-        }));
+        stopCountdown();
+        setNextPhone(null);
+        setRows((prev) => updateRow(prev, ev));
+        break;
+      case 'waiting':
+        setNextPhone(ev.next_phone ?? null);
+        startCountdown(ev.ms);
         break;
       case 'done':
-        setCounts({ sent: ev.sent, skipped: ev.skipped, failed: ev.failed });
+        stopCountdown();
+        setNextPhone(null);
         setMessage(`Done. Sent ${ev.sent}, skipped ${ev.skipped}, failed ${ev.failed}.`);
         setPhase('done');
         break;
       case 'error':
+        stopCountdown();
+        setNextPhone(null);
         setMessage(ev.message);
         setPhase('error');
         break;
@@ -104,19 +168,36 @@ export function SendPanel() {
     if (templateId === '' || listId === '') return;
     reset();
     setPhase('starting');
+
+    // Prefetch the recipients so the whole list is visible up front, each row
+    // flipping from queued to its outcome as events arrive.
+    let recips: Row[] = [];
+    try {
+      const full = await getWaList(listId);
+      recips = (full.list.recipients ?? []).map((r) => ({
+        phone: r.phone,
+        name: r.name,
+        status: 'pending' as RowStatus,
+      }));
+    } catch {
+      recips = []; // fall back to appending rows from progress events
+    }
+    setRows(recips);
+
     const controller = new AbortController();
     abortRef.current = controller;
     try {
-      await streamBatch({ template_id: templateId, list_id: listId }, onEvent, controller.signal);
+      await streamBatch({ template_id: templateId, list_id: listId }, (ev) => onEvent(ev, recips), controller.signal);
     } catch (err) {
       if (controller.signal.aborted) {
-        // User cancelled: fall back to idle rather than showing an error.
         setPhase('idle');
       } else {
         setMessage(err instanceof Error ? err.message : 'The send failed.');
         setPhase('error');
       }
     } finally {
+      stopCountdown();
+      setNextPhone(null);
       abortRef.current = null;
       invalidateBatches();
     }
@@ -173,9 +254,7 @@ export function SendPanel() {
               You have reached the daily send limit. Try again tomorrow.
             </p>
           )}
-          {phase === 'error' && message && (
-            <p className="text-sm text-coral">{message}</p>
-          )}
+          {phase === 'error' && message && <p className="text-sm text-coral">{message}</p>}
 
           <button
             type="button"
@@ -217,7 +296,7 @@ export function SendPanel() {
         </p>
       )}
 
-      {/* Running / done: progress */}
+      {/* Running / done: full recipient list with live status + countdown */}
       {(phase === 'running' || phase === 'done') && (
         <div className="flex flex-col gap-3 rounded-md border border-slate-700 bg-deepsea/60 p-4">
           <div className="flex items-center justify-between">
@@ -234,28 +313,45 @@ export function SendPanel() {
             <span className="text-coral">Failed {counts.failed}</span>
           </div>
 
-          {log.length > 0 && (
-            <ul className="max-h-56 overflow-y-auto rounded-md border border-slate-800 bg-deepsea p-2 font-mono text-xs">
-              {log.map((r, i) => (
-                <li key={`${r.phone}-${i}`} className="flex justify-between gap-2 py-0.5">
-                  <span className="text-slate-300">
-                    {r.phone}
-                    {r.name ? ` (${r.name})` : ''}
-                  </span>
-                  <span
-                    className={
-                      r.status === 'sent'
-                        ? 'text-mint'
-                        : r.status === 'skipped'
-                          ? 'text-slate-500'
-                          : 'text-coral'
-                    }
+          {/* Countdown / current action banner */}
+          {phase === 'running' && countdown !== null && (
+            <p className="rounded-md border border-sky/40 bg-sky/10 px-3 py-2 text-sm text-sky">
+              Next message in {countdown}s{nextLabel ? ` → ${nextLabel}` : ''}
+            </p>
+          )}
+          {phase === 'running' && countdown === null && nextPhone && (
+            <p className="rounded-md border border-sky/40 bg-sky/10 px-3 py-2 text-sm text-sky">
+              Sending to {nextLabel}…
+            </p>
+          )}
+
+          {rows.length > 0 && (
+            <ul className="max-h-72 overflow-y-auto rounded-md border border-slate-800 bg-deepsea p-2 font-mono text-xs">
+              {rows.map((r, i) => {
+                const isNext = phase === 'running' && r.phone === nextPhone;
+                return (
+                  <li
+                    key={`${r.phone}-${i}`}
+                    className={`flex justify-between gap-2 rounded px-1 py-0.5 ${isNext ? 'bg-sky/10' : ''}`}
                   >
-                    {r.status}
-                    {r.reason ? ` · ${r.reason}` : ''}
-                  </span>
-                </li>
-              ))}
+                    <span className="truncate text-slate-300">
+                      {r.phone}
+                      {r.name ? ` (${r.name})` : ''}
+                    </span>
+                    <span className={rowStatusStyle[r.status]}>
+                      {isNext && countdown !== null
+                        ? `next · ${countdown}s`
+                        : isNext
+                          ? 'sending…'
+                          : r.status === 'pending'
+                            ? 'queued'
+                            : r.status === 'skipped'
+                              ? `skipped${r.reason ? ` · ${r.reason}` : ''}`
+                              : r.status}
+                    </span>
+                  </li>
+                );
+              })}
             </ul>
           )}
 
