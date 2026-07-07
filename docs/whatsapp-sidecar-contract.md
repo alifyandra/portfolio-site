@@ -146,9 +146,10 @@ orval-generated hooks.
 ## Recipient normalization (backend, before storage and before the sidecar)
 
 - Strip whitespace and punctuation; drop a leading `+`.
-- A leading `0` is replaced with the default country code (`61`, Australia). Any
-  non-Australian number must be pasted with its own country code, or it will be
-  misread as Australian.
+- A leading `0` is expanded using the recipient list's `country_code` if set, else the
+  owning user's `default_country_code`, else `61` (Australia) as the fallback. A number
+  from a different country than the resolved default must be pasted with its own country
+  code, or it will be misread.
 - Reject anything that does not land at 8 to 15 digits. Invalid lines are reported
   per line so the user can fix and resubmit.
 - Stored and sent form is digits only, no `+`, no leading zero.
