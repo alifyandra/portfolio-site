@@ -427,6 +427,13 @@ func (s *Service) IsSoleAdmin(ctx context.Context, u *ent.User) (bool, error) {
 	return n <= 1, nil
 }
 
+// UpdateDefaultCountryCode sets the user's default WhatsApp country code (the code
+// that replaces a leading trunk 0 when a recipient list has no override) and returns
+// the updated user. The value is validated at the schema layer (1-4 digits). See ADR 11.
+func (s *Service) UpdateDefaultCountryCode(ctx context.Context, userID int, code string) (*ent.User, error) {
+	return s.ent.User.UpdateOneID(userID).SetDefaultCountryCode(code).Save(ctx)
+}
+
 // DeleteUser hard-deletes a user and cascades to their identities and sessions
 // in a single transaction (app-level cascade, see ADR 10).
 func (s *Service) DeleteUser(ctx context.Context, userID int) error {

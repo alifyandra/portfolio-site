@@ -1,6 +1,7 @@
 package schema
 
 import (
+	"regexp"
 	"time"
 
 	"entgo.io/ent"
@@ -20,6 +21,11 @@ func (WaRecipientList) Fields() []ent.Field {
 		field.String("name").
 			NotEmpty().
 			MaxLen(120),
+		field.String("country_code").
+			Optional().
+			Default("").
+			Match(regexp.MustCompile("^([0-9]{1,4})?$")).
+			Comment("Country code (digits only, no +) that replaces a leading trunk 0 for this list's numbers. Empty means inherit the owner's default_country_code. See ADR 11."),
 		field.Time("created_at").
 			Default(time.Now).
 			Immutable(),

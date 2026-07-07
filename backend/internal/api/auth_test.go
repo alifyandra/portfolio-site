@@ -58,3 +58,14 @@ func TestMeRequiresAuth(t *testing.T) {
 		t.Fatalf("me status = %d, want 401; body=%s", resp.Code, resp.Body.String())
 	}
 }
+
+// TestUpdateMeRequiresAuth verifies PATCH /api/auth/me is gated: a valid body
+// clears input validation, so the 401 proves the auth check ran (not a validation
+// short-circuit) and no anonymous write reaches the DB.
+func TestUpdateMeRequiresAuth(t *testing.T) {
+	api := newAuthTestAPI(t)
+	resp := api.Patch("/api/auth/me", map[string]any{"default_country_code": "62"})
+	if resp.Code != http.StatusUnauthorized {
+		t.Fatalf("patch me status = %d, want 401; body=%s", resp.Code, resp.Body.String())
+	}
+}

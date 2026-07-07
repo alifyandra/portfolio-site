@@ -225,6 +225,10 @@ components:
           format: uri
           readOnly: true
           type: string
+        country_code:
+          description: Per-list country code (1-4 digits); empty inherits the user default
+          pattern: ^([0-9]{1,4})?$
+          type: string
         name:
           maxLength: 120
           minLength: 1
@@ -238,6 +242,8 @@ components:
     ListDTO:
       additionalProperties: false
       properties:
+        country_code:
+          type: string
         created_at:
           type: string
         id:
@@ -259,6 +265,7 @@ components:
       required:
         - id
         - name
+        - country_code
         - recipient_count
         - created_at
         - updated_at
@@ -590,6 +597,23 @@ components:
         - name
         - body
       type: object
+    UpdateUserInputBody:
+      additionalProperties: false
+      properties:
+        $schema:
+          description: A URL to the JSON Schema for this object.
+          examples:
+            - https://example.com/schemas/UpdateUserInputBody.json
+          format: uri
+          readOnly: true
+          type: string
+        default_country_code:
+          description: Default WhatsApp country code (digits only, no +), 1-4 digits
+          pattern: ^[0-9]{1,4}$
+          type: string
+      required:
+        - default_country_code
+      type: object
     UserOutputBody:
       additionalProperties: false
       properties:
@@ -601,6 +625,9 @@ components:
           readOnly: true
           type: string
         avatar_url:
+          type: string
+        default_country_code:
+          description: Default WhatsApp country code (digits only) that replaces a leading trunk 0; overridable per recipient list (see ADR 11)
           type: string
         email:
           type: string
@@ -622,6 +649,7 @@ components:
         - name
         - avatar_url
         - role
+        - default_country_code
       type: object
   securitySchemes:
     cookieAuth:
@@ -727,6 +755,32 @@ paths:
       security:
         - cookieAuth: []
       summary: Get the current authenticated user
+      tags:
+        - auth
+    patch:
+      operationId: update-current-user
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateUserInputBody"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserOutputBody"
+          description: OK
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ErrorModel"
+          description: Error
+      security:
+        - cookieAuth: []
+      summary: Update the current user's settings
       tags:
         - auth
   /api/contact:
