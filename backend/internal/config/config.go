@@ -87,6 +87,31 @@ type Config struct {
 	// batch, 3 sent-batches per rolling 24h.
 	WaMaxBatchRecipients int `env:"WA_MAX_BATCH_RECIPIENTS" envDefault:"250"`
 	WaMaxBatchesPerDay   int `env:"WA_MAX_BATCHES_PER_DAY" envDefault:"3"`
+
+	// WhatsApp sidecar launch mode (ADR 11 Fargate amendment). "static" (default,
+	// local dev) dials the fixed WaSidecarURL for every batch. "fargate" launches a
+	// per-batch ECS Fargate task, streams to its private IP, then stops it — nothing
+	// runs (or bills) while idle. The fargate identifiers below are required and
+	// validated in Load only when the mode is "fargate"; they are prod/SSM-managed.
+	WaSidecarMode string `env:"WA_SIDECAR_MODE" envDefault:"static"`
+	// WaEcsCluster is the ECS cluster the sidecar task runs in.
+	WaEcsCluster string `env:"WA_ECS_CLUSTER"`
+	// WaTaskDefinition is the task-definition family; ECS resolves the latest ACTIVE
+	// revision at RunTask time, so a redeploy needs no config change.
+	WaTaskDefinition string `env:"WA_TASK_DEFINITION"`
+	// WaSubnetIDs are the (public) subnets the task's ENI is placed in.
+	WaSubnetIDs []string `env:"WA_SUBNET_IDS" envSeparator:","`
+	// WaSecurityGroupID is the security group attached to the task's ENI (open to
+	// the backend host on the sidecar port).
+	WaSecurityGroupID string `env:"WA_SECURITY_GROUP_ID"`
+	// WaAssignPublicIP must be true when the task runs in a public subnet with no NAT
+	// gateway: the ECS agent needs a public IP to pull the image from ECR and read
+	// the secret from SSM, or the task never starts.
+	WaAssignPublicIP bool `env:"WA_ASSIGN_PUBLIC_IP" envDefault:"true"`
+	// WaSidecarPort is the port the sidecar's HTTP server listens on (both the
+	// readiness /healthz probe and the /sessions stream). The task's private IP is
+	// resolved at launch; this is the port appended to it.
+	WaSidecarPort int `env:"WA_SIDECAR_PORT" envDefault:"8081"`
 }
 
 // Load reads and validates configuration from the environment.
@@ -105,8 +130,34 @@ func Load() (*Config, error) {
 	}
 	// The sidecar is dialed with a bearer secret; a URL without a secret would send
 	// unauthenticated requests it will reject, so fail fast rather than at runtime.
+	// (In fargate mode WaSidecarURL is intentionally absent, so this stays inert.)
 	if cfg.WaSidecarURL != "" && cfg.WaSidecarSecret == "" {
 		return nil, fmt.Errorf("WA_SIDECAR_SECRET is required when WA_SIDECAR_URL is set")
+	}
+	// The launch mode selects how a batch reaches a sidecar. static keeps the fixed
+	// URL (checked above); fargate launches a per-batch task and needs the ECS
+	// identifiers. Fail fast, naming the missing var, rather than at RunTask time.
+	switch cfg.WaSidecarMode {
+	case "static":
+		// nothing further: the URL/secret pair is validated above.
+	case "fargate":
+		if cfg.WaSidecarSecret == "" {
+			return nil, fmt.Errorf("WA_SIDECAR_SECRET is required when WA_SIDECAR_MODE=fargate")
+		}
+		if cfg.WaEcsCluster == "" {
+			return nil, fmt.Errorf("WA_ECS_CLUSTER is required when WA_SIDECAR_MODE=fargate")
+		}
+		if cfg.WaTaskDefinition == "" {
+			return nil, fmt.Errorf("WA_TASK_DEFINITION is required when WA_SIDECAR_MODE=fargate")
+		}
+		if len(cfg.WaSubnetIDs) == 0 {
+			return nil, fmt.Errorf("WA_SUBNET_IDS is required when WA_SIDECAR_MODE=fargate")
+		}
+		if cfg.WaSecurityGroupID == "" {
+			return nil, fmt.Errorf("WA_SECURITY_GROUP_ID is required when WA_SIDECAR_MODE=fargate")
+		}
+	default:
+		return nil, fmt.Errorf(`WA_SIDECAR_MODE must be "static" or "fargate", got %q`, cfg.WaSidecarMode)
 	}
 	return &cfg, nil
 }

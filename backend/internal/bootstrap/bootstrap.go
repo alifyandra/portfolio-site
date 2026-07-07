@@ -19,6 +19,7 @@ import (
 	"github.com/alifyandra/portfolio-site/backend/internal/server"
 	"github.com/alifyandra/portfolio-site/backend/internal/spotify"
 	"github.com/alifyandra/portfolio-site/backend/internal/storage"
+	"github.com/alifyandra/portfolio-site/backend/internal/whatsapp"
 )
 
 // App holds the constructed dependencies and a cleanup function.
@@ -89,6 +90,16 @@ func New(ctx context.Context, cfg *config.Config) (*App, error) {
 		FrontendURL:  cfg.FrontendURL,
 	})
 
+	// WhatsApp sidecar provider: a fixed URL (static) or a per-batch Fargate
+	// launcher (fargate), selected by WA_SIDECAR_MODE. Fargate builds AWS clients;
+	// static needs none. See ADR 11.
+	waProvider, err := whatsapp.NewSidecarProvider(ctx, cfg)
+	if err != nil {
+		_ = entClient.Close()
+		_ = redisClient.Close()
+		return nil, err
+	}
+
 	deps := &server.Deps{
 		Config:  cfg,
 		Ent:     entClient,
@@ -98,6 +109,7 @@ func New(ctx context.Context, cfg *config.Config) (*App, error) {
 		Queue:   q,
 		Email:   mailer,
 		Auth:    authSvc,
+		WA:      waProvider,
 	}
 
 	return &App{

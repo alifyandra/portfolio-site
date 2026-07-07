@@ -14,7 +14,7 @@ import {
 import type { BatchDTO } from '@/lib/api/model';
 import { streamBatch, type WaEvent } from '@/lib/wa-stream';
 
-type Phase = 'idle' | 'starting' | 'linking' | 'running' | 'done' | 'error';
+type Phase = 'idle' | 'starting' | 'provisioning' | 'linking' | 'running' | 'done' | 'error';
 type RowStatus = 'pending' | 'sent' | 'skipped' | 'failed';
 
 interface Row {
@@ -111,7 +111,8 @@ export function SendPanel() {
   };
   const total = rows.length || selectedList?.recipient_count || 0;
   const processed = counts.sent + counts.skipped + counts.failed;
-  const active = phase === 'starting' || phase === 'linking' || phase === 'running';
+  const active =
+    phase === 'starting' || phase === 'provisioning' || phase === 'linking' || phase === 'running';
   const canSend =
     !active && templateId !== '' && listId !== '' && (selectedList?.recipient_count ?? 0) > 0 && dailyRemaining > 0;
 
@@ -132,6 +133,12 @@ export function SendPanel() {
 
   const onEvent = (ev: WaEvent, recips: Row[]) => {
     switch (ev.type) {
+      case 'provisioning':
+        // Fargate cold start: keep the user informed while the sidecar boots.
+        // Only ever arrives before the first `qr`; carries a short human status.
+        setPhase('provisioning');
+        if (ev.message) setMessage(ev.message);
+        break;
       case 'qr':
         setQr(ev.value);
         setPhase('linking');
@@ -294,6 +301,28 @@ export function SendPanel() {
         <p className="rounded-md border border-slate-700 bg-deepsea/60 p-4 text-sm text-slate-300">
           Starting a session…
         </p>
+      )}
+
+      {/* Provisioning: the sender is cold-starting (Fargate), no QR yet */}
+      {phase === 'provisioning' && (
+        <div className="flex flex-col gap-3 rounded-md border border-slate-700 bg-deepsea/60 p-4">
+          <div className="flex items-center gap-2 text-sm text-slate-300">
+            <span className="h-2 w-2 animate-pulse rounded-full bg-sky" />
+            Starting the WhatsApp sender…
+          </div>
+          <p className="text-xs text-slate-400">
+            This can take up to a minute the first time. The QR code will appear
+            as soon as the sender is ready.
+          </p>
+          {message && <p className="text-xs text-sky">{message}</p>}
+          <button
+            type="button"
+            onClick={cancel}
+            className="self-start rounded-md border border-slate-700 px-4 py-1.5 text-sm text-white transition hover:border-coral hover:text-coral"
+          >
+            Cancel
+          </button>
+        </div>
       )}
 
       {/* Running / done: full recipient list with live status + countdown */}

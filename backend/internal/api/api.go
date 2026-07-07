@@ -20,7 +20,7 @@ type Deps struct {
 	Storage *storage.Store
 	Queue   *queue.Client
 	Auth    *auth.Service
-	WA      *whatsapp.Client
+	WA      whatsapp.SidecarProvider
 	// WhatsApp send caps (ADR 11), sourced from config so they can be tuned per
 	// environment. Zero means the default is not wired; server.New always sets them.
 	WaMaxBatchRecipients int

@@ -35,6 +35,10 @@ type Deps struct {
 	Queue   *queue.Client
 	Email   *email.Mailer
 	Auth    *auth.Service
+	// WA is the WhatsApp sidecar provider (static URL or per-batch Fargate task,
+	// selected by WA_SIDECAR_MODE). Built in bootstrap; nil in cmd/spec, which the
+	// create-batch handler tolerates (it 503s when the provider is nil).
+	WA whatsapp.SidecarProvider
 }
 
 // New builds the Chi router with Huma mounted on it and all routes registered.
@@ -108,7 +112,7 @@ func New(deps *Deps) (http.Handler, huma.API) {
 		Storage: deps.Storage,
 		Queue:   deps.Queue,
 		Auth:    deps.Auth,
-		WA:      whatsapp.NewClient(deps.Config.WaSidecarURL, deps.Config.WaSidecarSecret),
+		WA:      deps.WA,
 
 		WaMaxBatchRecipients: deps.Config.WaMaxBatchRecipients,
 		WaMaxBatchesPerDay:   deps.Config.WaMaxBatchesPerDay,
