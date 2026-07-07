@@ -157,6 +157,11 @@ to canonical international form against a default country code of `+61` (Austral
 a bare leading `0` is read as an Australian local number, so any non-Australian
 number must be pasted with its country code. Invalid lines are rejected per line.
 
+(Superseded 2026-07-07: the default country code is no longer hardcoded to `+61`. Each
+user has a `default_country_code`, and a Recipient List may carry its own `country_code`
+override. A leading `0` now expands against the list override first, then the user
+default, then `61` as the final fallback.)
+
 **Sessions.** The sidecar holds no persistent WhatsApp credentials (no `LocalAuth`).
 Each session is fresh-linked by QR and destroyed after the Batch or a roughly
 10 minute hard cap, with a roughly 90 second window to scan the QR. One live session
@@ -193,9 +198,10 @@ days, especially for a newer number.
 **Tunable caps.** The per-batch (250) and per-day (3) caps are now environment
 variables (`WA_MAX_BATCH_RECIPIENTS`, `WA_MAX_BATCHES_PER_DAY`) so a number can start
 conservative and be ramped up as it proves stable, without a code change. The
-sidecar's inter-message delay defaults were widened to roughly 20-90s for the same
-reason. Per-message `{name}` substitution already keeps messages from being
-byte-identical. An opt-out ("reply STOP") list is a tracked follow-up for recurring
+sidecar's inter-message delay defaults to a short 3-5s, a deliberate choice of speed
+over ban safety; the `WA_MIN_DELAY_MS` and `WA_MAX_DELAY_MS` env vars widen it per
+run to trade throughput for lower ban risk on larger lists. Per-message `{name}`
+substitution already keeps messages from being byte-identical. An opt-out ("reply STOP") list is a tracked follow-up for recurring
 use.
 
 ## Amendment (2026-07-07): sidecar host and transport, AWS Fargate scale-to-zero (supersedes Oracle/Fly plus Cloudflare Tunnel)
@@ -247,3 +253,14 @@ one cloud / IaC / bill, and the tunnel, public-IP, and TLS problems are deleted.
 Tracked in GitHub issue #58, implemented across Terraform (ECR plus ECS cluster, task
 definition, security group, IAM), the sidecar image (ECR plus the shm flag plus
 self-exit), and the backend (a `WA_SIDECAR_MODE=static|fargate` launcher).
+
+## Amendment (2026-07-07): Fargate sidecar live in prod, Alpine Chromium base image
+
+The Fargate scale-to-zero sidecar from the amendment above is now live and verified in
+prod: a real batch links by QR and sends end to end on a per-batch Fargate task.
+
+One deploy gotcha shaped the sidecar image. Debian bookworm's `chromium` (v150) SIGTRAPs
+on every arm64 headless launch inside a container (reproduced locally under Fargate-like
+limits, and not a `/dev/shm` or memory issue). Puppeteer ships no real arm64
+Chrome-for-Testing build to fall back to. So the sidecar image runs on `node:20-alpine`
+with apk's `chromium`, which launches cleanly on arm64.
