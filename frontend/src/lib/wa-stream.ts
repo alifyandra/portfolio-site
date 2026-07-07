@@ -8,6 +8,11 @@
 import { BASE_URL } from './fetcher';
 
 export type WaEvent =
+  // Fargate cold-start heartbeat: emitted zero or more times while the sidecar
+  // boots, only before the first `qr`. `message` is a short human status; it
+  // has no batch-count effect (like `waiting`). Never arrives in static/local
+  // mode, where the QR appears straight away.
+  | { type: 'provisioning'; message?: string }
   | { type: 'qr'; value: string }
   | { type: 'ready' }
   | {

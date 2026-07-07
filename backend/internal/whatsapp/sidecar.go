@@ -33,8 +33,10 @@ type Event struct {
 	Skipped int `json:"skipped,omitempty"`
 	Failed  int `json:"failed,omitempty"`
 
-	// error: terminal failure message (also carried on a failed progress line)
-	Error string `json:"error,omitempty"`
+	// The terminal error event carries "message"; a failed progress line carries
+	// "error" (per the contract). Model both so neither reason is dropped.
+	Message string `json:"message,omitempty"`
+	Error   string `json:"error,omitempty"`
 }
 
 // Event type constants and the progress status values.
@@ -44,6 +46,12 @@ const (
 	EventProgress = "progress"
 	EventDone     = "done"
 	EventError    = "error"
+
+	// EventProvisioning is emitted by the BACKEND (never relayed from the sidecar)
+	// during a fargate cold start, before the first qr, to tell the browser the
+	// sender is being started. It carries a human "message" and has no WaBatch
+	// effect (like a waiting line).
+	EventProvisioning = "provisioning"
 
 	StatusSent    = "sent"
 	StatusSkipped = "skipped"

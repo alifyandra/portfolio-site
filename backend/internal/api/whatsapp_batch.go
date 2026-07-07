@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -231,40 +232,73 @@ func (h *Handler) streamBatch(hctx huma.Context, batchID int, sess whatsapp.Sess
 	sawQR := false
 
 	onEvent := func(raw []byte, ev whatsapp.Event) error {
-		// Relay first so the browser sees progress even if a DB write lags.
-		if err := writeLine(raw); err != nil {
-			return err
-		}
+		// Relay first so the browser sees progress even if a DB write lags. Capture
+		// the write error rather than returning on it: a terminal done/error event
+		// must still be persisted (on a detached context, since a client disconnect
+		// cancels reqCtx) so a disconnect on the final line does not lose the true
+		// outcome. Non-terminal bookkeeping is skipped once the client is gone.
+		writeErr := writeLine(raw)
 		switch ev.Type {
 		case whatsapp.EventQR:
 			// WhatsApp refreshes the QR every ~20s; only the first moves the batch
 			// to linking. Later QR lines are still relayed for the browser to redraw.
-			if !sawQR {
+			if writeErr == nil && !sawQR {
 				sawQR = true
 				h.setBatchStatus(reqCtx, batchID, wabatch.StatusLinking)
 			}
 		case whatsapp.EventReady:
-			h.setBatchStatus(reqCtx, batchID, wabatch.StatusRunning)
+			if writeErr == nil {
+				h.setBatchStatus(reqCtx, batchID, wabatch.StatusRunning)
+			}
 		case whatsapp.EventProgress:
-			h.incrementBatch(reqCtx, batchID, ev.Status)
+			if writeErr == nil {
+				h.incrementBatch(reqCtx, batchID, ev.Status)
+			}
 		case whatsapp.EventDone:
 			sawTerminal = true
-			if _, err := h.deps.Ent.WaBatch.UpdateOneID(batchID).
-				SetStatus(wabatch.StatusCompleted).
-				SetSent(ev.Sent).
-				SetSkipped(ev.Skipped).
-				SetFailed(ev.Failed).
-				Save(reqCtx); err != nil {
-				slog.WarnContext(reqCtx, "wa: failed to finalize batch", "batch", batchID, "err", err)
-			}
+			h.completeBatchDetached(reqCtx, batchID, ev.Sent, ev.Skipped, ev.Failed)
 		case whatsapp.EventError:
+			// The terminal error event carries "message" (a failed progress line uses
+			// "error"); fall back to "error" defensively so the reason is never blank.
 			sawTerminal = true
-			h.failBatch(reqCtx, batchID, ev.Error)
+			msg := ev.Message
+			if msg == "" {
+				msg = ev.Error
+			}
+			h.failBatchDetached(reqCtx, batchID, msg)
 		}
-		return nil
+		return writeErr
 	}
 
-	err := h.deps.WA.StartSession(reqCtx, sess, onEvent)
+	// Provision a sidecar for this batch. In fargate mode this launches an ECS task
+	// (a cold start of up to ~2 minutes), emitting provisioning events so the browser
+	// can show progress; in static mode it returns the fixed client instantly.
+	handle, err := h.deps.WA.Provision(reqCtx, func(msg string) {
+		_ = writeLine(provisioningEventJSON(msg))
+	})
+	if err != nil {
+		// A canceled context means the browser hung up during the cold start: record
+		// the outcome on a detached context (the provider already stopped any task it
+		// launched) and stop, since there is no one to receive a terminal line.
+		if errors.Is(err, context.Canceled) || reqCtx.Err() != nil {
+			h.failBatchDetached(reqCtx, batchID, "the connection was closed")
+			return
+		}
+		slog.WarnContext(reqCtx, "wa: provision failed", "batch", batchID, "err", err)
+		h.failBatch(reqCtx, batchID, "the sender could not be started")
+		_ = writeLine(errorEventJSON("the sender could not be started"))
+		return
+	}
+	// Tear the sidecar down on every exit path (StopTask in fargate; a no-op in
+	// static). Detached from reqCtx so the teardown still runs after a client
+	// disconnect has canceled reqCtx.
+	defer func() {
+		detached, cancel := context.WithTimeout(context.WithoutCancel(reqCtx), 30*time.Second)
+		defer cancel()
+		handle.Close(detached)
+	}()
+
+	err = handle.Client.StartSession(reqCtx, sess, onEvent)
 	if err == nil {
 		if !sawTerminal {
 			// Stream closed cleanly but never sent a done/error: treat as failed.
@@ -340,6 +374,26 @@ func (h *Handler) failBatchDetached(ctx context.Context, batchID int, msg string
 	h.failBatch(detached, batchID, msg)
 }
 
+func (h *Handler) completeBatch(ctx context.Context, batchID, sent, skipped, failed int) {
+	if _, err := h.deps.Ent.WaBatch.UpdateOneID(batchID).
+		SetStatus(wabatch.StatusCompleted).
+		SetSent(sent).
+		SetSkipped(skipped).
+		SetFailed(failed).
+		Save(ctx); err != nil {
+		slog.WarnContext(ctx, "wa: failed to finalize batch", "batch", batchID, "err", err)
+	}
+}
+
+// completeBatchDetached finalizes a batch on a context detached from the
+// (possibly-canceled) request context, so a terminal done that arrives as the
+// client disconnects still records the true outcome instead of being lost.
+func (h *Handler) completeBatchDetached(ctx context.Context, batchID, sent, skipped, failed int) {
+	detached, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	h.completeBatch(detached, batchID, sent, skipped, failed)
+}
+
 // batchesUsedToday counts the caller's batches in the rolling 24h window that
 // actually did something (sent/skipped/failed > 0), so an aborted QR scan does
 // not consume a daily slot. See ADR 11.
@@ -359,23 +413,26 @@ func (h *Handler) batchesUsedToday(ctx context.Context, uid int) (int, error) {
 }
 
 func errorEventJSON(msg string) []byte {
-	// msg is server-authored (no user input), so a plain quote-escape is enough.
-	return []byte(`{"type":"error","message":"` + jsonEscape(msg) + `"}`)
+	return eventJSON(whatsapp.EventError, msg)
 }
 
-func jsonEscape(s string) string {
-	out := make([]byte, 0, len(s))
-	for _, r := range s {
-		switch r {
-		case '"':
-			out = append(out, '\\', '"')
-		case '\\':
-			out = append(out, '\\', '\\')
-		case '\n':
-			out = append(out, '\\', 'n')
-		default:
-			out = append(out, string(r)...)
-		}
+// provisioningEventJSON is the backend-emitted line shown during a fargate cold
+// start (never relayed from the sidecar).
+func provisioningEventJSON(msg string) []byte {
+	return eventJSON(whatsapp.EventProvisioning, msg)
+}
+
+// eventJSON builds a one-line {"type","message"} NDJSON event via encoding/json,
+// so any control characters in msg are escaped and cannot corrupt the line framing.
+func eventJSON(eventType, msg string) []byte {
+	b, err := json.Marshal(struct {
+		Type    string `json:"type"`
+		Message string `json:"message"`
+	}{Type: eventType, Message: msg})
+	if err != nil {
+		// Both fields are plain strings, so marshaling cannot actually fail; keep a
+		// defensive fallback rather than panic inside a streaming handler.
+		return []byte(`{"type":"` + eventType + `","message":"the sender failed"}`)
 	}
-	return string(out)
+	return b
 }
