@@ -12,6 +12,8 @@ import {
   getListWaListsQueryKey,
 } from '@/lib/api/generated';
 import type { ListDTO, LineError, RecipientDTO } from '@/lib/api/model';
+import { useAuth } from '@/lib/auth';
+import { WA_COUNTRIES, dialLabel } from '@/lib/wa-countries';
 
 const inputClass =
   'w-full rounded-md border border-slate-700 bg-deepsea px-3 py-2 text-white outline-none focus:border-sky';
@@ -26,11 +28,13 @@ function recipientsToText(recipients: RecipientDTO[]): string {
 
 export function ListsPanel() {
   const queryClient = useQueryClient();
+  const { user } = useAuth();
+  const userDefault = user?.default_country_code ?? '';
   const { data, isLoading } = useListWaLists();
   const lists = data?.lists ?? [];
 
   const [editing, setEditing] = useState<number | 'new' | null>(null);
-  const [form, setForm] = useState({ name: '', recipients_text: '' });
+  const [form, setForm] = useState({ name: '', recipients_text: '', country_code: '' });
   const [invalidLines, setInvalidLines] = useState<LineError[]>([]);
 
   const invalidate = () =>
@@ -43,20 +47,24 @@ export function ListsPanel() {
   const error = (create.error || update.error || remove.error) as Error | null;
 
   const openNew = () => {
-    setForm({ name: '', recipients_text: '' });
+    setForm({ name: '', recipients_text: '', country_code: '' });
     setInvalidLines([]);
     setEditing('new');
   };
 
   const openEdit = async (l: ListDTO) => {
     setInvalidLines([]);
-    setForm({ name: l.name, recipients_text: '' });
+    setForm({ name: l.name, recipients_text: '', country_code: l.country_code ?? '' });
     setEditing(l.id);
     // Load the current members so editing starts from them, not a blank paste
     // (PUT replaces the whole membership).
     try {
       const full = await getWaList(l.id);
-      setForm({ name: full.list.name, recipients_text: recipientsToText(full.list.recipients ?? []) });
+      setForm({
+        name: full.list.name,
+        recipients_text: recipientsToText(full.list.recipients ?? []),
+        country_code: full.list.country_code ?? '',
+      });
     } catch {
       // Leave the name in place; the user can re-paste recipients.
     }
@@ -88,6 +96,9 @@ export function ListsPanel() {
   };
 
   const canSave = form.name.trim().length > 0;
+  // The code that a leading 0 will actually become: the per-list override if
+  // set, otherwise the user's default.
+  const effectiveCode = form.country_code || userDefault;
 
   return (
     <section className="flex flex-col gap-4">
@@ -112,6 +123,23 @@ export function ListsPanel() {
             value={form.name}
             onChange={(e) => setForm({ ...form, name: e.target.value })}
           />
+          <label className="flex flex-col gap-1 text-sm text-slate-300">
+            Country code for local (0…) numbers
+            <select
+              className={inputClass}
+              value={form.country_code}
+              onChange={(e) => setForm({ ...form, country_code: e.target.value })}
+            >
+              <option value="">
+                Use my default{userDefault ? ` (+${userDefault})` : ''}
+              </option>
+              {WA_COUNTRIES.map((c) => (
+                <option key={c.code} value={c.code}>
+                  {c.name} (+{c.code})
+                </option>
+              ))}
+            </select>
+          </label>
           <textarea
             className={`${inputClass} font-mono text-sm`}
             rows={7}
@@ -121,8 +149,11 @@ export function ListsPanel() {
           />
           <p className="text-xs text-slate-400">
             One recipient per line: <code className="text-sky">number</code> or{' '}
-            <code className="text-sky">number, name</code>. A leading 0 is read as
-            Australian (+61); other countries need their code. Max 250.
+            <code className="text-sky">number, name</code>.{' '}
+            {effectiveCode
+              ? `Numbers starting with 0 will use ${dialLabel(effectiveCode)}; other countries need their code.`
+              : 'Numbers need their country code.'}{' '}
+            Max 250.
           </p>
 
           {invalidLines.length > 0 && (

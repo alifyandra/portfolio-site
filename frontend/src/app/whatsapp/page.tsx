@@ -8,6 +8,7 @@ import { useAuth } from '@/lib/auth';
 import { TemplatesPanel } from '@/components/whatsapp/TemplatesPanel';
 import { ListsPanel } from '@/components/whatsapp/ListsPanel';
 import { SendPanel } from '@/components/whatsapp/SendPanel';
+import { CountryCodeSetting } from '@/components/whatsapp/CountryCodeSetting';
 
 export default function WhatsAppPage() {
   const { isLoading, isAuthenticated, isFriend, signIn } = useAuth();
@@ -47,7 +48,10 @@ export default function WhatsAppPage() {
           <div className="h-px bg-slate-800" />
           <TemplatesPanel />
           <div className="h-px bg-slate-800" />
-          <ListsPanel />
+          <div className="flex flex-col gap-6">
+            <CountryCodeSetting />
+            <ListsPanel />
+          </div>
         </div>
       )}
     </main>
