@@ -57,3 +57,28 @@ output "ses_dkim_tokens" {
   description = "SES DKIM tokens (published as CNAMEs in Cloudflare)."
   value       = aws_ses_domain_dkim.main.dkim_tokens
 }
+
+output "wa_ecr_repository_url" {
+  description = "ECR repo the WhatsApp sidecar image is pushed to (Slice B)."
+  value       = aws_ecr_repository.wa_sidecar.repository_url
+}
+
+output "wa_ecs_cluster" {
+  description = "ECS cluster name the sidecar task runs in."
+  value       = aws_ecs_cluster.wa.name
+}
+
+output "wa_task_definition" {
+  description = "ECS task-definition family the backend calls RunTask with."
+  value       = aws_ecs_task_definition.wa_sidecar.family
+}
+
+output "wa_sidecar_security_group_id" {
+  description = "Security group attached to the sidecar Fargate task."
+  value       = aws_security_group.wa_sidecar.id
+}
+
+output "wa_subnet_ids" {
+  description = "Public subnet IDs the sidecar task can be launched into."
+  value       = aws_subnet.public[*].id
+}

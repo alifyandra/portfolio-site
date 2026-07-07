@@ -39,6 +39,20 @@ locals {
     GOOGLE_REDIRECT_URL   = "https://${local.api_fqdn}/api/auth/google/callback"
     SESSION_COOKIE_DOMAIN = ".${var.domain}"
     FRONTEND_URL          = "https://www.${var.domain}/account"
+
+    # WhatsApp sidecar on Fargate (ADR 11, see whatsapp.tf). These drive the
+    # backend's ECS launcher: at batch start it RunTasks the sidecar task def in
+    # this cluster/subnets/SG, streams to the task's private IP, then StopTasks it.
+    # WA_SIDECAR_URL is intentionally absent in fargate mode (there is no fixed
+    # endpoint; each batch gets a fresh task). AssignPublicIp must be true: the
+    # public subnets have no NAT, so the ECS agent needs a public IP to pull the
+    # image from ECR and read the WA_SIDECAR_SECRET SecureString from SSM.
+    WA_SIDECAR_MODE      = "fargate"
+    WA_ECS_CLUSTER       = aws_ecs_cluster.wa.name
+    WA_TASK_DEFINITION   = aws_ecs_task_definition.wa_sidecar.family
+    WA_SUBNET_IDS        = join(",", aws_subnet.public[*].id)
+    WA_SECURITY_GROUP_ID = aws_security_group.wa_sidecar.id
+    WA_ASSIGN_PUBLIC_IP  = "true"
   }
 
   # Secret slots. Seeded with a placeholder, then pushed out-of-band.
@@ -54,6 +68,7 @@ locals {
     "GOOGLE_CLIENT_SECRET",
     "ADMIN_EMAILS",
     "FRIEND_EMAILS",
+    "WA_SIDECAR_SECRET", # backend<->sidecar shared bearer secret (see whatsapp.tf)
   ]
 }
 
