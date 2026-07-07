@@ -197,3 +197,53 @@ sidecar's inter-message delay defaults were widened to roughly 20-90s for the sa
 reason. Per-message `{name}` substitution already keeps messages from being
 byte-identical. An opt-out ("reply STOP") list is a tracked follow-up for recurring
 use.
+
+## Amendment (2026-07-07): sidecar host and transport, AWS Fargate scale-to-zero (supersedes Oracle/Fly plus Cloudflare Tunnel)
+
+The Settled section chose a free-tier host for the sidecar (leaning Oracle Cloud
+Always Free A1 ARM, with Fly.io as a near-free alternative), reached from the backend
+over a Cloudflare Tunnel. That host-and-transport decision is superseded. The sidecar
+now runs as a per-batch AWS Fargate task inside the existing VPC, launched on demand
+by the Go backend.
+
+**Why the pivot.** Oracle's free A1 (ARM) shape is chronically "out of host capacity":
+repeated launch failures, even after starting a Pay-As-You-Go upgrade. On A1 a stop
+means re-entering the capacity lottery to start again, which is fatal for an
+auto-stop / auto-start design. The workload is bursty and mostly idle (cap roughly 3
+sends per day, minutes each), a shape that wants scale-to-zero and A1 cannot reliably
+deliver. Fargate scale-to-zero fits that shape, keeps everything on the stack already
+run (EC2 backend, Terraform, SSM, IAM, one VPC, one bill), and aligns with the AWS
+learning goal. Alternatives weighed: an always-on in-VPC `t4g.small` (about $8-12 per
+month, simplest, zero backend change, but pays for idle); Fly.io lean (about $1-3 per
+month, but a new provider and bill); AWS App Runner (bills idle memory and is shaky on
+hours-long streams). Fargate scale-to-zero won on near-free cost plus all-AWS
+consolidation, accepting the backend rework.
+
+**Target architecture (VPC-internal, backend-orchestrated).** The backend calls
+`ecs:RunTask` (launchType FARGATE, arm64, 0.5 vCPU / 2 GB) for one task per Batch,
+polls `DescribeTasks` until RUNNING, resolves the task ENI's private IP, and streams
+the existing `POST /sessions` NDJSON to `http://<private-ip>:8081`, then calls
+`ecs:StopTask` when the relay ends. Because the hop is VPC-internal, the bearer secret
+rides the private network: no Cloudflare Tunnel, no public-IP dependency for ingress,
+no TLS over the internet. The task's security group accepts `:8081` only from the
+backend's security group. The task runs in a public subnet with
+`assignPublicIp=ENABLED` (no NAT gateway) so the ECS agent can pull from ECR and read
+SSM.
+
+**Teardown and failure.** Backend `StopTask` on stream end (success, error, or client
+disconnect) is the primary teardown. The sidecar's session hard-cap timer plus a gated
+self-exit-after-session are the orphan backstops: if the backend dies mid-batch, the
+task self-terminates instead of billing. Cold start (roughly 30 to 60 seconds for task
+launch plus Chromium init) surfaces to the browser as a "provisioning" status before
+the QR; in practice it is invisible, since the user is about to pick up their phone to
+scan.
+
+**Trade-offs accepted.** The backend gains ECS orchestration code and IAM
+(`ecs:RunTask` / `StopTask` / `DescribeTasks`, `ec2:DescribeNetworkInterfaces`, and a
+scoped `iam:PassRole`), a per-batch cold start, and Fargate's `/dev/shm` limitation
+(handled with Chromium `--disable-dev-shm-usage`). In exchange: near-zero idle cost,
+one cloud / IaC / bill, and the tunnel, public-IP, and TLS problems are deleted.
+
+Tracked in GitHub issue #58, implemented across Terraform (ECR plus ECS cluster, task
+definition, security group, IAM), the sidecar image (ECR plus the shm flag plus
+self-exit), and the backend (a `WA_SIDECAR_MODE=static|fargate` launcher).

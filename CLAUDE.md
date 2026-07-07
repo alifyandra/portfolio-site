@@ -129,24 +129,31 @@ make fe-dev    # Next.js at :3000 (separate terminal)
   pinned (`ignore_changes`) so an apply never silently replaces the box.
   **Outstanding (external):** add Nayla (`munarohmantab99@gmail.com`) as a Google
   OAuth **test user** if the consent screen is in Testing, else she cannot sign in.
-- 🚧 **Phase 2 — WhatsApp Sender, the first Tool** (feature-complete, not yet
-  deployed) ([ADR 11](docs/adr/0011-whatsapp-sender-tool.md), friend-gated):
-  branch `feat/whatsapp-tool` (draft PR #53, **CI green**). Gated `/whatsapp`
+- 🚧 **Phase 2 — WhatsApp Sender, the first Tool** (feature verified e2e; deploy
+  reworked, not yet applied) ([ADR 11](docs/adr/0011-whatsapp-sender-tool.md),
+  friend-gated): branch `feat/whatsapp-tool` (draft PR #53). Gated `/whatsapp`
   route + Go backend (data + orchestration) + a separate **private**
   `whatsapp-web.js` sidecar (Node + Chromium, off the micro) with ephemeral
   QR-linked sessions. Batch-anchored flow (create Batch → QR-link → send);
   browser↔backend and backend↔sidecar both stream NDJSON over POST (not SSE).
-  Tracer-bullet MVP, caps 250/batch + 3/day. Contract:
+  Tracer-bullet MVP, caps 250/batch + 3/day (env-configurable). Contract:
   `docs/whatsapp-sidecar-contract.md`.
-  - ✅ **Slice 1** Ent data model (`WaTemplate`/`WaRecipientList`/`WaRecipient`/
-    `WaBatch`). ✅ **Slice 2** backend: friend gate, owner-scoped CRUD,
-    `POST /api/wa/batches` streaming orchestration + caps (`internal/whatsapp/`,
-    `internal/api/whatsapp*.go`). ✅ **Slice 3** sidecar: private repo
-    **`alifyandra/whatsapp-sidecar`** (Docker image verified — streams a real QR
-    from containerized Chromium). ✅ **Slice 4** frontend: `/whatsapp` panels +
-    `qrcode.react` QR + streaming reader (`src/lib/wa-stream.ts`).
-  - ⏳ **Slice 5 remains (needs Alif):** a live QR scan to confirm delivery, then
-    provision the free host (Oracle Always Free) + deploy the sidecar + set prod
-    `WA_SIDECAR_URL/SECRET` in SSM. Local wiring seam done (sidecar
-    `docker compose up` + backend at `host.docker.internal:8081`).
+  - ✅ **Build (slices 1-4):** Ent data model, friend-gated owner-scoped CRUD +
+    `POST /api/wa/batches` streaming orchestration, private sidecar repo
+    **`alifyandra/whatsapp-sidecar`**, `/whatsapp` frontend. **Verified e2e** (real
+    message delivered to a different number, reported `sent` on WhatsApp's ack).
+  - 🚧 **Deploy pivot — sidecar on AWS Fargate scale-to-zero** (ADR 11 2026-07-07
+    amendment, [issue #58]): Oracle Always Free A1 abandoned (chronic capacity
+    failures; bad fit for a bursty/idle workload). Backend now launches a per-batch
+    Fargate task in-VPC (`ecs:RunTask` → task ENI private IP → stream → `StopTask`),
+    so no tunnel / public IP / TLS-over-internet. **Slices A-D implemented on the
+    branch (uncommitted):** Terraform (ECR + ECS cluster + arm64 task def + SG +
+    scoped IAM, `deploy/terraform/whatsapp.tf`); sidecar (`--disable-dev-shm-usage`
+    + gated `WA_SHUTDOWN_AFTER_SESSION` self-exit; Oracle artifacts retired);
+    backend `WA_SIDECAR_MODE=static|fargate` launcher (`internal/whatsapp/provider.go`)
+    + `provisioning` cold-start event; ADR + docs.
+  - ⏳ **Slice E needs Alif:** gated `terraform apply`, build+push the arm64 image
+    to ECR, seed `WA_SIDECAR_SECRET` in SSM, redeploy backend, then a live prod send
+    to a real number. Runbook: `deploy/terraform/README.md`. Local dev unchanged
+    (`WA_SIDECAR_MODE=static` → `host.docker.internal:8081`).
   See memory `whatsapp-sender-tool`.

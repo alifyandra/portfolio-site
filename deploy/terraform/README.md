@@ -200,3 +200,53 @@ changes). Roll back by dispatching with the input(s) set to `false`.
 
 To roll back, dispatch with the relevant input(s) set to `false` (lock first,
 then proxy), then revert the reconcile defaults.
+
+## WhatsApp sidecar (Fargate) deploy
+
+The WhatsApp Sender tool (ADR 11) runs its `whatsapp-web.js` + Chromium sidecar as
+an on-demand Fargate task the backend launches per batch (see the 2026-07-07 ADR 11
+amendment and issue #58). The Terraform is in `whatsapp.tf` (ECR repo, ECS cluster,
+arm64 task definition, security group, IAM); the backend launcher is gated by
+`WA_SIDECAR_MODE=fargate`, set in `ssm.tf` `env_config`. Bring it up once, in order:
+
+1. **Apply the infra.** Dispatch the `Terraform` workflow (gated `plan-dispatch` →
+   `apply`) or apply locally. This creates the ECR repo `portfolio-wa-sidecar`, the
+   ECS cluster, the task definition, the SG, and the IAM, and sets
+   `WA_SIDECAR_MODE=fargate` plus `WA_ECS_CLUSTER` / `WA_TASK_DEFINITION` /
+   `WA_SUBNET_IDS` / `WA_SECURITY_GROUP_ID` in SSM.
+
+2. **Seed the shared secret.** Backend and sidecar authenticate with a bearer secret
+   in `/portfolio/env/WA_SIDECAR_SECRET` (a placeholder until seeded, so sends stay
+   inert). Push a real value:
+
+   ```bash
+   aws ssm put-parameter --name /portfolio/env/WA_SIDECAR_SECRET --type SecureString \
+     --overwrite --region ap-southeast-2 --value "$(openssl rand -hex 32)"
+   ```
+
+3. **Build + push the arm64 image to ECR** (from the private `whatsapp-sidecar`
+   repo; the task def pins `arm64`, so the image must be arm64):
+
+   ```bash
+   AWS_REGION=ap-southeast-2
+   ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+   REPO=$(terraform -chdir=path/to/portfolio-site/deploy/terraform output -raw wa_ecr_repository_url)
+   aws ecr get-login-password --region "$AWS_REGION" \
+     | docker login --username AWS --password-stdin "$ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com"
+   docker buildx build --platform linux/arm64 -t "$REPO:latest" --push .
+   ```
+
+4. **Redeploy the backend.** `deploy-backend.yml` rebuilds `.env` from SSM on every
+   deploy, so a redeploy picks up `WA_SIDECAR_MODE=fargate` and the secret (push to
+   `main` after merge, or the manual deploy path).
+
+5. **Verify a live send.** As a friend/admin, open `/whatsapp`, create a template +
+   list with a **real** recipient number (mind the `+61` default, issue #54), start a
+   batch, and scan the QR. The browser shows a "provisioning" state during the
+   ~30-60s Fargate cold start, then the QR; confirm delivery on the recipient phone.
+
+Notes: the task runs in a public subnet with `assignPublicIp=ENABLED` (no NAT) so it
+can pull from ECR and read SSM. Teardown is `StopTask` on relay end, backstopped by
+the sidecar's `WA_SHUTDOWN_AFTER_SESSION=true` self-exit. Logs land in CloudWatch
+`/ecs/portfolio-wa-sidecar`. The first ECR push is manual; sidecar CI (OIDC build +
+push) is a later follow-up.
