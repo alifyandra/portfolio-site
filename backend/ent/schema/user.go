@@ -1,6 +1,7 @@
 package schema
 
 import (
+	"regexp"
 	"time"
 
 	"entgo.io/ent"
@@ -25,6 +26,10 @@ func (User) Fields() []ent.Field {
 			Optional(),
 		field.String("avatar_url").
 			Optional(),
+		field.String("default_country_code").
+			Default("61").
+			Match(regexp.MustCompile("^[0-9]{1,4}$")).
+			Comment("Country code (digits only, no +) that replaces a leading trunk 0 when normalizing WhatsApp numbers. A recipient list's own country_code overrides this per-list; the \"61\" constant is the final fallback. See ADR 11."),
 		field.Enum("role").
 			Values("admin", "friend", "member").
 			Default("member").

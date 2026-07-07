@@ -7,9 +7,11 @@ import (
 	"strings"
 )
 
-// DefaultCountryCode is prepended when a pasted number starts with a local
-// trunk 0. The MVP targets Australia (+61); any non-Australian number must be
-// pasted with its own country code. See ADR 11's 2026-06-30 amendment.
+// DefaultCountryCode is the final fallback prepended when a pasted number starts
+// with a local trunk 0 and neither the recipient list nor the acting user supplies
+// a country code. It targets Australia (+61). Callers pass an explicit code (the
+// list override or the user default) to NormalizePhone; this constant only applies
+// when that code is empty. See ADR 11 and its 2026-06-30 amendment.
 const DefaultCountryCode = "61"
 
 // phone length bounds after normalization. E.164 caps a number at 15 digits;
@@ -21,9 +23,13 @@ const (
 
 // NormalizePhone canonicalizes a pasted number to international, digits-only form
 // (no +, no leading 0). It strips whitespace and punctuation, replaces a single
-// leading 0 with DefaultCountryCode, and validates the digit count. ok is false
-// when nothing usable remains or the result is out of range.
-func NormalizePhone(raw string) (normalized string, ok bool) {
+// leading 0 with countryCode, and validates the digit count. When countryCode is
+// empty it falls back to DefaultCountryCode. ok is false when nothing usable
+// remains or the result is out of range.
+func NormalizePhone(raw, countryCode string) (normalized string, ok bool) {
+	if countryCode == "" {
+		countryCode = DefaultCountryCode
+	}
 	var b strings.Builder
 	for _, r := range raw {
 		if r >= '0' && r <= '9' {
@@ -34,9 +40,14 @@ func NormalizePhone(raw string) (normalized string, ok bool) {
 	if digits == "" {
 		return "", false
 	}
-	// A leading trunk 0 means a local number: swap it for the default country code.
-	if strings.HasPrefix(digits, "0") {
-		digits = DefaultCountryCode + digits[1:]
+	// A leading "00" is the international access prefix (some contacts write
+	// 0062812... instead of +62812...): drop it, the rest is already international.
+	// Otherwise a single leading trunk 0 means a local number: swap it for the
+	// country code.
+	if strings.HasPrefix(digits, "00") {
+		digits = digits[2:]
+	} else if strings.HasPrefix(digits, "0") {
+		digits = countryCode + digits[1:]
 	}
 	if len(digits) < minPhoneDigits || len(digits) > maxPhoneDigits {
 		return "", false
@@ -60,10 +71,11 @@ type LineError struct {
 
 // ParseRecipients turns bulk-paste text into recipients plus per-line errors.
 // Each non-blank line is "phone" or "phone<sep>name", where sep is the first
-// comma or tab; the phone is normalized and the name trimmed. Blank lines are
-// ignored. Duplicate numbers (after normalization) are dropped, keeping the
-// first occurrence, so a number is never messaged twice in one list.
-func ParseRecipients(text string) (recipients []ParsedRecipient, errs []LineError) {
+// comma or tab; the phone is normalized (a leading trunk 0 expands to countryCode,
+// or DefaultCountryCode when countryCode is empty) and the name trimmed. Blank
+// lines are ignored. Duplicate numbers (after normalization) are dropped, keeping
+// the first occurrence, so a number is never messaged twice in one list.
+func ParseRecipients(text, countryCode string) (recipients []ParsedRecipient, errs []LineError) {
 	seen := make(map[string]struct{})
 	for i, line := range strings.Split(text, "\n") {
 		raw := strings.TrimSpace(strings.TrimSuffix(line, "\r"))
@@ -71,7 +83,7 @@ func ParseRecipients(text string) (recipients []ParsedRecipient, errs []LineErro
 			continue
 		}
 		phonePart, namePart := splitPhoneName(raw)
-		phone, ok := NormalizePhone(phonePart)
+		phone, ok := NormalizePhone(phonePart, countryCode)
 		if !ok {
 			errs = append(errs, LineError{Line: i + 1, Raw: raw, Reason: "not a valid phone number"})
 			continue

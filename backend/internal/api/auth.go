@@ -16,11 +16,12 @@ var cookieAuthSecurity = []map[string][]string{{"cookieAuth": {}}}
 
 type userOutput struct {
 	Body struct {
-		ID        int    `json:"id"`
-		Email     string `json:"email"`
-		Name      string `json:"name"`
-		AvatarURL string `json:"avatar_url"`
-		Role      string `json:"role" enum:"admin,friend,member" doc:"Access tier (see ADR 10): admin and friend are allowlist-conferred, everyone else is member"`
+		ID                 int    `json:"id"`
+		Email              string `json:"email"`
+		Name               string `json:"name"`
+		AvatarURL          string `json:"avatar_url"`
+		Role               string `json:"role" enum:"admin,friend,member" doc:"Access tier (see ADR 10): admin and friend are allowlist-conferred, everyone else is member"`
+		DefaultCountryCode string `json:"default_country_code" doc:"Default WhatsApp country code (digits only) that replaces a leading trunk 0; overridable per recipient list (see ADR 11)"`
 	}
 }
 
@@ -31,7 +32,17 @@ func toUserOutput(u *ent.User) *userOutput {
 	out.Body.Name = u.Name
 	out.Body.AvatarURL = u.AvatarURL
 	out.Body.Role = string(u.Role)
+	out.Body.DefaultCountryCode = u.DefaultCountryCode
 	return out
+}
+
+// updateUserInput is the PATCH /api/auth/me body. Only user-editable settings are
+// exposed; the country code is validated as 1-4 digits at the edge and again by the
+// Ent schema.
+type updateUserInput struct {
+	Body struct {
+		DefaultCountryCode string `json:"default_country_code" pattern:"^[0-9]{1,4}$" doc:"Default WhatsApp country code (digits only, no +), 1-4 digits"`
+	}
 }
 
 // messageOutput is a small JSON acknowledgement that may also clear the session
@@ -70,6 +81,29 @@ func (h *Handler) registerAuth(api huma.API) {
 			return nil, huma.Error401Unauthorized("not authenticated")
 		}
 		return toUserOutput(u), nil
+	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "update-current-user",
+		Method:      http.MethodPatch,
+		Path:        "/api/auth/me",
+		Summary:     "Update the current user's settings",
+		Tags:        tags,
+		Security:    cookieAuthSecurity,
+	}, func(ctx context.Context, in *updateUserInput) (*userOutput, error) {
+		svc, err := h.requireAuth()
+		if err != nil {
+			return nil, err
+		}
+		u := auth.UserFromContext(ctx)
+		if u == nil {
+			return nil, huma.Error401Unauthorized("not authenticated")
+		}
+		updated, err := svc.UpdateDefaultCountryCode(ctx, u.ID, in.Body.DefaultCountryCode)
+		if err != nil {
+			return nil, huma.Error500InternalServerError("failed to update settings", err)
+		}
+		return toUserOutput(updated), nil
 	})
 
 	huma.Register(api, huma.Operation{

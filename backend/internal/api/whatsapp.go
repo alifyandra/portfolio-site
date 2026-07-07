@@ -66,8 +66,12 @@ type RecipientDTO struct {
 // populated only on the single-list GET; the collection GET carries just the
 // count to keep PII off the list view.
 type ListDTO struct {
-	ID             int            `json:"id"`
-	Name           string         `json:"name"`
+	ID   int    `json:"id"`
+	Name string `json:"name"`
+	// CountryCode replaces a leading trunk 0 for this list's numbers; empty means
+	// the numbers were normalized with the owner's default_country_code (or the
+	// "61" fallback). See ADR 11.
+	CountryCode    string         `json:"country_code"`
 	RecipientCount int            `json:"recipient_count"`
 	Recipients     []RecipientDTO `json:"recipients,omitempty"`
 	CreatedAt      string         `json:"created_at"`
@@ -281,6 +285,10 @@ type listListsOutput struct {
 
 type listBodyInput struct {
 	Name string `json:"name" minLength:"1" maxLength:"120"`
+	// CountryCode is an optional per-list override (digits only, no +) for the code
+	// that replaces a leading trunk 0. Empty (or omitted) inherits the acting user's
+	// default_country_code. See ADR 11.
+	CountryCode string `json:"country_code,omitempty" pattern:"^([0-9]{1,4})?$" doc:"Per-list country code (1-4 digits); empty inherits the user default"`
 	// RecipientsText is bulk-paste input: one recipient per line, "phone" or
 	// "phone,name" (comma or tab separated). Numbers are normalized to
 	// international form; invalid lines are reported and skipped.
@@ -341,6 +349,7 @@ func (h *Handler) registerWhatsAppLists(api huma.API) {
 			out.Body.Lists = append(out.Body.Lists, ListDTO{
 				ID:             l.ID,
 				Name:           l.Name,
+				CountryCode:    l.CountryCode,
 				RecipientCount: count,
 				CreatedAt:      l.CreatedAt.UTC().Format(http.TimeFormat),
 				UpdatedAt:      l.UpdatedAt.UTC().Format(http.TimeFormat),
@@ -389,7 +398,8 @@ func (h *Handler) registerWhatsAppLists(api huma.API) {
 		if err != nil {
 			return nil, err
 		}
-		parsed, invalid := whatsapp.ParseRecipients(in.Body.RecipientsText)
+		countryCode := effectiveCountryCode(in.Body.CountryCode, u)
+		parsed, invalid := whatsapp.ParseRecipients(in.Body.RecipientsText, countryCode)
 		if len(parsed) > h.deps.WaMaxBatchRecipients {
 			return nil, huma.Error422UnprocessableEntity(tooManyRecipientsMsg(len(parsed), h.deps.WaMaxBatchRecipients))
 		}
@@ -400,6 +410,7 @@ func (h *Handler) registerWhatsAppLists(api huma.API) {
 		}
 		l, err := tx.WaRecipientList.Create().
 			SetName(in.Body.Name).
+			SetCountryCode(in.Body.CountryCode).
 			SetOwnerID(u.ID).
 			Save(ctx)
 		if err != nil {
@@ -437,7 +448,8 @@ func (h *Handler) registerWhatsAppLists(api huma.API) {
 		if _, err := h.ownedList(ctx, u.ID, in.ID); err != nil {
 			return nil, err
 		}
-		parsed, invalid := whatsapp.ParseRecipients(in.Body.RecipientsText)
+		countryCode := effectiveCountryCode(in.Body.CountryCode, u)
+		parsed, invalid := whatsapp.ParseRecipients(in.Body.RecipientsText, countryCode)
 		if len(parsed) > h.deps.WaMaxBatchRecipients {
 			return nil, huma.Error422UnprocessableEntity(tooManyRecipientsMsg(len(parsed), h.deps.WaMaxBatchRecipients))
 		}
@@ -446,7 +458,7 @@ func (h *Handler) registerWhatsAppLists(api huma.API) {
 		if err != nil {
 			return nil, huma.Error500InternalServerError("failed to update recipient list", err)
 		}
-		l, err := tx.WaRecipientList.UpdateOneID(in.ID).SetName(in.Body.Name).Save(ctx)
+		l, err := tx.WaRecipientList.UpdateOneID(in.ID).SetName(in.Body.Name).SetCountryCode(in.Body.CountryCode).Save(ctx)
 		if err != nil {
 			_ = tx.Rollback()
 			return nil, huma.Error500InternalServerError("failed to update recipient list", err)
@@ -532,10 +544,22 @@ func bulkCreateRecipients(ctx context.Context, tx *ent.Tx, listID int, parsed []
 	return tx.WaRecipient.CreateBulk(builders...).Exec(ctx)
 }
 
+// effectiveCountryCode resolves the code that expands a leading trunk 0, in
+// precedence order: the request's per-list country_code (if non-empty), else the
+// acting user's default_country_code, else "" (NormalizePhone then falls back to
+// its DefaultCountryCode constant). See ADR 11.
+func effectiveCountryCode(listCode string, u *ent.User) string {
+	if listCode != "" {
+		return listCode
+	}
+	return u.DefaultCountryCode
+}
+
 func listWithRecipientsDTO(l *ent.WaRecipientList, recs []*ent.WaRecipient) ListDTO {
 	dto := ListDTO{
 		ID:             l.ID,
 		Name:           l.Name,
+		CountryCode:    l.CountryCode,
 		RecipientCount: len(recs),
 		CreatedAt:      l.CreatedAt.UTC().Format(http.TimeFormat),
 		UpdatedAt:      l.UpdatedAt.UTC().Format(http.TimeFormat),
