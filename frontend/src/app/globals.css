@@ -1,29 +1,122 @@
 @import 'tailwindcss';
 
-/* Palette source of truth: see /docs/design/color-palette.md
- * Tailwind v4 is CSS-first: colors declared here as --color-NAME become the
- * bg-NAME, text-NAME and border-NAME utilities (bg-deepsea, text-coral, …)
- * used across the app. The font stack references the next/font Inter variable
- * (--font-inter, set in layout.tsx) so font-sans / the default body font
- * resolve to Inter, matching the old JS config. */
+/* Two themes — dark (default) and light — flipped via html[data-theme] by the
+ * ThemeToggle. Both are built on the "cool" palette (teal base, teal-green,
+ * blue, gold, pink). See /docs/design/color-palette.md.
+ *
+ * How the theming works
+ * ---------------------
+ * The app was authored dark-first with literal utilities (bg-deepsea, text-white,
+ * text-slate-*, border-slate-*). Rather than edit ~130 call sites, themes are
+ * driven by overriding CSS variables:
+ *   - brand accents: --color-{deepsea,mint,sky,citron,coral}
+ *   - Tailwind v4 emits its default scale as vars too (--color-white,
+ *     --color-slate-*) and utilities compile to var(--color-*), so re-defining
+ *     those under html[data-theme='light'] flips the whole app to light with no
+ *     component edits.
+ *
+ * deepsea split into three tokens so light/dark can diverge:
+ *   - --canvas         page background      (body)
+ *   - --color-deepsea  raised surfaces      (bg-deepsea)
+ *   - --color-ink      dark text on accents (text-ink) */
 @theme {
-  --color-deepsea: #053c5e; /* background / primary text on light */
-  --color-mint: #45cb85; /* secondary / success */
-  --color-sky: #96c5f7; /* tertiary / links */
-  --color-citron: #eaf27c; /* primary accent / CTA */
-  --color-coral: #f24333; /* danger / error */
+  /* DARK theme defaults (the "cool" palette) */
+  --color-deepsea: #073b4c; /* raised surface */
+  --color-mint: #06d6a0; /* teal-green: success / positive */
+  --color-sky: #16b0d6; /* bright teal-cyan: links / info */
+  --color-citron: #ffd166; /* gold: CTA / accent */
+  --color-coral: #ef476f; /* pink-red: danger */
+  --color-ink: #073b4c; /* dark text on light accents -> text-ink */
 
   --font-sans: var(--font-inter), system-ui, sans-serif;
+}
+
+:root {
+  --canvas: #073b4c; /* dark page background */
+  --heading: var(--color-citron); /* section titles */
+}
+
+/* ── LIGHT theme ────────────────────────────────────────────────────────
+ * cool's accents on a light teal-tinted canvas. sky drops to the darker
+ * #118ab2 (readable on white); the neutral slate/white scale inverts to dark
+ * inks / pale borders, flipping the whole app to light with no component edits. */
+html[data-theme='light'] {
+  --color-sky: #118ab2; /* darker than dark-theme's #16b0d6 — readable on white */
+
+  --canvas: #edf4f4; /* light teal-tinted page */
+  --color-deepsea: #ffffff; /* white raised surfaces */
+  --color-ink: #073b4c; /* dark teal: text on gold/light accents */
+  --heading: #073b4c; /* dark-teal section titles */
+
+  /* neutrals: cool grey-teal light-theme scale */
+  --color-white: #082f3d; /* strongest text */
+  --color-slate-100: #0e3341; /* body text */
+  --color-slate-200: #17414f;
+  --color-slate-300: #355c68; /* secondary text */
+  --color-slate-400: #5a7b84; /* muted text / placeholders */
+  --color-slate-500: #6f9099; /* subtle text / stronger hover border */
+  --color-slate-600: #93aeb4; /* mid surface / divider */
+  --color-slate-700: #cfe0e1; /* default borders */
+  --color-slate-800: #dcebeb; /* subtle borders / faint surfaces */
+}
+
+/* Skill chips: each category picks an accent class (see Skills.tsx) that sets
+ * --accent; the chip look adapts per theme — tinted pill on dark, solid block
+ * on light. Written UNLAYERED because Tailwind v4 drops hand-authored rules
+ * placed in @layer components, and these classes don't compete with a utility. */
+.accent-sky {
+  --accent: var(--color-sky);
+}
+.accent-citron {
+  --accent: var(--color-citron);
+}
+.accent-mint {
+  --accent: var(--color-mint);
+}
+.accent-coral {
+  --accent: var(--color-coral);
+}
+
+.section-title {
+  color: var(--heading);
+}
+.skill-group {
+  color: var(--accent);
+}
+.skill-chip {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+}
+
+/* light: solid popping chips, muted group labels, and deepened pale accents.
+ * cool's accents mix light (green/gold) and mid (blue/pink) tones, so solid
+ * chips need per-accent text; and green/gold wash out as text on the canvas. */
+html[data-theme='light'] .skill-group {
+  color: var(--color-slate-400);
+}
+html[data-theme='light'] .skill-chip {
+  background: var(--accent);
+  color: #fff;
+}
+html[data-theme='light'] .accent-mint .skill-chip,
+html[data-theme='light'] .accent-citron .skill-chip {
+  color: var(--color-ink);
+}
+html[data-theme='light'] .text-mint {
+  color: #086b50; /* deep green, readable on the pale canvas */
+}
+html[data-theme='light'] .text-citron {
+  color: #7a5c00; /* dark amber, the readable form of the gold */
 }
 
 /* These base customizations MUST live in @layer base. Tailwind v4 emits real
  * CSS @layers (theme, base, components, utilities) and unlayered rules beat
  * every layer — so an unlayered `a { color: sky }` would override text-mint /
- * text-deepsea / text-coral on every link. Inside @layer base, utilities win,
- * matching the v3 behaviour. */
+ * text-ink / text-coral on every link. Inside @layer base, utilities win. */
 @layer base {
   body {
-    @apply bg-deepsea text-slate-100 antialiased;
+    background: var(--canvas);
+    @apply text-slate-100 antialiased;
   }
 
   a {
@@ -34,11 +127,9 @@
   }
 
   /* v4 Preflight changed two defaults; restore the v3 look used by this site. */
-  /* Placeholders defaulted to currentColor/50% (here white-ish) — was gray-400. */
   ::placeholder {
     @apply text-slate-400;
   }
-  /* <button> now defaults to cursor: default — keep the pointer affordance. */
   button:not(:disabled),
   [role='button']:not(:disabled) {
     cursor: pointer;
@@ -46,6 +137,6 @@
 
   ::selection {
     background: var(--color-citron);
-    color: var(--color-deepsea);
+    color: var(--color-ink);
   }
 }

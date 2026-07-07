@@ -32,7 +32,7 @@ export default function WhatsAppPage() {
           <button
             type="button"
             onClick={signIn}
-            className="self-start rounded-md bg-citron px-5 py-2.5 font-semibold text-deepsea transition hover:brightness-95"
+            className="self-start rounded-md bg-citron px-5 py-2.5 font-semibold text-ink transition hover:brightness-95"
           >
             Sign in with Google
           </button>

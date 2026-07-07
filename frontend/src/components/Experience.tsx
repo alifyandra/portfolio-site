@@ -24,7 +24,7 @@ export function Experience() {
         ))}
       </ol>
 
-      <h3 className="mb-3 mt-6 text-lg font-semibold text-citron">
+      <h3 className="section-title mb-3 mt-6 text-lg font-semibold">
         Education & Certs
       </h3>
       <ul className="space-y-2 text-slate-300">

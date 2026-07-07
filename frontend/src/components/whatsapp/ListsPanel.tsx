@@ -181,7 +181,7 @@ export function ListsPanel() {
               type="button"
               disabled={!canSave || busy}
               onClick={save}
-              className="rounded-md bg-citron px-4 py-1.5 text-sm font-semibold text-deepsea transition hover:brightness-95 disabled:opacity-50"
+              className="rounded-md bg-citron px-4 py-1.5 text-sm font-semibold text-ink transition hover:brightness-95 disabled:opacity-50"
             >
               {busy ? 'Saving…' : 'Save'}
             </button>

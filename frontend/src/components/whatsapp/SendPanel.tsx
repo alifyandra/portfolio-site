@@ -267,7 +267,7 @@ export function SendPanel() {
             type="button"
             disabled={!canSend}
             onClick={send}
-            className="self-start rounded-md bg-citron px-5 py-2 font-semibold text-deepsea transition hover:brightness-95 disabled:opacity-50"
+            className="self-start rounded-md bg-citron px-5 py-2 font-semibold text-ink transition hover:brightness-95 disabled:opacity-50"
           >
             Send batch
           </button>
@@ -284,7 +284,7 @@ export function SendPanel() {
           <p className="text-sm text-slate-300">
             Scan with WhatsApp → Settings → Linked Devices
           </p>
-          <div className="inline-block rounded-md bg-white p-3">
+          <div className="inline-block rounded-md bg-[#ffffff] p-3">
             <QRCodeSVG value={qr} size={220} />
           </div>
           <button

@@ -18,7 +18,7 @@ export function Hero() {
           <div className="mt-2 flex flex-wrap gap-3">
             <a
               href="#contact"
-              className="rounded-md bg-citron px-5 py-2.5 font-semibold text-deepsea no-underline transition hover:brightness-95"
+              className="rounded-md bg-citron px-5 py-2.5 font-semibold text-ink no-underline transition hover:brightness-95"
             >
               Get in touch
             </a>
