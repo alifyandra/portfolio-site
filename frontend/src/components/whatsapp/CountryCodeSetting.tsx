@@ -8,9 +8,7 @@ import {
 } from '@/lib/api/generated';
 import { useAuth } from '@/lib/auth';
 import { WA_COUNTRIES } from '@/lib/wa-countries';
-
-const selectClass =
-  'rounded-lg border border-slate-700 bg-deepsea px-3 py-2 text-white outline-none focus:border-sky';
+import { selectClass } from './ui';
 
 // Compact citron-accented card. Sits directly above the (also citron)
 // ListsPanel so the two read as one "lists + their default code" cluster.

@@ -45,4 +45,5 @@ func (h *Handler) Register(api huma.API) {
 	h.registerSpotify(api)
 	h.registerAuth(api)
 	h.registerWhatsApp(api)
+	h.registerAdmin(api)
 }

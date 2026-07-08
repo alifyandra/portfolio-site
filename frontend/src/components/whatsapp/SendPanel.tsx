@@ -13,6 +13,7 @@ import {
 } from '@/lib/api/generated';
 import type { BatchDTO } from '@/lib/api/model';
 import { streamBatch, type WaEvent } from '@/lib/wa-stream';
+import { selectClass } from './ui';
 
 type Phase = 'idle' | 'starting' | 'provisioning' | 'linking' | 'running' | 'done' | 'error';
 type RowStatus = 'pending' | 'sent' | 'skipped' | 'failed';
@@ -34,12 +35,14 @@ const badgeStyle = {
   background: 'color-mix(in srgb, var(--color-mint) 16%, transparent)',
 };
 
-const statusColor: Record<string, string> = {
-  completed: 'text-mint',
-  failed: 'text-coral',
-  running: 'text-sky',
-  linking: 'text-sky',
-  pending: 'text-slate-400',
+// Accent (a CSS var) per batch status, used to tint the Recent-batches cards
+// and their status pill. Falls back to slate for anything unknown.
+const statusAccent: Record<string, string> = {
+  completed: 'var(--color-mint)',
+  failed: 'var(--color-coral)',
+  running: 'var(--color-sky)',
+  linking: 'var(--color-sky)',
+  pending: 'var(--color-slate-500)',
 };
 
 const rowStatusStyle: Record<RowStatus, string> = {
@@ -247,7 +250,7 @@ export function SendPanel() {
           <label className="flex flex-col gap-1 text-sm text-slate-300">
             Template
             <select
-              className="rounded-lg border border-slate-700 bg-deepsea px-3 py-2 text-white outline-none focus:border-sky"
+              className={selectClass}
               value={templateId}
               onChange={(e) => setTemplateId(e.target.value ? Number(e.target.value) : '')}
             >
@@ -263,7 +266,7 @@ export function SendPanel() {
           <label className="flex flex-col gap-1 text-sm text-slate-300">
             Recipient list
             <select
-              className="rounded-lg border border-slate-700 bg-deepsea px-3 py-2 text-white outline-none focus:border-sky"
+              className={selectClass}
               value={listId}
               onChange={(e) => setListId(e.target.value ? Number(e.target.value) : '')}
             >
@@ -433,31 +436,51 @@ export function SendPanel() {
           <h3 className="font-mono text-xs uppercase tracking-widest text-slate-400">
             Recent batches
           </h3>
-          <ul className="flex flex-col gap-1.5">
-            {batches.map((b: BatchDTO) => (
-              <li
-                key={b.id}
-                className="flex items-center justify-between gap-3 rounded-lg border border-slate-800 px-3 py-2 text-sm"
-              >
-                <div className="min-w-0">
-                  <span className="text-slate-300">
-                    {b.template_name || '(deleted template)'} →{' '}
-                    {b.list_name || '(deleted list)'}
-                  </span>
-                  <span className="ml-2 text-xs text-slate-500">
-                    {new Date(b.created_at).toLocaleString()}
-                  </span>
-                </div>
-                <div className="flex shrink-0 items-center gap-3 text-xs">
-                  <span className="text-slate-400">
-                    {b.sent}/{b.total}
-                  </span>
-                  <span className={statusColor[b.status] ?? 'text-slate-400'}>
-                    {b.status}
-                  </span>
-                </div>
-              </li>
-            ))}
+          <ul className="flex flex-col gap-2">
+            {batches.map((b: BatchDTO) => {
+              const accent = statusAccent[b.status] ?? 'var(--color-slate-500)';
+              return (
+                <li
+                  key={b.id}
+                  className="flex items-center justify-between gap-3 rounded-xl border p-3"
+                  style={{
+                    borderColor: `color-mix(in srgb, ${accent} 35%, transparent)`,
+                    background: `color-mix(in srgb, ${accent} 10%, var(--color-deepsea))`,
+                  }}
+                >
+                  <div className="flex min-w-0 items-center gap-3">
+                    <span
+                      aria-hidden
+                      className="h-2.5 w-2.5 shrink-0 rounded-full"
+                      style={{ background: accent }}
+                    />
+                    <div className="min-w-0">
+                      <p className="truncate text-sm text-white">
+                        {b.template_name || '(deleted template)'} →{' '}
+                        {b.list_name || '(deleted list)'}
+                      </p>
+                      <p className="text-xs text-slate-400">
+                        {new Date(b.created_at).toLocaleString()}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex shrink-0 flex-col items-end gap-1">
+                    <span
+                      className="rounded-full px-2 py-0.5 font-mono text-[0.65rem] uppercase tracking-widest"
+                      style={{
+                        background: `color-mix(in srgb, ${accent} 18%, transparent)`,
+                        color: accent,
+                      }}
+                    >
+                      {b.status}
+                    </span>
+                    <span className="font-mono text-xs text-slate-400">
+                      {b.sent}/{b.total}
+                    </span>
+                  </div>
+                </li>
+              );
+            })}
           </ul>
         </div>
       )}

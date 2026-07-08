@@ -157,3 +157,17 @@ make fe-dev    # Next.js at :3000 (separate terminal)
     to a real number. Runbook: `deploy/terraform/README.md`. Local dev unchanged
     (`WA_SIDECAR_MODE=static` → `host.docker.internal:8081`).
   See memory `whatsapp-sender-tool`.
+- 🚧 **Admin Console** (branch `feat/admin-console`)
+  ([ADR 10 amendment](docs/adr/0010-authentication-session-model.md) +
+  [ADR 12](docs/adr/0012-admin-console.md)): admin-only `/admin` with three
+  sections, **Projects** (CRUD), **Friends** (`AccessGrant` create/list/remove),
+  and **Playlists** (curated Spotify set moved from a hardcoded const to a DB
+  table). Writes live under `/api/admin/*` behind a **server-enforced admin-role
+  middleware** (the frontend gate is UX only). Project images use **presigned
+  direct-to-S3 upload** so file bytes bypass the `t4g.micro`. Role is now
+  **`max(env allowlist, DB grant)`** with the env allowlists a permanent floor
+  (the admin cannot lock himself out); admin grant writes eagerly update a live
+  `User.role`. **Outstanding:** the **S3-CORS Terraform apply** (gated) is not yet
+  applied, so browser uploads are blocked until it lands. A runtime
+  app-friend-only Tool toggle was **deferred** (static→dynamic refactor for
+  near-zero payoff at 2-3 Tools).

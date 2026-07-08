@@ -11,6 +11,7 @@ import {
   getListWaTemplatesQueryKey,
 } from '@/lib/api/generated';
 import type { TemplateDTO } from '@/lib/api/model';
+import { editBtn, dangerBtn } from './ui';
 
 const inputClass =
   'w-full rounded-lg border border-slate-700 bg-deepsea px-3 py-2 text-white outline-none focus:border-sky';
@@ -152,18 +153,14 @@ export function TemplatesPanel() {
                   {t.body}
                 </p>
               </div>
-              <div className="flex shrink-0 gap-3 text-sm">
-                <button
-                  type="button"
-                  onClick={() => openEdit(t)}
-                  className="text-sky transition hover:brightness-110"
-                >
+              <div className="flex shrink-0 items-start gap-2">
+                <button type="button" onClick={() => openEdit(t)} className={editBtn}>
                   Edit
                 </button>
                 <button
                   type="button"
                   onClick={() => del(t.id)}
-                  className="text-coral transition hover:brightness-110"
+                  className={dangerBtn}
                 >
                   Delete
                 </button>

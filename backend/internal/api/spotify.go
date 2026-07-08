@@ -30,20 +30,6 @@ const (
 	topArtistsLimit    = 12
 )
 
-// featuredPlaylistIDs is the hand-curated list of playlists shown in the Music
-// panel, in display order. These are the Spotify playlist IDs (the part after
-// /playlist/ in the share URL). Edit this list to change what appears — it's
-// the reliable way to control the set, since Spotify's API won't expose the
-// "on my profile" playlists for this app.
-var featuredPlaylistIDs = []string{
-	"6PQYqQbW6AYd2QRiJImcJF",
-	"3rE4pg8uhwsL1T0NhbLJnR",
-	"3ZmZ7wHmzm2CvF9ZqyGuVs",
-	"0dqCnKQCRLstotAISODoQO",
-	"1fU0ZWngfA6A9t6Yh0uvCI",
-	"13jonvKyZsTWcabIINLzWc",
-}
-
 type trackBody struct {
 	IsPlaying  bool     `json:"is_playing"`
 	Title      string   `json:"title,omitempty"`

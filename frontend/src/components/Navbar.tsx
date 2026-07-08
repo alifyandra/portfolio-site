@@ -23,6 +23,23 @@ const roleText: Record<Role, string> = {
   member: 'text-sky',
 };
 
+// Dedicated Admin entry, rendered only for admins and tinted citron (the admin
+// accent). Deliberately sits next to the Apps menu rather than inside it: the
+// console is an admin surface, not a Tool. Backend re-enforces the real gate.
+function AdminLink() {
+  const { isAdmin } = useAuth();
+  if (!isAdmin) return null;
+  return (
+    <Link
+      href="/admin"
+      className="flex items-center gap-1.5 rounded-md px-2 py-1 text-sm font-medium text-citron no-underline transition hover:brightness-110"
+    >
+      <span aria-hidden className="h-2 w-2 rounded-full bg-citron" />
+      <span className="hidden sm:inline">Admin</span>
+    </Link>
+  );
+}
+
 function AccountControl() {
   const { user, role, displayName, isLoading, isAuthenticated, signIn } =
     useAuth();
@@ -108,6 +125,7 @@ export function Navbar() {
         </Link>
 
         <div className="flex items-center gap-2 sm:gap-3">
+          <AdminLink />
           <AppMenu />
           <ThemeToggle />
           <AccountControl />

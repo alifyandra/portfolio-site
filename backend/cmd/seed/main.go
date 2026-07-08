@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 
+	"github.com/alifyandra/portfolio-site/backend/ent/playlist"
 	"github.com/alifyandra/portfolio-site/backend/ent/project"
 	"github.com/alifyandra/portfolio-site/backend/internal/bootstrap"
 	"github.com/alifyandra/portfolio-site/backend/internal/config"
@@ -17,6 +18,19 @@ type seedProject struct {
 	tags                                          []string
 	featured                                      bool
 	order                                         int
+}
+
+// seededPlaylistIDs are the hand-curated Spotify playlist IDs shown in the Music
+// panel, in display order. Seeded idempotently into the Playlist table (by
+// spotify_id) so the Admin Console can edit the set without a redeploy. These are
+// the IDs that were previously hardcoded in the Spotify handler.
+var seededPlaylistIDs = []string{
+	"6PQYqQbW6AYd2QRiJImcJF",
+	"3rE4pg8uhwsL1T0NhbLJnR",
+	"3ZmZ7wHmzm2CvF9ZqyGuVs",
+	"0dqCnKQCRLstotAISODoQO",
+	"1fU0ZWngfA6A9t6Yh0uvCI",
+	"13jonvKyZsTWcabIINLzWc",
 }
 
 var seeds = []seedProject{
@@ -92,5 +106,27 @@ func main() {
 		}
 		slog.Info("seeded", "slug", s.slug)
 	}
+
+	// Curated Spotify playlists, idempotent by spotify_id. Order follows the slice.
+	for i, id := range seededPlaylistIDs {
+		exists, err := client.Playlist.Query().Where(playlist.SpotifyIDEQ(id)).Exist(ctx)
+		if err != nil {
+			slog.Error("query playlist", "err", err)
+			os.Exit(1)
+		}
+		if exists {
+			slog.Info("skip existing playlist", "spotify_id", id)
+			continue
+		}
+		if _, err := client.Playlist.Create().
+			SetSpotifyID(id).
+			SetSortOrder(i).
+			Save(ctx); err != nil {
+			slog.Error("create playlist", "spotify_id", id, "err", err)
+			os.Exit(1)
+		}
+		slog.Info("seeded playlist", "spotify_id", id)
+	}
+
 	slog.Info("seed complete")
 }

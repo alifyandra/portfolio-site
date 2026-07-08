@@ -13,6 +13,7 @@ import (
 	_ "modernc.org/sqlite" // pure-Go sqlite driver (no CGO) for in-memory test DBs
 
 	"github.com/alifyandra/portfolio-site/backend/ent"
+	"github.com/alifyandra/portfolio-site/backend/ent/accessgrant"
 	"github.com/alifyandra/portfolio-site/backend/ent/user"
 )
 
@@ -39,6 +40,104 @@ func newTestServiceCfg(t *testing.T, cfg Config) (*Service, *ent.Client) {
 		t.Fatalf("migrate: %v", err)
 	}
 	return New(client, cfg), client
+}
+
+// mustGrant creates an AccessGrant and fails the test on error.
+func mustGrant(t *testing.T, ctx context.Context, client *ent.Client, email string, tier accessgrant.Tier) *ent.AccessGrant {
+	t.Helper()
+	g, err := client.AccessGrant.Create().SetEmail(email).SetTier(tier).Save(ctx)
+	if err != nil {
+		t.Fatalf("create grant %q: %v", email, err)
+	}
+	return g
+}
+
+// assertRole checks roleFor resolves to want for the given email.
+func assertRole(t *testing.T, ctx context.Context, svc *Service, email string, want user.Role) {
+	t.Helper()
+	got, err := svc.roleFor(ctx, email)
+	if err != nil {
+		t.Fatalf("roleFor(%q): %v", email, err)
+	}
+	if got != want {
+		t.Errorf("roleFor(%q) = %v, want %v", email, got, want)
+	}
+}
+
+// TestRoleFor_DBGrants covers the MAX(env, db-grant) resolution: a grant can
+// raise a role, the env allowlist is a permanent floor, and revoking a grant
+// drops back to the env-derived tier (member unless env-listed). See ADR 10.
+func TestRoleFor_DBGrants(t *testing.T) {
+	ctx := context.Background()
+
+	// (a) DB friend grant, no env => friend. (e) DB admin grant, no env => admin.
+	svcA, clientA := newTestServiceCfg(t, Config{})
+	mustGrant(t, ctx, clientA, "friend@x.com", accessgrant.TierFriend)
+	mustGrant(t, ctx, clientA, "boss@x.com", accessgrant.TierAdmin)
+	assertRole(t, ctx, svcA, "friend@x.com", user.RoleFriend) // (a)
+	assertRole(t, ctx, svcA, "boss@x.com", user.RoleAdmin)    // (e)
+	assertRole(t, ctx, svcA, "nobody@x.com", user.RoleMember)
+
+	// (b) DB friend grant + env admin => admin (env floor wins over lower grant).
+	svcB, clientB := newTestServiceCfg(t, Config{AdminEmails: []string{"chief@x.com"}})
+	mustGrant(t, ctx, clientB, "chief@x.com", accessgrant.TierFriend)
+	assertRole(t, ctx, svcB, "chief@x.com", user.RoleAdmin)
+
+	// (c) env friend, no grant => friend.
+	svcC, _ := newTestServiceCfg(t, Config{FriendEmails: []string{"pal@x.com"}})
+	assertRole(t, ctx, svcC, "pal@x.com", user.RoleFriend)
+
+	// (d) grant removed => member unless env-listed.
+	svcD, clientD := newTestServiceCfg(t, Config{FriendEmails: []string{"listed@x.com"}})
+	temp := mustGrant(t, ctx, clientD, "temp@x.com", accessgrant.TierFriend)
+	listed := mustGrant(t, ctx, clientD, "listed@x.com", accessgrant.TierAdmin)
+	assertRole(t, ctx, svcD, "temp@x.com", user.RoleFriend)  // granted
+	assertRole(t, ctx, svcD, "listed@x.com", user.RoleAdmin) // grant raises env friend to admin
+	// Revoke temp's grant: not env-listed, so it drops to member.
+	clientD.AccessGrant.DeleteOne(temp).ExecX(ctx)
+	assertRole(t, ctx, svcD, "temp@x.com", user.RoleMember)
+	// Revoke listed's grant: it is env friend, so it drops to the friend floor.
+	clientD.AccessGrant.DeleteOne(listed).ExecX(ctx)
+	assertRole(t, ctx, svcD, "listed@x.com", user.RoleFriend)
+}
+
+// TestRecomputeUserRole verifies the eager, pre-login role update: after a grant
+// changes, an existing User's persisted role is recomputed so the per-request
+// middleware (which reads the User fresh) sees the new tier immediately.
+func TestRecomputeUserRole(t *testing.T) {
+	ctx := context.Background()
+	svc, client := newTestServiceCfg(t, Config{})
+
+	u, err := svc.upsertUser(ctx, googleClaims{sub: "s", email: "grantee@x.com", name: "G"})
+	if err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	if u.Role != user.RoleMember {
+		t.Fatalf("initial role = %v, want member", u.Role)
+	}
+
+	// Grant friend, then recompute: the stored role must rise to friend.
+	mustGrant(t, ctx, client, "grantee@x.com", accessgrant.TierFriend)
+	if err := svc.RecomputeUserRole(ctx, "grantee@x.com"); err != nil {
+		t.Fatalf("recompute after grant: %v", err)
+	}
+	if got := client.User.GetX(ctx, u.ID).Role; got != user.RoleFriend {
+		t.Errorf("role after grant = %v, want friend", got)
+	}
+
+	// Revoke the grant, then recompute: with no env floor it drops to member.
+	client.AccessGrant.Delete().Where(accessgrant.EmailEQ("grantee@x.com")).ExecX(ctx)
+	if err := svc.RecomputeUserRole(ctx, "grantee@x.com"); err != nil {
+		t.Fatalf("recompute after revoke: %v", err)
+	}
+	if got := client.User.GetX(ctx, u.ID).Role; got != user.RoleMember {
+		t.Errorf("role after revoke = %v, want member", got)
+	}
+
+	// A missing user is a no-op, not an error.
+	if err := svc.RecomputeUserRole(ctx, "nobody@x.com"); err != nil {
+		t.Errorf("recompute for missing user should be a no-op, got %v", err)
+	}
 }
 
 func TestUpsertUser_RolesIdentitiesAndReturningLogin(t *testing.T) {
