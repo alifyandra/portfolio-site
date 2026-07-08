@@ -6,8 +6,13 @@
 // enforces Role independently).
 //
 // Kind is decided from server state at trigger time:
-//   ONBOARD    — greeted_role == null (never welcomed): ask for a Nickname,
-//                then play the FULL greeting. Submit/skip PATCHes ack_welcome.
+//   ONBOARD    — never welcomed (greeted_role == null) AND no nickname yet:
+//                ask for a Nickname, then play the FULL greeting. Submit/skip
+//                PATCHes ack_welcome.
+//   NAMED      — never welcomed (greeted_role == null) but a nickname already
+//                exists (set on /account, or on another device where the ack
+//                did not land): do NOT re-ask. Play a SHORT greeting using the
+//                existing name and PATCH ack_welcome so it settles to RETURNING.
 //   PROMOTED   — greeted_role == 'member' and current role is friend/admin:
 //                play the FULL greeting (with the "you are my friend" beat),
 //                then PATCH ack_welcome so the celebration shows once.
@@ -25,7 +30,7 @@ import { useAuth } from '@/lib/auth';
 
 const SESSION_KEY = 'aliflabs:welcome:shown';
 
-type Kind = 'onboard' | 'promoted' | 'returning';
+type Kind = 'onboard' | 'named' | 'promoted' | 'returning';
 type Phase = 'prompt' | 'greeting';
 // The whole Welcome is held in one state object so the decision effect makes a
 // single state write; null means nothing is showing.
@@ -80,14 +85,21 @@ export function Welcome() {
     }
 
     const greeted = user.greeted_role;
+    const hasNickname = Boolean(user.nickname);
     const display = user.nickname ?? user.name ?? '';
     const promoted =
       greeted === 'member' &&
       (user.role === 'friend' || user.role === 'admin');
 
     let next: WState;
-    if (greeted == null) {
+    if (greeted == null && !hasNickname) {
+      // Brand new: ask for a name, then the full greeting.
       next = { kind: 'onboard', phase: 'prompt', name: user.name ?? '' };
+    } else if (greeted == null) {
+      // Already named but never acked (e.g. nickname set on /account, or a
+      // prior device whose ack did not land). Don't re-prompt — greet by the
+      // existing name and ack on completion (see handleGreetingDone).
+      next = { kind: 'named', phase: 'greeting', name: display };
     } else if (promoted) {
       next = { kind: 'promoted', phase: 'greeting', name: display };
     } else {
@@ -109,22 +121,30 @@ export function Welcome() {
       update.mutate({ data: { ack_welcome: true } }, { onSuccess: invalidate });
     }
     setState((s) =>
-      s ? { ...s, phase: 'greeting', name: trimmed || user?.name || '' } : s,
+      s
+        ? {
+            ...s,
+            phase: 'greeting',
+            name: trimmed || user?.nickname || user?.name || '',
+          }
+        : s,
     );
   };
 
   const handleSkip = () => {
     update.mutate({ data: { ack_welcome: true } }, { onSuccess: invalidate });
     setState((s) =>
-      s ? { ...s, phase: 'greeting', name: user?.name ?? '' } : s,
+      s
+        ? { ...s, phase: 'greeting', name: user?.nickname ?? user?.name ?? '' }
+        : s,
     );
   };
 
   const handleGreetingDone = useCallback(() => {
-    // PROMOTED acks after the celebration so the "you are my friend" beat only
-    // replays once. ONBOARD already acked at submit/skip; RETURNING never acks.
+    // PROMOTED and NAMED ack after the greeting so it plays once and settles to
+    // RETURNING. ONBOARD already acked at submit/skip; RETURNING never acks.
     setState((s) => {
-      if (s?.kind === 'promoted') {
+      if (s?.kind === 'promoted' || s?.kind === 'named') {
         update.mutate(
           { data: { ack_welcome: true } },
           { onSuccess: invalidate },
