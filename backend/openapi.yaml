@@ -607,12 +607,18 @@ components:
           format: uri
           readOnly: true
           type: string
+        ack_welcome:
+          description: When true, records that the user has seen the Welcome at their current role (sets greeted_role server-side to the caller's own role; a client cannot assert a role). See ADR 10.
+          type: boolean
         default_country_code:
-          description: Default WhatsApp country code (digits only, no +), 1-4 digits
+          description: Default WhatsApp country code (digits only, no +), 1-4 digits. Omit to leave unchanged.
           pattern: ^[0-9]{1,4}$
           type: string
-      required:
-        - default_country_code
+        nickname:
+          description: Self-chosen display name, 1-40 characters after trimming (control characters are stripped). Send null to clear it; omit to leave it unchanged. See ADR 10.
+          type:
+            - string
+            - "null"
       type: object
     UserOutputBody:
       additionalProperties: false
@@ -631,11 +637,25 @@ components:
           type: string
         email:
           type: string
+        greeted_role:
+          description: The role at which the user was last shown the full Welcome; null means never welcomed. Server-owned (see ADR 10)
+          enum:
+            - admin
+            - friend
+            - member
+          type:
+            - string
+            - "null"
         id:
           format: int64
           type: integer
         name:
           type: string
+        nickname:
+          description: Self-chosen display name; null when unset. Overrides name for display (precedence nickname ?? name ?? email). See ADR 10
+          type:
+            - string
+            - "null"
         role:
           description: "Access tier (see ADR 10): admin and friend are allowlist-conferred, everyone else is member"
           enum:
@@ -648,7 +668,9 @@ components:
         - email
         - name
         - avatar_url
+        - nickname
         - role
+        - greeted_role
         - default_country_code
       type: object
   securitySchemes:
@@ -780,7 +802,7 @@ paths:
           description: Error
       security:
         - cookieAuth: []
-      summary: Update the current user's settings
+      summary: Update the current user's profile and settings
       tags:
         - auth
   /api/contact:
