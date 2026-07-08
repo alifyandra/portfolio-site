@@ -147,3 +147,49 @@ hooks, and a backend deploy. The greeting choice is computed on the client from
 `role` vs `greeted_role`, but both values are server-authoritative; the Welcome
 remains UX only and never substitutes for the server-side role checks that gate
 Tools.
+
+## Amendment (2026-07-08): role source of truth is max(env allowlist, DB grant)
+
+The 2026-06-28 amendment conferred tiers purely from the env allowlists
+(`ADMIN_EMAILS` / `FRIEND_EMAILS`), re-asserted on every login. That is the right
+bootstrap but the wrong ceiling: promoting a friend meant editing an env var and
+deploying. The Admin Console (ADR 12) needs to grant `friend` (and, rarely,
+`admin`) at runtime, so role gains a second, database-backed source.
+
+**New entity: `AccessGrant`.** One row per pre-authorized person: `email`
+(normalized to lowercase, unique) and `tier` (`admin | friend`). It is keyed by
+**email, not User**, so a person can be granted a tier **before they have ever
+signed in**; the grant is matched at their first login, exactly as the env
+allowlists are. There is no `member` grant, because `member` is the floor every
+signed-in User already has, so a grant only ever raises a role above it.
+
+**Resolution: role is the max of the two sources.** On every login the backend
+computes the env-derived tier (as before) and the DB-grant tier (by normalized
+email) and takes the **higher** of the two, on the ordering `admin > friend >
+member`. The env allowlists therefore stay a permanent **floor**: a grant can only
+**raise** a role, and absence from the DB never **lowers** an env-allowlisted user.
+Concretely, the env-listed admin cannot lock himself out by deleting or downgrading
+his own `AccessGrant`; his floor is `admin` regardless of the table.
+
+**Writes.** Removing a grant drops the person back to their env-derived tier at
+their next login (for the env admin that is still `admin`; for everyone else,
+`member`). Because role is otherwise only recomputed at login, an admin write to a
+grant **also eagerly updates the stored `User.role`** for a User who already exists,
+so a promotion or demotion takes effect immediately instead of waiting for that
+person's next sign-in. A grant whose email has no User yet simply waits and is
+applied at first login.
+
+**Why max/floor rather than the DB owning role outright.** Three reasons.
+(1) **Lockout safety**: the env allowlist is seeded from Terraform/SSM and is the
+one source no in-app edit can corrupt, so keeping it as a floor guarantees the
+operator always retains admin even after a bad grant edit or an empty/restored
+table. (2) **Pre-authorization by email**: grants can name people who have never
+signed in, which a User-FK'd role column cannot express. (3) **Bootstrap stays
+authoritative**: a fresh prod DB still resolves the admin correctly from env with
+no manual step, preserving the self-healing property the original Decision relied
+on. Pure-DB ownership of role would give none of these and would turn the
+allowlists into dead config.
+
+The session, cookie, and OAuth machinery are unchanged; only role resolution gains
+the second source. The `User.role` enum and the API `role` field still carry
+`admin | friend | member`.

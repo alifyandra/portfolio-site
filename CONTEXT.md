@@ -22,7 +22,8 @@ site stores it; any reply happens outside the system (e.g. Alif's email).
 A backend-served, cached view of Alif's public Spotify listening data for the
 handle `alifyandraid`, exposed as read-only views: **now-playing**,
 **recently-played** (fallback shown when nothing is live, so the view is never
-dead), **top tracks**, **top artists**, and a **hand-curated playlists** list.
+dead), **top tracks**, **top artists**, and an **admin-curated playlists** list
+(the set is managed in the [Admin Console], not hardcoded).
 It is a **proxy**: the site never exposes Spotify credentials to the browser;
 the backend holds the token, calls Spotify, caches the result, and serves clean
 read-only endpoints. Setup, scopes, and the (many) Spotify endpoints that are
@@ -111,10 +112,32 @@ The authorization level of a [User]. Three tiers exist: **admin** (Alif: full
 read/write over Projects, Photography, playlists, and the admin area), **friend**
 (allowlisted users who may use friends-only [Tool]s such as the WhatsApp Sender),
 and **member** (every other signed-in User: no capabilities beyond being signed
-in). admin and friend are conferred by env allowlists (`ADMIN_EMAILS`,
-`FRIEND_EMAILS`), re-asserted on every login, with admin taking precedence over
-friend. Roles gate *what a User may do*; authentication only proves *who they
-are*. See ADR 10.
+in). admin and friend are conferred two ways, combined as the *higher* of the
+two on every login: env allowlists (`ADMIN_EMAILS`, `FRIEND_EMAILS`), which act
+as a permanent floor a User cannot be dropped below, and admin-issued [Access
+Grant]s stored in the database. admin takes precedence over friend. Roles gate
+*what a User may do*; authentication only proves *who they are*. See ADR 10
+(amended).
+
+### Access Grant
+An admin-issued authorization record, keyed by **email**, that confers a [Role]
+tier (friend or admin) on whoever signs in with that email — even before they
+have ever signed in. Access Grants are the database-backed, deploy-free way
+Alif manages who is a friend, complementing the env allowlists. On login a
+User's effective Role is the *higher* of their env-allowlist tier and any Access
+Grant for their email, so a grant can only *raise* a Role and the env allowlist
+stays a floor (Alif cannot lock himself out of admin by editing grants).
+Removing a grant drops the User to whatever the allowlists confer at their next
+login. See ADR 10 (amended).
+
+### Admin Console
+The admin-only area (`/admin`) where Alif edits the site's *dynamic* domain data
+without a deploy: [Project]s, [Access Grant]s, and the curated playlists shown
+in the [Music] panel. It is site chrome, not a [Tool] — reached from a navbar
+link shown only to admins and gated by the admin [Role] (re-enforced on the
+server, never trusting the client gate). Distinct from a possible future admin
+*dashboard*, which would be a full [Tool] operated with admin privileges; the
+Admin Console is the lightweight, standardised editor that predates it.
 
 ### Job (async)
 A unit of background work placed on a queue and processed by a worker out of
