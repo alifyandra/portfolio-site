@@ -103,6 +103,74 @@ func TestUpsertUser_FriendRoleAssignedAndReasserted(t *testing.T) {
 	}
 }
 
+// TestUpdateProfile covers the self-service profile writes (ADR 10): setting a
+// nickname, acking the Welcome (greeted_role = current role, server-side),
+// leaving the nickname untouched on an ack-only update, clearing it to null, and
+// (crucially) that a later login's role re-assertion never disturbs either field.
+func TestUpdateProfile(t *testing.T) {
+	ctx := context.Background()
+	svc, _ := newTestServiceCfg(t, Config{})
+
+	u, err := svc.upsertUser(ctx, googleClaims{sub: "sub-1", email: "a@x.com", name: "Provider Name", picture: "p"})
+	if err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	if u.Nickname != nil || u.GreetedRole != nil {
+		t.Fatalf("new user should start with nil nickname/greeted_role, got %v/%v", u.Nickname, u.GreetedRole)
+	}
+
+	// Set a nickname and ack the Welcome at the current (member) role.
+	nick := "Aliffy"
+	u, err = svc.UpdateProfile(ctx, u, ProfileUpdate{NicknameSet: true, Nickname: &nick, AckWelcome: true})
+	if err != nil {
+		t.Fatalf("set nickname + ack: %v", err)
+	}
+	if u.Nickname == nil || *u.Nickname != "Aliffy" {
+		t.Errorf("nickname = %v, want Aliffy", u.Nickname)
+	}
+	if u.GreetedRole == nil || *u.GreetedRole != user.GreetedRoleMember {
+		t.Errorf("greeted_role = %v, want member", u.GreetedRole)
+	}
+
+	// An ack-only update (nickname omitted) must not disturb the nickname.
+	u, err = svc.UpdateProfile(ctx, u, ProfileUpdate{AckWelcome: true})
+	if err != nil {
+		t.Fatalf("ack-only update: %v", err)
+	}
+	if u.Nickname == nil || *u.Nickname != "Aliffy" {
+		t.Errorf("ack-only update wiped nickname: %v", u.Nickname)
+	}
+
+	// A present-but-nil nickname clears it back to NULL.
+	u, err = svc.UpdateProfile(ctx, u, ProfileUpdate{NicknameSet: true, Nickname: nil})
+	if err != nil {
+		t.Fatalf("clear nickname: %v", err)
+	}
+	if u.Nickname != nil {
+		t.Errorf("nickname not cleared: %v", *u.Nickname)
+	}
+
+	// Re-set both, then re-login: the role re-assertion must leave nickname and
+	// greeted_role alone (they are User-owned / server-owned, not login-derived).
+	keeper := "Keeper"
+	if _, err = svc.UpdateProfile(ctx, u, ProfileUpdate{NicknameSet: true, Nickname: &keeper, AckWelcome: true}); err != nil {
+		t.Fatalf("re-set before relogin: %v", err)
+	}
+	u2, err := svc.upsertUser(ctx, googleClaims{sub: "sub-1", email: "a@x.com", name: "New Provider Name", picture: "p2"})
+	if err != nil {
+		t.Fatalf("relogin: %v", err)
+	}
+	if u2.Nickname == nil || *u2.Nickname != "Keeper" {
+		t.Errorf("relogin wiped nickname: %v", u2.Nickname)
+	}
+	if u2.GreetedRole == nil || *u2.GreetedRole != user.GreetedRoleMember {
+		t.Errorf("relogin wiped greeted_role: %v", u2.GreetedRole)
+	}
+	if u2.Name != "New Provider Name" {
+		t.Errorf("provider name should still be re-asserted on login, got %v", u2.Name)
+	}
+}
+
 func TestUpsertUser_EmailCollisionDoesNotLockOutReturningUser(t *testing.T) {
 	ctx := context.Background()
 	svc, _ := newTestService(t)

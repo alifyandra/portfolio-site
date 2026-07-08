@@ -25,6 +25,15 @@ interface Row {
   error?: string;
 }
 
+// mint-accented card (the "send" concept — green like WhatsApp / go).
+const cardStyle = {
+  borderColor: 'color-mix(in srgb, var(--color-mint) 40%, transparent)',
+  background: 'color-mix(in srgb, var(--color-mint) 7%, var(--color-deepsea))',
+};
+const badgeStyle = {
+  background: 'color-mix(in srgb, var(--color-mint) 16%, transparent)',
+};
+
 const statusColor: Record<string, string> = {
   completed: 'text-mint',
   failed: 'text-coral',
@@ -213,21 +222,32 @@ export function SendPanel() {
   const cancel = () => abortRef.current?.abort();
 
   return (
-    <section className="flex flex-col gap-4">
-      <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold text-citron">Send</h2>
-        <span className="text-sm text-slate-400">
+    <section
+      className="flex flex-col gap-4 rounded-2xl border p-5 sm:p-6"
+      style={cardStyle}
+    >
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <span
+            className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-mint"
+            style={badgeStyle}
+          >
+            <SendGlyph />
+          </span>
+          <h2 className="font-display text-lg font-bold text-white">Send</h2>
+        </div>
+        <span className="font-mono text-xs uppercase tracking-widest text-slate-400">
           {dailyRemaining} send{dailyRemaining === 1 ? '' : 's'} left today
         </span>
       </div>
 
       {/* Configure + trigger */}
       {!active && phase !== 'done' && (
-        <div className="flex flex-col gap-3 rounded-md border border-slate-700 bg-deepsea/60 p-4">
+        <div className="flex flex-col gap-3">
           <label className="flex flex-col gap-1 text-sm text-slate-300">
             Template
             <select
-              className="rounded-md border border-slate-700 bg-deepsea px-3 py-2 text-white outline-none focus:border-sky"
+              className="rounded-lg border border-slate-700 bg-deepsea px-3 py-2 text-white outline-none focus:border-sky"
               value={templateId}
               onChange={(e) => setTemplateId(e.target.value ? Number(e.target.value) : '')}
             >
@@ -243,7 +263,7 @@ export function SendPanel() {
           <label className="flex flex-col gap-1 text-sm text-slate-300">
             Recipient list
             <select
-              className="rounded-md border border-slate-700 bg-deepsea px-3 py-2 text-white outline-none focus:border-sky"
+              className="rounded-lg border border-slate-700 bg-deepsea px-3 py-2 text-white outline-none focus:border-sky"
               value={listId}
               onChange={(e) => setListId(e.target.value ? Number(e.target.value) : '')}
             >
@@ -267,7 +287,7 @@ export function SendPanel() {
             type="button"
             disabled={!canSend}
             onClick={send}
-            className="self-start rounded-md bg-citron px-5 py-2 font-semibold text-ink transition hover:brightness-95 disabled:opacity-50"
+            className="self-start rounded-lg bg-citron px-5 py-2 font-semibold text-ink transition hover:brightness-95 disabled:opacity-50"
           >
             Send batch
           </button>
@@ -280,17 +300,18 @@ export function SendPanel() {
 
       {/* Linking: show the QR */}
       {phase === 'linking' && qr && (
-        <div className="flex flex-col items-center gap-3 rounded-md border border-slate-700 bg-deepsea/60 p-6">
+        <div className="flex flex-col items-center gap-3">
           <p className="text-sm text-slate-300">
             Scan with WhatsApp → Settings → Linked Devices
           </p>
-          <div className="inline-block rounded-md bg-[#ffffff] p-3">
+          {/* literal white required so the QR stays scannable in both themes */}
+          <div className="inline-block rounded-xl bg-[#ffffff] p-3">
             <QRCodeSVG value={qr} size={220} />
           </div>
           <button
             type="button"
             onClick={cancel}
-            className="rounded-md border border-slate-700 px-4 py-1.5 text-sm text-white transition hover:border-coral hover:text-coral"
+            className="rounded-lg border border-slate-700 px-4 py-1.5 text-sm text-white transition hover:border-coral hover:text-coral"
           >
             Cancel
           </button>
@@ -298,14 +319,15 @@ export function SendPanel() {
       )}
 
       {phase === 'starting' && (
-        <p className="rounded-md border border-slate-700 bg-deepsea/60 p-4 text-sm text-slate-300">
+        <div className="flex items-center gap-2 text-sm text-slate-300">
+          <span className="h-2 w-2 animate-pulse rounded-full bg-sky" />
           Starting a session…
-        </p>
+        </div>
       )}
 
       {/* Provisioning: the sender is cold-starting (Fargate), no QR yet */}
       {phase === 'provisioning' && (
-        <div className="flex flex-col gap-3 rounded-md border border-slate-700 bg-deepsea/60 p-4">
+        <div className="flex flex-col gap-3">
           <div className="flex items-center gap-2 text-sm text-slate-300">
             <span className="h-2 w-2 animate-pulse rounded-full bg-sky" />
             Starting the WhatsApp sender…
@@ -318,7 +340,7 @@ export function SendPanel() {
           <button
             type="button"
             onClick={cancel}
-            className="self-start rounded-md border border-slate-700 px-4 py-1.5 text-sm text-white transition hover:border-coral hover:text-coral"
+            className="self-start rounded-lg border border-slate-700 px-4 py-1.5 text-sm text-white transition hover:border-coral hover:text-coral"
           >
             Cancel
           </button>
@@ -327,12 +349,12 @@ export function SendPanel() {
 
       {/* Running / done: full recipient list with live status + countdown */}
       {(phase === 'running' || phase === 'done') && (
-        <div className="flex flex-col gap-3 rounded-md border border-slate-700 bg-deepsea/60 p-4">
+        <div className="flex flex-col gap-3">
           <div className="flex items-center justify-between">
             <span className="text-sm text-slate-300">
               {phase === 'running' ? 'Sending…' : 'Complete'}
             </span>
-            <span className="text-sm text-slate-400">
+            <span className="font-mono text-xs uppercase tracking-widest text-slate-400">
               {processed}/{total}
             </span>
           </div>
@@ -344,18 +366,18 @@ export function SendPanel() {
 
           {/* Countdown / current action banner */}
           {phase === 'running' && countdown !== null && (
-            <p className="rounded-md border border-sky/40 bg-sky/10 px-3 py-2 text-sm text-sky">
+            <p className="rounded-lg border border-sky/40 bg-sky/10 px-3 py-2 text-sm text-sky">
               Next message in {countdown}s{nextLabel ? ` → ${nextLabel}` : ''}
             </p>
           )}
           {phase === 'running' && countdown === null && nextPhone && (
-            <p className="rounded-md border border-sky/40 bg-sky/10 px-3 py-2 text-sm text-sky">
+            <p className="rounded-lg border border-sky/40 bg-sky/10 px-3 py-2 text-sm text-sky">
               Sending to {nextLabel}…
             </p>
           )}
 
           {rows.length > 0 && (
-            <ul className="max-h-72 overflow-y-auto rounded-md border border-slate-800 bg-deepsea p-2 font-mono text-xs">
+            <ul className="max-h-72 overflow-y-auto rounded-lg border border-slate-800 bg-deepsea p-2 font-mono text-xs">
               {rows.map((r, i) => {
                 const isNext = phase === 'running' && r.phone === nextPhone;
                 return (
@@ -388,7 +410,7 @@ export function SendPanel() {
             <button
               type="button"
               onClick={cancel}
-              className="self-start rounded-md border border-slate-700 px-4 py-1.5 text-sm text-white transition hover:border-coral hover:text-coral"
+              className="self-start rounded-lg border border-slate-700 px-4 py-1.5 text-sm text-white transition hover:border-coral hover:text-coral"
             >
               Cancel
             </button>
@@ -397,7 +419,7 @@ export function SendPanel() {
             <button
               type="button"
               onClick={reset}
-              className="self-start rounded-md border border-slate-700 px-4 py-1.5 text-sm text-white transition hover:border-citron hover:text-citron"
+              className="self-start rounded-lg border border-slate-700 px-4 py-1.5 text-sm text-white transition hover:border-citron hover:text-citron"
             >
               Send another
             </button>
@@ -407,13 +429,15 @@ export function SendPanel() {
 
       {/* History */}
       {batches.length > 0 && (
-        <div className="mt-2 flex flex-col gap-2">
-          <h3 className="text-sm font-semibold text-slate-300">Recent batches</h3>
+        <div className="flex flex-col gap-2 border-t border-slate-800 pt-4">
+          <h3 className="font-mono text-xs uppercase tracking-widest text-slate-400">
+            Recent batches
+          </h3>
           <ul className="flex flex-col gap-1.5">
             {batches.map((b: BatchDTO) => (
               <li
                 key={b.id}
-                className="flex items-center justify-between gap-3 rounded-md border border-slate-800 px-3 py-2 text-sm"
+                className="flex items-center justify-between gap-3 rounded-lg border border-slate-800 px-3 py-2 text-sm"
               >
                 <div className="min-w-0">
                   <span className="text-slate-300">
@@ -438,5 +462,26 @@ export function SendPanel() {
         </div>
       )}
     </section>
+  );
+}
+
+// A small paper-plane glyph in the house line-drawing style (no imagery, no
+// shadows), tinted to the card accent via currentColor.
+function SendGlyph() {
+  return (
+    <svg
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M21 3 3 10.5l7 2.5 2.5 7z" />
+      <path d="M21 3 10 14" />
+    </svg>
   );
 }

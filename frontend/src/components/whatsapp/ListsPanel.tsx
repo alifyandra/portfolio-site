@@ -16,7 +16,17 @@ import { useAuth } from '@/lib/auth';
 import { WA_COUNTRIES, dialLabel } from '@/lib/wa-countries';
 
 const inputClass =
-  'w-full rounded-md border border-slate-700 bg-deepsea px-3 py-2 text-white outline-none focus:border-sky';
+  'w-full rounded-lg border border-slate-700 bg-deepsea px-3 py-2 text-white outline-none focus:border-sky';
+
+// citron-accented card. Pairs with the citron CountryCodeSetting above it, so
+// the "lists + their default country code" cluster reads as one group.
+const cardStyle = {
+  borderColor: 'color-mix(in srgb, var(--color-citron) 42%, transparent)',
+  background: 'color-mix(in srgb, var(--color-citron) 8%, var(--color-deepsea))',
+};
+const badgeStyle = {
+  background: 'color-mix(in srgb, var(--color-citron) 18%, transparent)',
+};
 
 // recipientsToText renders stored recipients back into the paste format so an
 // edit starts from the current membership.
@@ -101,14 +111,27 @@ export function ListsPanel() {
   const effectiveCode = form.country_code || userDefault;
 
   return (
-    <section className="flex flex-col gap-4">
-      <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold text-citron">Recipient lists</h2>
+    <section
+      className="flex flex-col gap-4 rounded-2xl border p-5 sm:p-6"
+      style={cardStyle}
+    >
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <span
+            className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-citron"
+            style={badgeStyle}
+          >
+            <ListsGlyph />
+          </span>
+          <h2 className="font-display text-lg font-bold text-white">
+            Recipient lists
+          </h2>
+        </div>
         {editing === null && (
           <button
             type="button"
             onClick={openNew}
-            className="rounded-md border border-slate-700 px-3 py-1.5 text-sm font-medium text-white transition hover:border-citron hover:text-citron"
+            className="rounded-lg border border-slate-700 px-3 py-1.5 text-sm font-medium text-white transition hover:border-citron hover:text-citron"
           >
             New list
           </button>
@@ -116,7 +139,7 @@ export function ListsPanel() {
       </div>
 
       {editing !== null && (
-        <div className="flex flex-col gap-3 rounded-md border border-slate-700 bg-deepsea/60 p-4">
+        <div className="flex flex-col gap-3">
           <input
             className={inputClass}
             placeholder="List name"
@@ -157,7 +180,7 @@ export function ListsPanel() {
           </p>
 
           {invalidLines.length > 0 && (
-            <div className="rounded-md border border-coral/50 bg-coral/10 p-3 text-sm">
+            <div className="rounded-lg border border-coral/50 bg-coral/10 p-3 text-sm">
               <p className="font-medium text-coral">
                 {invalidLines.length} line{invalidLines.length === 1 ? '' : 's'}{' '}
                 could not be read (the rest were saved):
@@ -181,14 +204,14 @@ export function ListsPanel() {
               type="button"
               disabled={!canSave || busy}
               onClick={save}
-              className="rounded-md bg-citron px-4 py-1.5 text-sm font-semibold text-ink transition hover:brightness-95 disabled:opacity-50"
+              className="rounded-lg bg-citron px-4 py-1.5 text-sm font-semibold text-ink transition hover:brightness-95 disabled:opacity-50"
             >
               {busy ? 'Saving…' : 'Save'}
             </button>
             <button
               type="button"
               onClick={close}
-              className="rounded-md border border-slate-700 px-4 py-1.5 text-sm text-white transition hover:border-slate-500"
+              className="rounded-lg border border-slate-700 px-4 py-1.5 text-sm text-white transition hover:border-slate-500"
             >
               {invalidLines.length > 0 ? 'Done' : 'Cancel'}
             </button>
@@ -197,7 +220,7 @@ export function ListsPanel() {
       )}
 
       {isLoading ? (
-        <p className="text-slate-400">Loading…</p>
+        <p className="text-sm text-slate-400">Loading…</p>
       ) : lists.length === 0 ? (
         <p className="text-sm text-slate-400">No lists yet.</p>
       ) : (
@@ -205,7 +228,7 @@ export function ListsPanel() {
           {lists.map((l) => (
             <li
               key={l.id}
-              className="flex items-center justify-between gap-4 rounded-md border border-slate-700 p-3"
+              className="flex items-center justify-between gap-4 rounded-lg border border-slate-700 bg-deepsea/40 p-3"
             >
               <div className="min-w-0">
                 <p className="font-medium text-white">{l.name}</p>
@@ -234,5 +257,27 @@ export function ListsPanel() {
         </ul>
       )}
     </section>
+  );
+}
+
+// A list glyph (rows with bullets) in the house line-drawing style.
+function ListsGlyph() {
+  return (
+    <svg
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M9 6h11M9 12h11M9 18h11" />
+      <circle cx="4.5" cy="6" r="1.1" fill="currentColor" stroke="none" />
+      <circle cx="4.5" cy="12" r="1.1" fill="currentColor" stroke="none" />
+      <circle cx="4.5" cy="18" r="1.1" fill="currentColor" stroke="none" />
+    </svg>
   );
 }

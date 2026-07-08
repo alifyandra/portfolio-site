@@ -29,6 +29,12 @@
   --color-ink: #073b4c; /* dark text on light accents -> text-ink */
 
   --font-sans: var(--font-inter), system-ui, sans-serif;
+  /* Display face for the wordmark + landing/section headings (Space Grotesk),
+   * and mono for eyebrows/labels/status tags (JetBrains Mono). Both loaded via
+   * next/font in layout.tsx; overriding --font-mono here swaps Tailwind's
+   * default mono everywhere font-mono is used (eyebrows upgrade too). */
+  --font-display: var(--font-space-grotesk), var(--font-inter), system-ui, sans-serif;
+  --font-mono: var(--font-jetbrains-mono), ui-monospace, 'SFMono-Regular', monospace;
 }
 
 :root {
@@ -109,6 +115,16 @@ html[data-theme='light'] .text-citron {
   color: #7a5c00; /* dark amber, the readable form of the gold */
 }
 
+/* Landing hero ambient layer (gradient wash + drifting shapes). Richer on the
+ * dark canvas, softened on the pale light canvas so it stays a wash, not a
+ * smear. Unlayered like the other decorative helpers above. */
+.hero-ambient {
+  opacity: 1;
+}
+html[data-theme='light'] .hero-ambient {
+  opacity: 0.7;
+}
+
 /* These base customizations MUST live in @layer base. Tailwind v4 emits real
  * CSS @layers (theme, base, components, utilities) and unlayered rules beat
  * every layer — so an unlayered `a { color: sky }` would override text-mint /
@@ -138,5 +154,13 @@ html[data-theme='light'] .text-citron {
   ::selection {
     background: var(--color-citron);
     color: var(--color-ink);
+  }
+
+  /* Quality floor: a visible keyboard focus ring on every interactive element,
+   * in both themes (sky reads on the dark deepsea and the pale light canvas).
+   * Inside @layer base so component utilities still win for everything else. */
+  :focus-visible {
+    outline: 2px solid var(--color-sky);
+    outline-offset: 2px;
   }
 }

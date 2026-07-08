@@ -427,11 +427,49 @@ func (s *Service) IsSoleAdmin(ctx context.Context, u *ent.User) (bool, error) {
 	return n <= 1, nil
 }
 
-// UpdateDefaultCountryCode sets the user's default WhatsApp country code (the code
-// that replaces a leading trunk 0 when a recipient list has no override) and returns
-// the updated user. The value is validated at the schema layer (1-4 digits). See ADR 11.
-func (s *Service) UpdateDefaultCountryCode(ctx context.Context, userID int, code string) (*ent.User, error) {
-	return s.ent.User.UpdateOneID(userID).SetDefaultCountryCode(code).Save(ctx)
+// ProfileUpdate is the set of self-service changes a User may apply to their own
+// record via PATCH /api/auth/me. Every field is opt-in: an omitted field leaves
+// the corresponding column untouched, so an update that sets only one thing never
+// disturbs the others. See ADR 10 (self-service profile writes).
+type ProfileUpdate struct {
+	// CountryCode, when non-nil, sets the default WhatsApp country code (the code
+	// that replaces a leading trunk 0 when a recipient list has no override; see
+	// ADR 11). Validated as 1-4 digits at the edge and again by the Ent schema.
+	CountryCode *string
+	// NicknameSet reports that the caller sent the nickname key. When true the
+	// nickname is written: a non-nil Nickname sets it, a nil Nickname clears it to
+	// NULL. When false the nickname is left as-is, so an unrelated update (e.g.
+	// acking the Welcome) never wipes an existing nickname.
+	NicknameSet bool
+	Nickname    *string
+	// AckWelcome, when true, records that the User has now seen the Welcome at
+	// their current role: it stamps greeted_role with the caller's own role,
+	// server-side. The role is never taken from the request body.
+	AckWelcome bool
+}
+
+// UpdateProfile applies a self-service ProfileUpdate and returns the refreshed
+// record. It is owner-scoped by construction: the subject is the *ent.User
+// resolved from the session, never an id from the request path or body. See
+// ADR 10.
+func (s *Service) UpdateProfile(ctx context.Context, u *ent.User, upd ProfileUpdate) (*ent.User, error) {
+	m := s.ent.User.UpdateOneID(u.ID)
+	if upd.CountryCode != nil {
+		m.SetDefaultCountryCode(*upd.CountryCode)
+	}
+	if upd.NicknameSet {
+		if upd.Nickname != nil {
+			m.SetNickname(*upd.Nickname)
+		} else {
+			m.ClearNickname()
+		}
+	}
+	if upd.AckWelcome {
+		// greeted_role mirrors role's values; the caller's current role is the
+		// only source, so a client can never assert an arbitrary greeted role.
+		m.SetGreetedRole(user.GreetedRole(u.Role))
+	}
+	return m.Save(ctx)
 }
 
 // DeleteUser hard-deletes a user and cascades to their identities and sessions

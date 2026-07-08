@@ -13,7 +13,16 @@ import {
 import type { TemplateDTO } from '@/lib/api/model';
 
 const inputClass =
-  'w-full rounded-md border border-slate-700 bg-deepsea px-3 py-2 text-white outline-none focus:border-sky';
+  'w-full rounded-lg border border-slate-700 bg-deepsea px-3 py-2 text-white outline-none focus:border-sky';
+
+// sky-accented card (message content / templates).
+const cardStyle = {
+  borderColor: 'color-mix(in srgb, var(--color-sky) 40%, transparent)',
+  background: 'color-mix(in srgb, var(--color-sky) 7%, var(--color-deepsea))',
+};
+const badgeStyle = {
+  background: 'color-mix(in srgb, var(--color-sky) 16%, transparent)',
+};
 
 export function TemplatesPanel() {
   const queryClient = useQueryClient();
@@ -62,14 +71,25 @@ export function TemplatesPanel() {
   const canSave = form.name.trim().length > 0 && form.body.trim().length > 0;
 
   return (
-    <section className="flex flex-col gap-4">
-      <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold text-citron">Templates</h2>
+    <section
+      className="flex flex-col gap-4 rounded-2xl border p-5 sm:p-6"
+      style={cardStyle}
+    >
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <span
+            className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-sky"
+            style={badgeStyle}
+          >
+            <TemplatesGlyph />
+          </span>
+          <h2 className="font-display text-lg font-bold text-white">Templates</h2>
+        </div>
         {editing === null && (
           <button
             type="button"
             onClick={openNew}
-            className="rounded-md border border-slate-700 px-3 py-1.5 text-sm font-medium text-white transition hover:border-citron hover:text-citron"
+            className="rounded-lg border border-slate-700 px-3 py-1.5 text-sm font-medium text-white transition hover:border-sky hover:text-sky"
           >
             New template
           </button>
@@ -77,7 +97,7 @@ export function TemplatesPanel() {
       </div>
 
       {editing !== null && (
-        <div className="flex flex-col gap-3 rounded-md border border-slate-700 bg-deepsea/60 p-4">
+        <div className="flex flex-col gap-3">
           <input
             className={inputClass}
             placeholder="Template name"
@@ -100,14 +120,14 @@ export function TemplatesPanel() {
               type="button"
               disabled={!canSave || busy}
               onClick={save}
-              className="rounded-md bg-citron px-4 py-1.5 text-sm font-semibold text-ink transition hover:brightness-95 disabled:opacity-50"
+              className="rounded-lg bg-citron px-4 py-1.5 text-sm font-semibold text-ink transition hover:brightness-95 disabled:opacity-50"
             >
               {busy ? 'Saving…' : 'Save'}
             </button>
             <button
               type="button"
               onClick={close}
-              className="rounded-md border border-slate-700 px-4 py-1.5 text-sm text-white transition hover:border-slate-500"
+              className="rounded-lg border border-slate-700 px-4 py-1.5 text-sm text-white transition hover:border-slate-500"
             >
               Cancel
             </button>
@@ -116,7 +136,7 @@ export function TemplatesPanel() {
       )}
 
       {isLoading ? (
-        <p className="text-slate-400">Loading…</p>
+        <p className="text-sm text-slate-400">Loading…</p>
       ) : templates.length === 0 ? (
         <p className="text-sm text-slate-400">No templates yet.</p>
       ) : (
@@ -124,7 +144,7 @@ export function TemplatesPanel() {
           {templates.map((t) => (
             <li
               key={t.id}
-              className="flex items-start justify-between gap-4 rounded-md border border-slate-700 p-3"
+              className="flex items-start justify-between gap-4 rounded-lg border border-slate-700 bg-deepsea/40 p-3"
             >
               <div className="min-w-0">
                 <p className="font-medium text-white">{t.name}</p>
@@ -153,5 +173,25 @@ export function TemplatesPanel() {
         </ul>
       )}
     </section>
+  );
+}
+
+// Document glyph in the house line-drawing style, tinted via currentColor.
+function TemplatesGlyph() {
+  return (
+    <svg
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <rect x="5" y="3" width="14" height="18" rx="2" />
+      <path d="M9 8h6M9 12h6M9 16h4" />
+    </svg>
   );
 }

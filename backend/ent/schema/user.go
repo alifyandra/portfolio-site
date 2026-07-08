@@ -34,6 +34,16 @@ func (User) Fields() []ent.Field {
 			Values("admin", "friend", "member").
 			Default("member").
 			Comment("Access tier, re-checked on every login: admin (ADMIN_EMAILS) and friend (FRIEND_EMAILS) are conferred by allowlists, everyone else is a member. Admin takes precedence over friend"),
+		field.String("nickname").
+			Optional().
+			Nillable().
+			MaxRuneLen(40).
+			Comment("Self-chosen display name; overrides the provider name for display (precedence nickname ?? name ?? email). Unlike name/role it is User-owned and never re-asserted from Google/env on login; null means unset. Set via PATCH /api/auth/me. See ADR 10."),
+		field.Enum("greeted_role").
+			Values("admin", "friend", "member").
+			Optional().
+			Nillable().
+			Comment("The Role at which the User was last shown the full Welcome; null means never welcomed. Server-owned state stamped from the caller's current role when they ack the Welcome, never client-supplied. Drives the returning/promotion greeting. Same values as role. See ADR 10."),
 		field.Time("created_at").
 			Default(time.Now).
 			Immutable(),

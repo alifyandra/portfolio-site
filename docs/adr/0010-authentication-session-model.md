@@ -1,7 +1,7 @@
 # 10. Authentication and session model
 
 Date: 2026-06-20
-Status: Accepted (amended 2026-06-28, see Amendment below)
+Status: Accepted (amended 2026-06-28 and 2026-07-08, see Amendments below)
 
 ## Context
 
@@ -103,3 +103,47 @@ This supersedes the binary admin/member framing in the Decision above. The
 session, cookie, and OAuth machinery are untouched; only the `User.role` enum
 and the role-resolution step changed. The enum and the API `role` field now
 carry `admin | friend | member`.
+
+## Amendment (2026-07-08): Nickname and Welcome state on the User
+
+The WhatsApp Sender (ADR 11) already introduced an authenticated, owner-scoped
+self-service write — `PATCH /api/auth/me`, which lets a signed-in User set their
+own `default_country_code`. The Welcome / Nickname feature (see CONTEXT.md) gives
+the User two more pieces of self-owned state, so this amendment **extends that
+existing endpoint and the `User` entity** rather than introducing a new pattern.
+(It is therefore *not* the first authenticated mutation — the earlier "no *public*
+write endpoints" stance is about anonymous writes and is untouched.)
+
+Two nullable columns are added to `User`:
+
+- **`nickname`** (string, nullable) — a self-chosen display name. Optional; when
+  set it overrides the provider `name` for display, with precedence
+  `nickname ?? name ?? email`. The provider `name` is never overwritten (it stays
+  the canonical, re-asserted-each-login value); `nickname` is the vanity layer.
+- **`greeted_role`** (role enum, nullable) — the `Role` at which the User was last
+  shown the full Welcome; `null` means never welcomed. This is the authoritative,
+  cross-device record that drives whether a sign-in plays the full first-time
+  greeting, the short returning greeting, or the "you are my friend" **promotion**
+  celebration (shown when the current role has risen above `greeted_role`). It is
+  server-owned state, not client-supplied.
+
+The same endpoint — **`PATCH /api/auth/me`** (operationId `update-current-user`) —
+gains the two fields. It stays session-authenticated and **owner-scoped by
+construction**: it mutates the User resolved from the session cookie, with no user
+id in the path, so editing another User is not expressible. Any signed-in User
+(member/friend/admin) may call it for their own record; it is profile self-service,
+not a role-gated capability. The request body now carries (alongside the existing
+`default_country_code`, which is relaxed to optional so partial updates are valid):
+`nickname` — tri-state, distinguishing absent (leave as-is) from explicit `null`
+(clear) from a value (validated: trimmed, 1–40 runes, control chars stripped) — and
+an `ack_welcome` flag that sets `greeted_role` to the caller's **current** role
+server-side (the client cannot assert an arbitrary role). It returns the updated
+User — the same body as `GET /api/auth/me`, which now also carries `nickname` and
+`greeted_role`.
+
+Consequences: an additive Ent migration (two nullable columns, no backfill, applied
+automatically by the boot-time `Schema.Create`), regenerated OpenAPI + frontend
+hooks, and a backend deploy. The greeting choice is computed on the client from
+`role` vs `greeted_role`, but both values are server-authoritative; the Welcome
+remains UX only and never substitutes for the server-side role checks that gate
+Tools.

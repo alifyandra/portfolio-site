@@ -2,7 +2,11 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
+	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/danielgtaylor/huma/v2"
 
@@ -16,12 +20,14 @@ var cookieAuthSecurity = []map[string][]string{{"cookieAuth": {}}}
 
 type userOutput struct {
 	Body struct {
-		ID                 int    `json:"id"`
-		Email              string `json:"email"`
-		Name               string `json:"name"`
-		AvatarURL          string `json:"avatar_url"`
-		Role               string `json:"role" enum:"admin,friend,member" doc:"Access tier (see ADR 10): admin and friend are allowlist-conferred, everyone else is member"`
-		DefaultCountryCode string `json:"default_country_code" doc:"Default WhatsApp country code (digits only) that replaces a leading trunk 0; overridable per recipient list (see ADR 11)"`
+		ID                 int     `json:"id"`
+		Email              string  `json:"email"`
+		Name               string  `json:"name"`
+		AvatarURL          string  `json:"avatar_url"`
+		Nickname           *string `json:"nickname" doc:"Self-chosen display name; null when unset. Overrides name for display (precedence nickname ?? name ?? email). See ADR 10"`
+		Role               string  `json:"role" enum:"admin,friend,member" doc:"Access tier (see ADR 10): admin and friend are allowlist-conferred, everyone else is member"`
+		GreetedRole        *string `json:"greeted_role" enum:"admin,friend,member" doc:"The role at which the user was last shown the full Welcome; null means never welcomed. Server-owned (see ADR 10)"`
+		DefaultCountryCode string  `json:"default_country_code" doc:"Default WhatsApp country code (digits only) that replaces a leading trunk 0; overridable per recipient list (see ADR 11)"`
 	}
 }
 
@@ -31,18 +37,75 @@ func toUserOutput(u *ent.User) *userOutput {
 	out.Body.Email = u.Email
 	out.Body.Name = u.Name
 	out.Body.AvatarURL = u.AvatarURL
+	out.Body.Nickname = u.Nickname
 	out.Body.Role = string(u.Role)
+	if u.GreetedRole != nil {
+		gr := string(*u.GreetedRole)
+		out.Body.GreetedRole = &gr
+	}
 	out.Body.DefaultCountryCode = u.DefaultCountryCode
 	return out
 }
 
-// updateUserInput is the PATCH /api/auth/me body. Only user-editable settings are
-// exposed; the country code is validated as 1-4 digits at the edge and again by the
-// Ent schema.
+// optionalNullableString is a PATCH body field that captures three request states
+// a plain *string cannot tell apart: the key absent (leave the column untouched),
+// an explicit JSON null (clear it), and a string value (set it). PATCH semantics
+// need the absent/null split so an update that omits the field never clears it.
+type optionalNullableString struct {
+	Set   bool    // the key was present in the request body
+	Value *string // nil when the value was JSON null
+}
+
+func (o *optionalNullableString) UnmarshalJSON(b []byte) error {
+	o.Set = true
+	if string(b) == "null" {
+		o.Value = nil
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(b, &s); err != nil {
+		return err
+	}
+	o.Value = &s
+	return nil
+}
+
+// Schema declares the field as an optional, nullable string so both a string and
+// an explicit null clear request validation (Huma's reflected schema would reject
+// null otherwise). Implements huma.SchemaProvider.
+func (optionalNullableString) Schema(huma.Registry) *huma.Schema {
+	return &huma.Schema{Type: huma.TypeString, Nullable: true}
+}
+
+// updateUserInput is the PATCH /api/auth/me body. Every field is optional; an
+// omitted field leaves the corresponding value untouched (see auth.ProfileUpdate).
+// The subject is always the User resolved from the session cookie, so there is no
+// user id in the body. See ADR 10.
 type updateUserInput struct {
 	Body struct {
-		DefaultCountryCode string `json:"default_country_code" pattern:"^[0-9]{1,4}$" doc:"Default WhatsApp country code (digits only, no +), 1-4 digits"`
+		DefaultCountryCode *string                `json:"default_country_code,omitempty" pattern:"^[0-9]{1,4}$" doc:"Default WhatsApp country code (digits only, no +), 1-4 digits. Omit to leave unchanged."`
+		Nickname           optionalNullableString `json:"nickname,omitempty" doc:"Self-chosen display name, 1-40 characters after trimming (control characters are stripped). Send null to clear it; omit to leave it unchanged. See ADR 10."`
+		AckWelcome         bool                   `json:"ack_welcome,omitempty" doc:"When true, records that the user has seen the Welcome at their current role (sets greeted_role server-side to the caller's own role; a client cannot assert a role). See ADR 10."`
 	}
+}
+
+// sanitizeNickname trims a submitted nickname, drops control characters, and
+// enforces a 1-40 rune length. It returns the cleaned value and whether it is
+// valid. The Ent schema (MaxRuneLen 40) is the backstop; this is the primary,
+// user-facing validation. See ADR 10.
+func sanitizeNickname(raw string) (string, bool) {
+	var b strings.Builder
+	for _, r := range raw {
+		if unicode.IsControl(r) {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	cleaned := strings.TrimSpace(b.String())
+	if n := utf8.RuneCountInString(cleaned); n < 1 || n > 40 {
+		return "", false
+	}
+	return cleaned, true
 }
 
 // messageOutput is a small JSON acknowledgement that may also clear the session
@@ -87,7 +150,7 @@ func (h *Handler) registerAuth(api huma.API) {
 		OperationID: "update-current-user",
 		Method:      http.MethodPatch,
 		Path:        "/api/auth/me",
-		Summary:     "Update the current user's settings",
+		Summary:     "Update the current user's profile and settings",
 		Tags:        tags,
 		Security:    cookieAuthSecurity,
 	}, func(ctx context.Context, in *updateUserInput) (*userOutput, error) {
@@ -99,9 +162,26 @@ func (h *Handler) registerAuth(api huma.API) {
 		if u == nil {
 			return nil, huma.Error401Unauthorized("not authenticated")
 		}
-		updated, err := svc.UpdateDefaultCountryCode(ctx, u.ID, in.Body.DefaultCountryCode)
+
+		upd := auth.ProfileUpdate{
+			CountryCode: in.Body.DefaultCountryCode,
+			AckWelcome:  in.Body.AckWelcome,
+		}
+		if in.Body.Nickname.Set {
+			upd.NicknameSet = true
+			if in.Body.Nickname.Value != nil {
+				clean, ok := sanitizeNickname(*in.Body.Nickname.Value)
+				if !ok {
+					return nil, huma.Error422UnprocessableEntity("nickname must be 1-40 characters after trimming and contain no control characters")
+				}
+				upd.Nickname = &clean
+			}
+			// A present-but-null nickname clears it (NicknameSet true, Nickname nil).
+		}
+
+		updated, err := svc.UpdateProfile(ctx, u, upd)
 		if err != nil {
-			return nil, huma.Error500InternalServerError("failed to update settings", err)
+			return nil, huma.Error500InternalServerError("failed to update profile", err)
 		}
 		return toUserOutput(updated), nil
 	})

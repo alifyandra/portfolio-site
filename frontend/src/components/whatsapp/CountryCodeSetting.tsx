@@ -10,7 +10,17 @@ import { useAuth } from '@/lib/auth';
 import { WA_COUNTRIES } from '@/lib/wa-countries';
 
 const selectClass =
-  'rounded-md border border-slate-700 bg-deepsea px-3 py-2 text-white outline-none focus:border-sky';
+  'rounded-lg border border-slate-700 bg-deepsea px-3 py-2 text-white outline-none focus:border-sky';
+
+// Compact citron-accented card. Sits directly above the (also citron)
+// ListsPanel so the two read as one "lists + their default code" cluster.
+const cardStyle = {
+  borderColor: 'color-mix(in srgb, var(--color-citron) 38%, transparent)',
+  background: 'color-mix(in srgb, var(--color-citron) 7%, var(--color-deepsea))',
+};
+const badgeStyle = {
+  background: 'color-mix(in srgb, var(--color-citron) 18%, transparent)',
+};
 
 // The user's default country code applies to every list that doesn't set its
 // own override (see ListsPanel). It's stored on the User (ADR 11) and read back
@@ -38,7 +48,21 @@ export function CountryCodeSetting() {
   };
 
   return (
-    <section className="flex flex-col gap-2">
+    <section
+      className="flex flex-col gap-3 rounded-2xl border p-4 sm:p-5"
+      style={cardStyle}
+    >
+      <div className="flex items-center gap-3">
+        <span
+          className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-citron"
+          style={badgeStyle}
+        >
+          <GlobeGlyph />
+        </span>
+        <p className="font-mono text-xs uppercase tracking-widest text-citron">
+          default country code
+        </p>
+      </div>
       <label className="flex flex-col gap-1 text-sm text-slate-300">
         Default country code for local (0…) numbers
         <select
@@ -68,5 +92,25 @@ export function CountryCodeSetting() {
         <p className="text-sm text-coral">{(update.error as Error).message}</p>
       )}
     </section>
+  );
+}
+
+// A globe glyph in the house line-drawing style, tinted via currentColor.
+function GlobeGlyph() {
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <circle cx="12" cy="12" r="9" />
+      <path d="M3 12h18M12 3c3 3.5 3 14.5 0 18M12 3c-3 3.5-3 14.5 0 18" />
+    </svg>
   );
 }

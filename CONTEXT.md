@@ -50,7 +50,26 @@ and from a [Project] (which is portfolio work). Tools may be gated by [Role]. Th
 first Tool is the **WhatsApp Sender** (friend-gated): a friend links their own
 WhatsApp by QR, stores message templates and recipient lists, and triggers
 personalized batch sends. Its sending engine runs in a separate, private
-whatsapp-web.js sidecar service, off the main host. See ADR 11.
+whatsapp-web.js sidecar service, off the main host. See ADR 11. Each Tool belongs
+to a [Category] for grouping in the app menu.
+
+### Category
+A lightweight, organizational grouping of related [Tool]s in the app menu (e.g.
+**Messaging**, **Utilities**, **Experiments**). Purely a navigation label — a
+Category confers no capability and gates nothing; access is always decided by
+[Role]. Categories have a defined display order, and empty ones are hidden.
+
+### Welcome
+The first-sign-in moment for a [User]: a one-time prompt asking what they'd like to
+be called (setting their [Nickname]; skippable, in which case the Google `name` is
+adopted), followed by an animated greeting. The greeting is [Role]-aware — a
+**friend** or **admin** gets an extra "you are my friend" beat that a **member**
+does not. The full greeting is shown on first sign-in, and again the first time a
+User signs in **after their [Role] rises to friend/admin** — so a newly-promoted
+friend gets the celebratory "you are my friend" reveal even though they are a
+returning User. Otherwise later sign-ins replay a short greeting, and the Nickname
+is never re-asked after the first time. The Welcome is UX, never an authorization
+boundary (the server still enforces [Role] independently).
 
 ### Static Content
 Résumé-derived material that changes rarely and lives in the frontend codebase,
@@ -64,11 +83,21 @@ read Projects, view About Panels, and submit Contact Messages. The default
 audience of the site. Contrast with [User].
 
 ### User
-A person who has authenticated. A User has a canonical `email`, display `name`,
-avatar, a `role` (see [Role]), and one or more [Identity]s. Distinct from a
-[Visitor] (anonymous) and from **Alif** (the site's owner, who is *a* User with
-the admin role). Anyone may become a User by signing in (open registration);
-having a User record does not by itself grant any elevated capability.
+A person who has authenticated. A User has a canonical `email`, provider-asserted
+display `name`, an optional self-chosen [Nickname], avatar, a `role` (see [Role]),
+and one or more [Identity]s. Distinct from a [Visitor] (anonymous) and from
+**Alif** (the site's owner, who is *a* User with the admin role). Anyone may become
+a User by signing in (open registration); having a User record does not by itself
+grant any elevated capability.
+
+### Nickname
+A short display name a [User] chooses for themselves ("what they'd like to be
+called"), distinct from the provider-asserted `name`. Optional; when set it
+**overrides** `name` wherever the User is shown (navbar, greeting, account). The
+`name` is never overwritten and remains the canonical fallback — display precedence
+is `nickname ?? name ?? email`. Unlike `name` and `role` (re-asserted from Google /
+env allowlists on every login), a Nickname is User-owned and only the User changes
+it. Collected on first sign-in (see [Welcome]) and editable afterward.
 
 ### Identity
 A single external login credential belonging to a [User]: a `(provider,
