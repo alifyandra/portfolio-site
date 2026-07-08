@@ -11,7 +11,7 @@ import (
 // sort_order. It replaces the old hardcoded featuredPlaylistIDs list so the
 // curated set is editable from the Admin Console (no redeploy). The
 // SpotifyRefresher reads these IDs and hydrates the "spotify:playlists" cache.
-// See ADR 0008.
+// See ADR 0012 (Admin Console).
 type Playlist struct {
 	ent.Schema
 }

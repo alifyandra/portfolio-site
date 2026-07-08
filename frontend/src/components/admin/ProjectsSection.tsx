@@ -203,7 +203,9 @@ export function ProjectsSection() {
               if (!res.ok) {
                 throw new Error(`S3 responded ${res.status}`);
               }
-              patch('image_keys', [...form.image_keys, out.key]);
+              // Functional update: appends against the latest keys, so back-to-
+              // back uploads never drop an earlier key via a stale closure.
+              setForm((f) => ({ ...f, image_keys: [...f.image_keys, out.key] }));
             } catch {
               // A CORS rejection surfaces as a TypeError ("Failed to fetch").
               setUploadError(
