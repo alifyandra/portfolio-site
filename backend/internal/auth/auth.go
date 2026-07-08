@@ -26,6 +26,7 @@ import (
 	"google.golang.org/api/idtoken"
 
 	"github.com/alifyandra/portfolio-site/backend/ent"
+	"github.com/alifyandra/portfolio-site/backend/ent/accessgrant"
 	"github.com/alifyandra/portfolio-site/backend/ent/identity"
 	"github.com/alifyandra/portfolio-site/backend/ent/session"
 	"github.com/alifyandra/portfolio-site/backend/ent/user"
@@ -135,17 +136,96 @@ func hashToken(raw string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// roleFor resolves the role for an email against the admin and friend
-// allowlists. Admin takes precedence over friend; everyone else is a member.
-func (s *Service) roleFor(email string) user.Role {
+// roleFor resolves the effective role for an email as the MAX of two sources:
+// the environment allowlists (envTier) and any AccessGrant in the DB
+// (dbGrantTier), ordered admin(2) > friend(1) > member(0). The env allowlist is
+// a permanent FLOOR — a DB grant can only RAISE a role, and the absence of a
+// grant never lowers an env-allowlisted user. Admin precedence is preserved
+// because admin outranks friend in both sources. See ADR 10.
+func (s *Service) roleFor(ctx context.Context, email string) (user.Role, error) {
 	e := normalizeEmail(email)
-	if _, ok := s.adminEmails[e]; ok {
+	env := s.envTier(e)
+	granted, err := s.dbGrantTier(ctx, e)
+	if err != nil {
+		return "", err
+	}
+	return maxRole(env, granted), nil
+}
+
+// envTier is the allowlist-only tier for an already-normalized email: the
+// original ADMIN_EMAILS / FRIEND_EMAILS logic, kept as the permanent floor.
+func (s *Service) envTier(normalized string) user.Role {
+	if _, ok := s.adminEmails[normalized]; ok {
 		return user.RoleAdmin
 	}
-	if _, ok := s.friendEmails[e]; ok {
+	if _, ok := s.friendEmails[normalized]; ok {
 		return user.RoleFriend
 	}
 	return user.RoleMember
+}
+
+// dbGrantTier looks up an AccessGrant by normalized email and maps it to a role.
+// No grant (or a nil ent client, as in pure unit tests) yields member, so the
+// env floor stands alone. See ADR 10.
+func (s *Service) dbGrantTier(ctx context.Context, normalized string) (user.Role, error) {
+	if s.ent == nil || normalized == "" {
+		return user.RoleMember, nil
+	}
+	g, err := s.ent.AccessGrant.Query().Where(accessgrant.EmailEQ(normalized)).Only(ctx)
+	if ent.IsNotFound(err) {
+		return user.RoleMember, nil
+	}
+	if err != nil {
+		return user.RoleMember, err
+	}
+	switch g.Tier {
+	case accessgrant.TierAdmin:
+		return user.RoleAdmin, nil
+	case accessgrant.TierFriend:
+		return user.RoleFriend, nil
+	default:
+		return user.RoleMember, nil
+	}
+}
+
+// roleRank orders the tiers so they can be compared: admin > friend > member.
+func roleRank(r user.Role) int {
+	switch r {
+	case user.RoleAdmin:
+		return 2
+	case user.RoleFriend:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// maxRole returns the higher-ranked of two roles.
+func maxRole(a, b user.Role) user.Role {
+	if roleRank(a) >= roleRank(b) {
+		return a
+	}
+	return b
+}
+
+// RecomputeUserRole re-derives and persists the role of the User with the given
+// email (if one exists), so an AccessGrant create/revoke takes effect before the
+// user's next login. The per-request middleware reads the User row fresh from the
+// DB (see Authenticate), so persisting the column here means the new role applies
+// on the user's very next request — there is no session-cached role to bust. A
+// missing user is a no-op. Matches case-insensitively since the stored email may
+// differ in case from the normalized grant email.
+func (s *Service) RecomputeUserRole(ctx context.Context, email string) error {
+	if s.ent == nil {
+		return nil
+	}
+	e := normalizeEmail(email)
+	role, err := s.roleFor(ctx, e)
+	if err != nil {
+		return err
+	}
+	_, err = s.ent.User.Update().Where(user.EmailEqualFold(e)).SetRole(role).Save(ctx)
+	return err
 }
 
 // shouldBump reports whether a session's sliding expiry is far enough into the
@@ -263,7 +343,10 @@ func claimIsTrue(v any) bool {
 // re-asserts the admin role from the allowlist on every login. Runs in a
 // transaction so a partial sign-in never persists.
 func (s *Service) upsertUser(ctx context.Context, c googleClaims) (*ent.User, error) {
-	role := s.roleFor(c.email)
+	role, err := s.roleFor(ctx, c.email)
+	if err != nil {
+		return nil, err
+	}
 
 	tx, err := s.ent.Tx(ctx)
 	if err != nil {

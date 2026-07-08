@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"net/http"
 	"testing"
 	"time"
@@ -61,9 +62,14 @@ func TestRoleFor(t *testing.T) {
 		"someone@example.com": "member",
 		"":                    "member",
 	}
+	ctx := context.Background()
 	for email, want := range cases {
-		if got := string(svc.roleFor(email)); got != want {
-			t.Errorf("roleFor(%q) = %q, want %q", email, got, want)
+		got, err := svc.roleFor(ctx, email)
+		if err != nil {
+			t.Fatalf("roleFor(%q): %v", email, err)
+		}
+		if string(got) != want {
+			t.Errorf("roleFor(%q) = %q, want %q", email, string(got), want)
 		}
 	}
 }

@@ -9,6 +9,8 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
+	"github.com/alifyandra/portfolio-site/backend/ent"
+	"github.com/alifyandra/portfolio-site/backend/ent/playlist"
 	"github.com/alifyandra/portfolio-site/backend/internal/spotify"
 )
 
@@ -34,6 +36,9 @@ const (
 type SpotifyRefresher struct {
 	redis *redis.Client
 	sp    *spotify.Client
+	// ent reads the hand-curated Playlist table for refreshPlaylists. Nil in unit
+	// tests that never exercise the playlists refresh.
+	ent *ent.Client
 
 	// lastTrack is the most recent track we saw playing live. When nothing is
 	// live we re-show it as the "last played" view instead of calling Spotify's
@@ -47,9 +52,10 @@ type SpotifyRefresher struct {
 }
 
 // NewSpotifyRefresher builds a refresher. A nil Spotify client (local dev
-// without creds) makes Run a no-op.
-func NewSpotifyRefresher(rdb *redis.Client, sp *spotify.Client) *SpotifyRefresher {
-	return &SpotifyRefresher{redis: rdb, sp: sp}
+// without creds) makes Run a no-op. The ent client supplies the curated playlist
+// IDs read on each slow refresh.
+func NewSpotifyRefresher(rdb *redis.Client, sp *spotify.Client, entClient *ent.Client) *SpotifyRefresher {
+	return &SpotifyRefresher{redis: rdb, sp: sp, ent: entClient}
 }
 
 // Run warms the cache once, then refreshes on a timer until ctx is cancelled.
@@ -227,7 +233,14 @@ func (r *SpotifyRefresher) refreshPlaylists(ctx context.Context) {
 	var out playlistsOutput
 	out.Body.Playlists = []playlistBody{}
 
-	for _, id := range featuredPlaylistIDs {
+	ids, ok := r.curatedPlaylistIDs(ctx)
+	if !ok {
+		// Could not read the curated set (no ent client, or a DB error): leave the
+		// existing cache to ride its TTL rather than blanking the panel.
+		return
+	}
+
+	for _, id := range ids {
 		p, err := r.sp.PlaylistByID(ctx, id)
 		if errors.Is(err, spotify.ErrNotConfigured) {
 			return
@@ -244,7 +257,29 @@ func (r *SpotifyRefresher) refreshPlaylists(ctx context.Context) {
 		})
 	}
 
+	// An empty curated set writes an empty list — the panel degrades to "no
+	// playlists" rather than crashing (the Playlist table can legitimately be empty).
 	r.write(ctx, playlistsCacheKey, out.Body, playlistsCacheTTL)
+}
+
+// curatedPlaylistIDs reads the hand-curated Spotify playlist IDs from the
+// Playlist table, ordered by sort_order (lower first). The second return is
+// false when the set could not be read (nil ent client or a query error), so the
+// caller can skip the cache write and preserve the last good value.
+func (r *SpotifyRefresher) curatedPlaylistIDs(ctx context.Context) ([]string, bool) {
+	if r.ent == nil {
+		return nil, false
+	}
+	rows, err := r.ent.Playlist.Query().Order(ent.Asc(playlist.FieldSortOrder)).All(ctx)
+	if err != nil {
+		slog.Warn("spotify refresh playlists: load curated ids", "err", err)
+		return nil, false
+	}
+	ids := make([]string, 0, len(rows))
+	for _, p := range rows {
+		ids = append(ids, p.SpotifyID)
+	}
+	return ids, true
 }
 
 // write marshals body and stores it under key with the given TTL. The TTL is a

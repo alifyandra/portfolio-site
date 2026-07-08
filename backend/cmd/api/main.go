@@ -44,7 +44,7 @@ func run() error {
 
 	// Keep Spotify data fresh in Redis on the backend's own schedule so the HTTP
 	// handlers only ever read cache (no per-request Spotify calls). Stops with ctx.
-	go api.NewSpotifyRefresher(app.Deps.Redis, app.Deps.Spotify).Run(ctx)
+	go api.NewSpotifyRefresher(app.Deps.Redis, app.Deps.Spotify, app.Deps.Ent).Run(ctx)
 
 	srv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Port),
