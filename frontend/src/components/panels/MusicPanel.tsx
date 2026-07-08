@@ -106,7 +106,12 @@ export function MusicPanel() {
   const playlists = playlistData?.playlists ?? [];
 
   return (
-    <Section id="music" title="What I'm Listening To">
+    <Section
+      id="music"
+      title="What I'm Listening To"
+      eyebrow="off the clock"
+      accent="mint"
+    >
       {/* Header reflects live state so it's clear when it's real-time. */}
       <p className="mb-3 flex items-center gap-2 font-mono text-sm">
         {live ? (
@@ -126,7 +131,7 @@ export function MusicPanel() {
       {track ? (
         <TrackLink
           track={track}
-          className="flex items-center gap-4 rounded-lg border border-slate-700 bg-white/[0.02] px-4 py-3 no-underline transition hover:border-mint"
+          className="flex items-center gap-4 rounded-xl border border-mint/40 bg-mint/[0.07] px-4 py-3 no-underline transition hover:border-mint"
         >
           <TrackArt track={track} size={56} />
           <div className="min-w-0">

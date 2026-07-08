@@ -3,7 +3,12 @@ import { photos } from '@/lib/photos';
 
 export function PhotographyPanel() {
   return (
-    <Section id="photography" title="Photos I've Taken">
+    <Section
+      id="photography"
+      title="Photos I've Taken"
+      eyebrow="through my lens"
+      accent="sky"
+    >
       {photos.length === 0 ? (
         <p className="text-sm text-slate-500">
           A few shots, coming soon.
@@ -14,7 +19,8 @@ export function PhotographyPanel() {
           {photos.map((photo) => (
             <figure
               key={photo.src}
-              className="group relative break-inside-avoid overflow-hidden rounded-lg"
+              // soft tinted border on hover only — no heavy ring/shadow on imagery
+              className="group relative break-inside-avoid overflow-hidden rounded-lg border border-transparent transition-colors duration-300 hover:border-sky/40"
             >
               {/* Local curated assets — plain img keeps the static panel simple. */}
               {/* eslint-disable-next-line @next/next/no-img-element */}

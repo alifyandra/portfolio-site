@@ -1,21 +1,31 @@
 import type { Metadata } from 'next';
-import { Inter } from 'next/font/google';
+import { Inter, Space_Grotesk, JetBrains_Mono } from 'next/font/google';
 import './globals.css';
 import { Providers } from './providers';
-import { ThemeToggle } from '@/components/ThemeToggle';
+import { Navbar } from '@/components/Navbar';
+import { Welcome } from '@/components/Welcome';
 
 // Apply the theme to <html> before first paint so there's no flash: stored
 // choice wins, else the OS preference, else dark. Mirrors ThemeToggle's writes.
 const themeNoFlash = `(function(){try{var t=localStorage.getItem('theme');if(t!=='dark'&&t!=='light'){t=window.matchMedia('(prefers-color-scheme: light)').matches?'light':'dark';}document.documentElement.setAttribute('data-theme',t);}catch(e){document.documentElement.setAttribute('data-theme','dark');}})();`;
 
-// Exposed as --font-inter and consumed by the Tailwind v4 --font-sans token
-// (see globals.css) so it drives both the default body font and font-sans.
+// Inter (body) → --font-inter → --font-sans. Space Grotesk (display wordmark +
+// headings) → --font-display. JetBrains Mono (eyebrows/labels) → --font-mono.
+// All three vars are wired into the @theme block in globals.css.
 const inter = Inter({ subsets: ['latin'], variable: '--font-inter' });
+const spaceGrotesk = Space_Grotesk({
+  subsets: ['latin'],
+  variable: '--font-space-grotesk',
+});
+const jetbrainsMono = JetBrains_Mono({
+  subsets: ['latin'],
+  variable: '--font-jetbrains-mono',
+});
 
 export const metadata: Metadata = {
-  title: 'Ahmad Alifyandra · Full-Stack Engineer',
+  title: 'aliflabs — a workshop of small web tools',
   description:
-    'Full-stack engineer in Melbourne. Python, Django, Next.js, Redis, AWS.',
+    'aliflabs is a workshop of small, sharp web tools by Alif, a full-stack engineer in Melbourne. A few are live, more are on the bench.',
 };
 
 export default function RootLayout({
@@ -24,13 +34,20 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" className={inter.variable} suppressHydrationWarning>
+    <html
+      lang="en"
+      className={`${inter.variable} ${spaceGrotesk.variable} ${jetbrainsMono.variable}`}
+      suppressHydrationWarning
+    >
       <head>
         <script dangerouslySetInnerHTML={{ __html: themeNoFlash }} />
       </head>
       <body>
-        <ThemeToggle />
-        <Providers>{children}</Providers>
+        <Providers>
+          <Navbar />
+          <Welcome />
+          {children}
+        </Providers>
       </body>
     </html>
   );

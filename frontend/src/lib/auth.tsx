@@ -22,6 +22,12 @@ export type Role = 'admin' | 'friend' | 'member';
 interface AuthContextValue {
   user: UserOutputBody | null;
   role: Role | null;
+  /**
+   * What to call the user in the UI: their self-chosen Nickname, else the
+   * provider `name`, else the email (precedence nickname ?? name ?? email;
+   * see CONTEXT.md). Empty string when logged out.
+   */
+  displayName: string;
   isLoading: boolean;
   isAuthenticated: boolean;
   /** True for friend or admin: the tiers with access to gated tools. */
@@ -45,6 +51,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const user = data ?? null;
   const role = (user?.role as Role | undefined) ?? null;
+  const displayName = user
+    ? (user.nickname ?? user.name ?? user.email ?? '')
+    : '';
 
   const signIn = () => {
     // Full-page navigation, not fetch: the backend runs the Google redirect
@@ -69,6 +78,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       value={{
         user,
         role,
+        displayName,
         isLoading,
         isAuthenticated: user !== null,
         isFriend: role === 'friend' || role === 'admin',

@@ -1,14 +1,38 @@
 'use client';
 
 /**
- * Dark/light theme toggle, fixed at the top of every page. Writes html[data-theme]
- * (read by globals.css) and persists the choice in localStorage. A matching
- * no-flash inline script in layout.tsx applies the stored/system theme before
- * first paint. Styled with theme tokens so it looks native in either theme.
+ * Dark/light theme toggle. Lives inline in the global Navbar. Writes
+ * html[data-theme] (read by globals.css) and persists the choice in
+ * localStorage. A matching no-flash inline script in layout.tsx applies the
+ * stored/system theme before first paint. Styled with theme tokens so it looks
+ * native in either theme.
  */
-import { useEffect, useState } from 'react';
+import { useSyncExternalStore } from 'react';
 
 type Theme = 'dark' | 'light';
+
+// The current theme lives outside React, on <html data-theme> (written by the
+// no-flash script before hydration, then by this toggle). We read it through
+// useSyncExternalStore — the React-blessed way to subscribe to browser state —
+// so there's no setState-in-effect and no hydration mismatch: SSR + first
+// client render use the server snapshot ('dark'), then React reconciles to the
+// value the no-flash script actually applied.
+const listeners = new Set<() => void>();
+
+function subscribe(cb: () => void) {
+  listeners.add(cb);
+  return () => listeners.delete(cb);
+}
+
+function getSnapshot(): Theme {
+  return document.documentElement.getAttribute('data-theme') === 'light'
+    ? 'light'
+    : 'dark';
+}
+
+function getServerSnapshot(): Theme {
+  return 'dark';
+}
 
 function applyTheme(t: Theme) {
   document.documentElement.setAttribute('data-theme', t);
@@ -17,6 +41,7 @@ function applyTheme(t: Theme) {
   } catch {
     /* ignore storage failures (private mode, etc.) */
   }
+  listeners.forEach((l) => l());
 }
 
 const SunIcon = () => (
@@ -53,26 +78,16 @@ const MoonIcon = () => (
 );
 
 export function ThemeToggle() {
-  const [theme, setTheme] = useState<Theme>('dark');
-
-  // Sync from what the no-flash script already applied to <html>.
-  useEffect(() => {
-    const current = document.documentElement.getAttribute('data-theme');
-    setTheme(current === 'light' ? 'light' : 'dark');
-  }, []);
-
+  const theme = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
   const next: Theme = theme === 'dark' ? 'light' : 'dark';
 
   return (
     <button
       type="button"
-      onClick={() => {
-        applyTheme(next);
-        setTheme(next);
-      }}
+      onClick={() => applyTheme(next)}
       aria-label={`Switch to ${next} theme`}
       title={`Switch to ${next} theme`}
-      className="fixed right-4 top-4 z-50 flex h-10 w-10 items-center justify-center rounded-full border border-slate-700 bg-deepsea text-slate-200 shadow-sm transition hover:text-citron"
+      className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-slate-700 bg-deepsea text-slate-200 transition hover:text-citron"
     >
       {theme === 'dark' ? <SunIcon /> : <MoonIcon />}
     </button>

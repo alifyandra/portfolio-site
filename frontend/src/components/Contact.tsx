@@ -19,7 +19,7 @@ export function Contact() {
   };
 
   return (
-    <Section id="contact" title="Get in Touch">
+    <Section id="contact" title="Get in Touch" eyebrow="say hello" accent="citron">
       {done ? (
         <p className="text-mint">
           Thanks, got your message. I&apos;ll get back to you at{' '}
@@ -27,6 +27,10 @@ export function Contact() {
         </p>
       ) : (
         <form onSubmit={onSubmit} className="flex max-w-xl flex-col gap-4">
+          <p className="text-slate-300">
+            Got a project, a question, or just want to say hi? Drop a line and
+            I&apos;ll get back to you.
+          </p>
           {/* Honeypot: hidden from users; bots that fill it get silently dropped. */}
           <input
             type="text"
