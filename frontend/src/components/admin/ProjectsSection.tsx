@@ -33,6 +33,9 @@ import {
   primaryBtn,
   ghostBtn,
   rowClass,
+  editBtn,
+  dangerBtn,
+  iconBtn,
 } from './ui';
 
 interface ProjectForm {
@@ -447,13 +450,13 @@ export function ProjectsSection() {
                   <span className="font-mono">{p.slug}</span> · {p.summary}
                 </p>
               </div>
-              <div className="flex shrink-0 items-center gap-1">
+              <div className="flex shrink-0 items-center gap-1.5">
                 <button
                   type="button"
                   aria-label="Move up"
                   disabled={i === 0 || listBusy}
                   onClick={() => move(i, -1)}
-                  className="rounded-md px-2 py-1 text-slate-300 transition hover:text-white disabled:opacity-30"
+                  className={iconBtn}
                 >
                   ↑
                 </button>
@@ -462,14 +465,14 @@ export function ProjectsSection() {
                   aria-label="Move down"
                   disabled={i === projects.length - 1 || listBusy}
                   onClick={() => move(i, 1)}
-                  className="rounded-md px-2 py-1 text-slate-300 transition hover:text-white disabled:opacity-30"
+                  className={iconBtn}
                 >
                   ↓
                 </button>
                 <button
                   type="button"
                   onClick={() => openEdit(p)}
-                  className="ml-1 text-sm text-sky transition hover:brightness-110"
+                  className={`${editBtn} ml-1`}
                 >
                   Edit
                 </button>
@@ -477,7 +480,7 @@ export function ProjectsSection() {
                   type="button"
                   onClick={() => del(p)}
                   disabled={listBusy}
-                  className="text-sm text-coral transition hover:brightness-110 disabled:opacity-50"
+                  className={dangerBtn}
                 >
                   Delete
                 </button>

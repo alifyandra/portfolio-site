@@ -125,6 +125,23 @@ html[data-theme='light'] .hero-ambient {
   opacity: 0.7;
 }
 
+/* Custom dropdown caret. Native <select> arrows sit tight against the right
+ * edge and vary by OS; appearance-none + a house chevron gives consistent
+ * spacing (pair with pr-10 on the element so text never runs under it). The
+ * chevron colour flips per theme so it reads on both the dark deepsea and the
+ * pale light input surfaces. Unlayered like the decorative helpers above. */
+.select-caret {
+  -webkit-appearance: none;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 1.15rem center;
+  background-size: 0.85rem 0.85rem;
+}
+html[data-theme='light'] .select-caret {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='%235a7b84' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+}
+
 /* These base customizations MUST live in @layer base. Tailwind v4 emits real
  * CSS @layers (theme, base, components, utilities) and unlayered rules beat
  * every layer — so an unlayered `a { color: sky }` would override text-mint /

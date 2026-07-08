@@ -12,6 +12,7 @@
 
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import Link from 'next/link';
+import { motion, AnimatePresence, useReducedMotion } from 'motion/react';
 
 import { useAuth } from '@/lib/auth';
 import {
@@ -118,6 +119,7 @@ const rowBase =
 
 export function AppMenu() {
   const { isAuthenticated, isFriend, signIn } = useAuth();
+  const reduce = useReducedMotion();
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
@@ -194,30 +196,51 @@ export function AppMenu() {
 
   return (
     <div ref={rootRef} className="relative">
-      <button
+      <motion.button
         ref={buttonRef}
         type="button"
         onClick={() => setOpen((v) => !v)}
         aria-haspopup="menu"
         aria-expanded={open}
         aria-controls={open ? menuId : undefined}
-        className="flex items-center gap-1.5 rounded-md px-2 py-1 text-sm font-medium text-slate-300 no-underline transition hover:text-white"
+        whileTap={reduce ? undefined : { scale: 0.92 }}
+        className={`flex items-center gap-1.5 rounded-md px-2 py-1 text-sm font-medium no-underline transition ${
+          open ? 'bg-white/5 text-white' : 'text-slate-300 hover:text-white'
+        }`}
       >
-        <GridGlyph />
-        <span className="hidden sm:inline">Apps</span>
-      </button>
-
-      {open ? (
-        <div
-          id={menuId}
-          role="menu"
-          aria-label="Tools"
-          onKeyDown={onMenuKeyDown}
-          className="absolute right-0 top-full z-50 mt-2 w-72 max-w-[calc(100vw-2rem)] overflow-hidden rounded-2xl border border-slate-700 bg-deepsea p-2"
-          style={{
-            boxShadow: '0 12px 40px -12px rgba(0,0,0,0.45)',
-          }}
+        {/* The grid glyph gives a playful quarter-turn nudge while the menu is
+            open (skipped under reduced motion). */}
+        <motion.span
+          className="inline-flex"
+          animate={reduce ? undefined : { rotate: open ? 90 : 0 }}
+          transition={{ type: 'spring', stiffness: 500, damping: 30 }}
         >
+          <GridGlyph />
+        </motion.span>
+        <span className="hidden sm:inline">Apps</span>
+      </motion.button>
+
+      <AnimatePresence>
+        {open ? (
+          <motion.div
+            id={menuId}
+            role="menu"
+            aria-label="Tools"
+            onKeyDown={onMenuKeyDown}
+            initial={reduce ? { opacity: 0 } : { opacity: 0, y: -6, scale: 0.96 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={reduce ? { opacity: 0 } : { opacity: 0, y: -6, scale: 0.96 }}
+            transition={
+              reduce
+                ? { duration: 0.12 }
+                : { type: 'spring', stiffness: 420, damping: 28, mass: 0.7 }
+            }
+            className="absolute right-0 top-full z-50 mt-2 w-72 max-w-[calc(100vw-2rem)] overflow-hidden rounded-2xl border border-slate-700 bg-deepsea p-2"
+            style={{
+              transformOrigin: 'top right',
+              boxShadow: '0 12px 40px -12px rgba(0,0,0,0.45)',
+            }}
+          >
           {groups.map((group, gi) => (
             <div key={group.category} className={gi > 0 ? 'mt-1.5' : undefined}>
               <p className="px-2.5 pb-1 pt-1.5 font-mono text-[0.65rem] uppercase tracking-widest text-slate-500">
@@ -308,8 +331,9 @@ export function AppMenu() {
               })}
             </div>
           ))}
-        </div>
+        </motion.div>
       ) : null}
+      </AnimatePresence>
     </div>
   );
 }

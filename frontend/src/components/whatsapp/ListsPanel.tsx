@@ -14,6 +14,7 @@ import {
 import type { ListDTO, LineError, RecipientDTO } from '@/lib/api/model';
 import { useAuth } from '@/lib/auth';
 import { WA_COUNTRIES, dialLabel } from '@/lib/wa-countries';
+import { editBtn, dangerBtn, selectClass } from './ui';
 
 const inputClass =
   'w-full rounded-lg border border-slate-700 bg-deepsea px-3 py-2 text-white outline-none focus:border-sky';
@@ -149,7 +150,7 @@ export function ListsPanel() {
           <label className="flex flex-col gap-1 text-sm text-slate-300">
             Country code for local (0…) numbers
             <select
-              className={inputClass}
+              className={selectClass}
               value={form.country_code}
               onChange={(e) => setForm({ ...form, country_code: e.target.value })}
             >
@@ -236,18 +237,14 @@ export function ListsPanel() {
                   {l.recipient_count} recipient{l.recipient_count === 1 ? '' : 's'}
                 </p>
               </div>
-              <div className="flex shrink-0 gap-3 text-sm">
-                <button
-                  type="button"
-                  onClick={() => openEdit(l)}
-                  className="text-sky transition hover:brightness-110"
-                >
+              <div className="flex shrink-0 items-center gap-2">
+                <button type="button" onClick={() => openEdit(l)} className={editBtn}>
                   Edit
                 </button>
                 <button
                   type="button"
                   onClick={() => del(l.id)}
-                  className="text-coral transition hover:brightness-110"
+                  className={dangerBtn}
                 >
                   Delete
                 </button>

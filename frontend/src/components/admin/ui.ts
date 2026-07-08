@@ -16,6 +16,28 @@ export const primaryBtn =
 export const ghostBtn =
   'rounded-lg border border-slate-700 px-4 py-2 text-sm text-white transition hover:border-slate-500 disabled:cursor-not-allowed disabled:opacity-50';
 
+// Native <select> gets the house dropdown caret (see .select-caret in
+// globals.css) + right padding so the glyph never crowds the border. Separate
+// from inputClass so text inputs don't sprout a caret.
+export const selectClass =
+  'w-full rounded-lg border border-slate-700 bg-deepsea py-2 pl-3 pr-10 text-white outline-none transition focus:border-sky select-caret';
+
+// Small row-action buttons, filled with the accent colour (Edit = sky,
+// destructive Delete / Remove / Revoke = coral) with dark ink text — the same
+// idiom as primaryBtn (bg-citron text-ink). Ink is used rather than text-white
+// because that neutral flips dark in the light theme, and dark ink holds the
+// strongest contrast on both accents in both themes.
+export const editBtn =
+  'rounded-md bg-sky px-2.5 py-1 text-xs font-semibold text-ink transition hover:brightness-95 disabled:cursor-not-allowed disabled:opacity-50';
+
+export const dangerBtn =
+  'rounded-md bg-coral px-2.5 py-1 text-xs font-semibold text-ink transition hover:brightness-95 disabled:cursor-not-allowed disabled:opacity-50';
+
+// Bare glyph button for the reorder arrows (↑ / ↓): a subtle hover surface so
+// it reads as pressable without competing with the chip actions beside it.
+export const iconBtn =
+  'rounded-md px-2 py-1 text-slate-300 transition hover:bg-white/5 hover:text-white disabled:opacity-30 disabled:hover:bg-transparent';
+
 // Citron-tinted card surface (the admin family).
 export const citronCard: CSSProperties = {
   borderColor: 'color-mix(in srgb, var(--color-citron) 32%, transparent)',

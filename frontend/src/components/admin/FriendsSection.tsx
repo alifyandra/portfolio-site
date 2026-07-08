@@ -18,7 +18,15 @@ import {
   getListAccessGrantsQueryKey,
 } from '@/lib/api/generated';
 import { CreateGrantInputBodyTier } from '@/lib/api/model';
-import { citronCard, citronBadge, inputClass, primaryBtn, rowClass } from './ui';
+import {
+  citronCard,
+  citronBadge,
+  inputClass,
+  selectClass,
+  primaryBtn,
+  dangerBtn,
+  rowClass,
+} from './ui';
 
 const tierText: Record<string, string> = {
   admin: 'text-citron',
@@ -116,7 +124,7 @@ export function FriendsSection() {
         <label className="flex flex-col gap-1 text-sm text-slate-300 sm:w-40">
           Tier
           <select
-            className={inputClass}
+            className={selectClass}
             value={tier}
             onChange={(e) =>
               setTier(e.target.value as CreateGrantInputBodyTier)
@@ -166,7 +174,7 @@ export function FriendsSection() {
                 type="button"
                 onClick={() => revoke(g.email)}
                 disabled={remove.isPending}
-                className="shrink-0 text-sm text-coral transition hover:brightness-110 disabled:opacity-50"
+                className={`${dangerBtn} shrink-0`}
               >
                 Revoke
               </button>

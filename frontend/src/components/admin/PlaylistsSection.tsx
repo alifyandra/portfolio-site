@@ -22,7 +22,15 @@ import {
   getListPlaylistsQueryKey,
 } from '@/lib/api/generated';
 import type { PlaylistDTO, PlaylistBody } from '@/lib/api/model';
-import { citronCard, citronBadge, inputClass, primaryBtn, rowClass } from './ui';
+import {
+  citronCard,
+  citronBadge,
+  inputClass,
+  primaryBtn,
+  dangerBtn,
+  iconBtn,
+  rowClass,
+} from './ui';
 
 // Pull the bare playlist id out of a share URL / URI so it can be matched
 // against PlaylistDTO.spotify_id.
@@ -186,13 +194,13 @@ export function PlaylistsSection() {
                     </p>
                   </div>
                 </div>
-                <div className="flex shrink-0 items-center gap-1">
+                <div className="flex shrink-0 items-center gap-1.5">
                   <button
                     type="button"
                     aria-label="Move up"
                     disabled={i === 0 || busy}
                     onClick={() => move(i, -1)}
-                    className="rounded-md px-2 py-1 text-slate-300 transition hover:text-white disabled:opacity-30"
+                    className={iconBtn}
                   >
                     ↑
                   </button>
@@ -201,7 +209,7 @@ export function PlaylistsSection() {
                     aria-label="Move down"
                     disabled={i === playlists.length - 1 || busy}
                     onClick={() => move(i, 1)}
-                    className="rounded-md px-2 py-1 text-slate-300 transition hover:text-white disabled:opacity-30"
+                    className={iconBtn}
                   >
                     ↓
                   </button>
@@ -209,7 +217,7 @@ export function PlaylistsSection() {
                     type="button"
                     onClick={() => del(p)}
                     disabled={busy}
-                    className="ml-1 text-sm text-coral transition hover:brightness-110 disabled:opacity-50"
+                    className={`${dangerBtn} ml-1`}
                   >
                     Remove
                   </button>
