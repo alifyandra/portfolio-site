@@ -268,7 +268,8 @@ Do the steps in order.
 1. **Apply the infra.** Dispatch the `Terraform` workflow (gated `plan-dispatch` -> `apply`)
    or apply locally. This creates the ECR repo `portfolio-digest`, the task definition, the
    log group, the digest SG, the IAM, the `portfolio-jobs-dlq` queue, and the (disabled)
-   schedule, raises the jobs-queue visibility timeout to 900s, and sets `DIGEST_MODE=fargate`
+   schedule, raises the jobs-queue visibility timeout to `jobs_visibility_timeout_seconds`
+   (default 1200s, above the launcher's 15m/900s cap), and sets `DIGEST_MODE=fargate`
    plus `DIGEST_ECS_CLUSTER` / `DIGEST_TASK_DEFINITION` / `DIGEST_SUBNET_IDS` /
    `DIGEST_SECURITY_GROUP_ID` / `DIGEST_MODEL` / `DIGEST_MAX_TOKENS` in SSM. The schedule
    stays off until step 6 (`enable_digest_schedule` defaults to `false`).
