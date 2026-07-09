@@ -36,6 +36,12 @@ func (a *App) Close() error { return a.close() }
 // New constructs all dependencies. In development it also runs Ent's
 // auto-migration so the schema is created on first run.
 func New(ctx context.Context, cfg *config.Config) (*App, error) {
+	// DATABASE_URL is required for anything that opens the DB (api, worker). It is
+	// not a parse-time requirement (the digest Fargate task loads config but never
+	// opens the DB, ADR 0013), so enforce it here where the connection is made.
+	if cfg.DatabaseURL == "" {
+		return nil, fmt.Errorf("DATABASE_URL is required")
+	}
 	// Open the *sql.DB with the pgx stdlib driver (registered as "pgx"), then
 	// hand it to Ent with the Postgres dialect. ent.Open won't accept "pgx"
 	// directly — it only maps the dialect names to database/sql driver names.

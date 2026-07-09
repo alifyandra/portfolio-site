@@ -12,6 +12,20 @@ func setBase(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgres://u:p@localhost:5432/db?sslmode=disable")
 }
 
+// TestLoad_NoDatabaseURL guards the digest Fargate task path (ADR 0013, Shape B):
+// cmd/digest calls Load() but never opens the DB, so a missing DATABASE_URL must
+// not fail parsing. The requirement moved to bootstrap.New (the DB-open site).
+func TestLoad_NoDatabaseURL(t *testing.T) {
+	t.Setenv("DATABASE_URL", "") // empty (not required at parse), digest-task shape
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() without DATABASE_URL = %v, want nil (digest task loads config but never opens the DB)", err)
+	}
+	if cfg.DatabaseURL != "" {
+		t.Errorf("DatabaseURL = %q, want empty", cfg.DatabaseURL)
+	}
+}
+
 func TestLoadSidecarMode(t *testing.T) {
 	t.Run("default mode is static and loads clean", func(t *testing.T) {
 		setBase(t)
