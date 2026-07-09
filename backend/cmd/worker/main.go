@@ -14,6 +14,7 @@ import (
 
 	"github.com/alifyandra/portfolio-site/backend/internal/bootstrap"
 	"github.com/alifyandra/portfolio-site/backend/internal/config"
+	"github.com/alifyandra/portfolio-site/backend/internal/digest"
 	"github.com/alifyandra/portfolio-site/backend/internal/email"
 	"github.com/alifyandra/portfolio-site/backend/internal/queue"
 	"github.com/alifyandra/portfolio-site/backend/internal/server"
@@ -77,7 +78,8 @@ func handle(ctx context.Context, deps *server.Deps, job queue.Job) error {
 	switch job.Type {
 	case queue.TypeContactNotify:
 		return handleContactNotify(ctx, deps, job)
-	// case "llm.summarise": ...
+	case queue.TypeDigestBuild:
+		return handleDigestBuild(ctx, deps, job)
 	default:
 		slog.Warn("no handler for job type", "type", job.Type)
 		return nil
@@ -110,4 +112,41 @@ func handleContactNotify(ctx context.Context, deps *server.Deps, job queue.Job) 
 	}
 	slog.Info("sent contact notification", "id", p.ID)
 	return nil
+}
+
+// handleDigestBuild runs the scheduled digest.build Job. It resolves the target
+// date (payload.Date or today UTC) and dispatches by DIGEST_MODE: local runs the
+// builder inline; fargate launches a run-to-completion task and acks only on a
+// clean exit. See ADR 0013.
+func handleDigestBuild(ctx context.Context, deps *server.Deps, job queue.Job) error {
+	var p queue.DigestBuildPayload
+	if err := json.Unmarshal(job.Payload, &p); err != nil {
+		slog.Error("bad digest.build payload", "err", err)
+		return nil // unrecoverable bad payload — ack
+	}
+	date, err := digest.ParseDate(p.Date)
+	if err != nil {
+		slog.Error("bad digest.build date", "date", p.Date, "err", err)
+		return nil // unrecoverable — ack
+	}
+
+	if deps.Config.DigestMode == "fargate" {
+		if deps.DigestLauncher == nil {
+			slog.Error("digest.build in fargate mode but launcher is nil; skipping")
+			return nil
+		}
+		// Pass the resolved day so the task is not subject to a midnight-boundary
+		// race: the worker's clock decides the day, not the task's.
+		return deps.DigestLauncher.RunToCompletion(ctx, map[string]string{
+			"DIGEST_DATE": date.Format("2006-01-02"),
+		})
+	}
+
+	// local: run inline. An unconfigured Anthropic key is an ack (nothing to do),
+	// mirroring handleContactNotify's email.ErrNotConfigured handling.
+	err = deps.Digest.Run(ctx, date)
+	if errors.Is(err, digest.ErrNotConfigured) {
+		return nil
+	}
+	return err
 }

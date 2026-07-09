@@ -9,6 +9,7 @@ import (
 
 	"github.com/alifyandra/portfolio-site/backend/ent/playlist"
 	"github.com/alifyandra/portfolio-site/backend/ent/project"
+	"github.com/alifyandra/portfolio-site/backend/ent/source"
 	"github.com/alifyandra/portfolio-site/backend/internal/bootstrap"
 	"github.com/alifyandra/portfolio-site/backend/internal/config"
 )
@@ -31,6 +32,18 @@ var seededPlaylistIDs = []string{
 	"0dqCnKQCRLstotAISODoQO",
 	"1fU0ZWngfA6A9t6Yh0uvCI",
 	"13jonvKyZsTWcabIINLzWc",
+}
+
+// seededSources are the public, unauthenticated origins the digest.build Job
+// reads from, seeded idempotently by url so local dev produces a real Digest. See
+// CONTEXT.md ("Source") and ADR 0013.
+type seedSource struct {
+	name, url, typ string
+}
+
+var seededSources = []seedSource{
+	{name: "Hacker News", url: "https://hnrss.org/frontpage", typ: "rss"},
+	{name: "BBC News", url: "https://feeds.bbci.co.uk/news/rss.xml", typ: "rss"},
 }
 
 var seeds = []seedProject{
@@ -126,6 +139,28 @@ func main() {
 			os.Exit(1)
 		}
 		slog.Info("seeded playlist", "spotify_id", id)
+	}
+
+	// Digest sources, idempotent by url.
+	for _, s := range seededSources {
+		exists, err := client.Source.Query().Where(source.URLEQ(s.url)).Exist(ctx)
+		if err != nil {
+			slog.Error("query source", "err", err)
+			os.Exit(1)
+		}
+		if exists {
+			slog.Info("skip existing source", "url", s.url)
+			continue
+		}
+		if _, err := client.Source.Create().
+			SetName(s.name).
+			SetURL(s.url).
+			SetType(source.Type(s.typ)).
+			Save(ctx); err != nil {
+			slog.Error("create source", "url", s.url, "err", err)
+			os.Exit(1)
+		}
+		slog.Info("seeded source", "url", s.url)
 	}
 
 	slog.Info("seed complete")

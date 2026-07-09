@@ -14,7 +14,9 @@ import (
 	"github.com/alifyandra/portfolio-site/backend/internal/auth"
 	"github.com/alifyandra/portfolio-site/backend/internal/cache"
 	"github.com/alifyandra/portfolio-site/backend/internal/config"
+	"github.com/alifyandra/portfolio-site/backend/internal/digest"
 	"github.com/alifyandra/portfolio-site/backend/internal/email"
+	"github.com/alifyandra/portfolio-site/backend/internal/fargate"
 	"github.com/alifyandra/portfolio-site/backend/internal/queue"
 	"github.com/alifyandra/portfolio-site/backend/internal/server"
 	"github.com/alifyandra/portfolio-site/backend/internal/spotify"
@@ -100,16 +102,48 @@ func New(ctx context.Context, cfg *config.Config) (*App, error) {
 		return nil, err
 	}
 
+	// Digest builder: reads active Sources and summarizes them via the Anthropic
+	// API. Cheap to construct (no network) and safe without an API key — it degrades
+	// to a no-op. The worker runs it inline in local mode. See ADR 0013.
+	digestBuilder := digest.NewBuilder(
+		entClient,
+		digest.NewAnthropic(cfg.AnthropicAPIKey, cfg.DigestModel, cfg.DigestMaxTokens),
+		digest.NewFetcher(),
+	)
+
+	// Digest dispatch launcher: only the fargate mode builds an AWS client, so local
+	// dev (DIGEST_MODE=local, the builder runs inline) needs no credentials. The
+	// DIGEST_* identifiers are validated in config.Load when the mode is fargate.
+	var digestLauncher *fargate.Launcher
+	if cfg.DigestMode == "fargate" {
+		digestLauncher, err = fargate.NewLauncher(ctx, fargate.Config{
+			Region:          cfg.AWSRegion,
+			Cluster:         cfg.DigestEcsCluster,
+			TaskDefinition:  cfg.DigestTaskDefinition,
+			ContainerName:   cfg.DigestContainerName,
+			Subnets:         cfg.DigestSubnetIDs,
+			SecurityGroupID: cfg.DigestSecurityGroupID,
+			AssignPublicIP:  cfg.DigestAssignPublicIP,
+		})
+		if err != nil {
+			_ = entClient.Close()
+			_ = redisClient.Close()
+			return nil, err
+		}
+	}
+
 	deps := &server.Deps{
-		Config:  cfg,
-		Ent:     entClient,
-		Redis:   redisClient,
-		Spotify: sp,
-		Storage: store,
-		Queue:   q,
-		Email:   mailer,
-		Auth:    authSvc,
-		WA:      waProvider,
+		Config:         cfg,
+		Ent:            entClient,
+		Redis:          redisClient,
+		Spotify:        sp,
+		Storage:        store,
+		Queue:          q,
+		Email:          mailer,
+		Auth:           authSvc,
+		WA:             waProvider,
+		Digest:         digestBuilder,
+		DigestLauncher: digestLauncher,
 	}
 
 	return &App{
