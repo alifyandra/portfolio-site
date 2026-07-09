@@ -31,9 +31,9 @@ func (Digest) Fields() []ent.Field {
 		field.String("model").
 			Optional().
 			Comment("The Anthropic model id that produced the summary, e.g. \"claude-haiku-4-5\""),
-		field.String("error").
+		field.Text("error").
 			Optional().
-			Comment("The failure reason when status is failed; cleared on a later successful upsert"),
+			Comment("The failure reason when status is failed; cleared on a later successful upsert. Text (not String) because it can carry a multi-KB API error body"),
 		field.Time("created_at").
 			Default(time.Now).
 			Immutable().
