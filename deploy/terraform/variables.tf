@@ -90,9 +90,9 @@ variable "backup_retention_days" {
 # --- Digest / scheduled jobs (ADR 13, see digest.tf) ---------------------------
 
 variable "enable_digest_schedule" {
-  description = "Enable the daily EventBridge Scheduler cron that enqueues digest.build. Default off: a gated slice enables it deliberately after the image is pushed and the secrets are seeded."
+  description = "Enable the daily EventBridge Scheduler cron that enqueues digest.build. Enabled 2026-07-09 after the slice was applied, the image pushed, the secrets seeded, and a manual run verified end-to-end in prod (ADR 13). Flipping it is an in-place state update on the schedule, not a resource churn."
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "digest_schedule_expression" {
