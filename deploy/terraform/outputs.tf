@@ -82,3 +82,33 @@ output "wa_subnet_ids" {
   description = "Public subnet IDs the sidecar task can be launched into."
   value       = aws_subnet.public[*].id
 }
+
+output "app_private_ip" {
+  description = "Private IP of the app host. Bake this into DIGEST_DATABASE_URL when seeding it (ADR 13)."
+  value       = aws_instance.app.private_ip
+}
+
+output "digest_ecr_repository_url" {
+  description = "ECR repo the digest image is pushed to (Slice E)."
+  value       = aws_ecr_repository.digest.repository_url
+}
+
+output "digest_task_definition" {
+  description = "ECS task-definition family the worker calls RunTask with for digest.build."
+  value       = aws_ecs_task_definition.digest.family
+}
+
+output "digest_log_group" {
+  description = "CloudWatch log group for the digest task."
+  value       = aws_cloudwatch_log_group.digest.name
+}
+
+output "jobs_dlq_arn" {
+  description = "Dead-letter queue ARN for poison job messages."
+  value       = aws_sqs_queue.jobs_dlq.arn
+}
+
+output "digest_schedule_name" {
+  description = "EventBridge Scheduler schedule that enqueues digest.build."
+  value       = aws_scheduler_schedule.digest_build.name
+}

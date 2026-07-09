@@ -250,3 +250,104 @@ can pull from ECR and read SSM. Teardown is `StopTask` on relay end, backstopped
 the sidecar's `WA_SHUTDOWN_AFTER_SESSION=true` self-exit. Logs land in CloudWatch
 `/ecs/portfolio-wa-sidecar`. The first ECR push is manual; sidecar CI (OIDC build +
 push) is a later follow-up.
+
+## Digest / scheduled jobs (Fargate) deploy
+
+The digest platform (ADR 13) runs a daily scheduled job: EventBridge Scheduler enqueues
+a `digest.build` message onto the shared jobs queue, the on-box worker consumes it and
+launches the `cmd/digest` container as a run-to-completion Fargate task, which fetches
+public Sources, summarizes them with the Anthropic API, writes a Digest row, and exits.
+The Terraform is in `digest.tf` (ECR repo, log group, arm64 task definition, egress-only
+SG, exec/task IAM roles, the instance-role RunTask additions, the SQS DLQ + redrive on the
+shared queue in `storage.tf`, and the scheduler + its role). It reuses the WhatsApp ECS
+cluster, VPC, and subnets. Local dev is unchanged.
+
+This is a gated slice, applied later by the maintainer (same shape as WhatsApp Slice E).
+Do the steps in order.
+
+1. **Apply the infra.** Dispatch the `Terraform` workflow (gated `plan-dispatch` -> `apply`)
+   or apply locally. This creates the ECR repo `portfolio-digest`, the task definition, the
+   log group, the digest SG, the IAM, the `portfolio-jobs-dlq` queue, and the (disabled)
+   schedule, raises the jobs-queue visibility timeout to 900s, and sets `DIGEST_MODE=fargate`
+   plus `DIGEST_ECS_CLUSTER` / `DIGEST_TASK_DEFINITION` / `DIGEST_SUBNET_IDS` /
+   `DIGEST_SECURITY_GROUP_ID` / `DIGEST_MODEL` / `DIGEST_MAX_TOKENS` in SSM. The schedule
+   stays off until step 6 (`enable_digest_schedule` defaults to `false`).
+
+2. **Seed the Anthropic API key.** `ANTHROPIC_API_KEY` is a SecureString placeholder until
+   seeded, so digest runs are inert:
+
+   ```bash
+   aws ssm put-parameter --name /portfolio/env/ANTHROPIC_API_KEY --type SecureString \
+     --overwrite --region ap-southeast-2 --value "sk-ant-..."
+   ```
+
+3. **Seed the digest DATABASE_URL with the box private IP.** The digest task reaches Postgres
+   over the box's private IP, not the docker-network name `postgres`, so it needs its own DSN.
+   Read the private IP from Terraform output and bake it in (reuse the same
+   `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` as the app's `DATABASE_URL`):
+
+   ```bash
+   IP=$(terraform -chdir=path/to/portfolio-site/deploy/terraform output -raw app_private_ip)
+   aws ssm put-parameter --name /portfolio/env/DIGEST_DATABASE_URL --type SecureString \
+     --overwrite --region ap-southeast-2 \
+     --value "postgres://portfolio:<POSTGRES_PASSWORD>@$IP:5432/portfolio?sslmode=disable"
+   ```
+
+   The private IP is stable across reboots but changes if the box is replaced (an AMI bump or
+   a `user_data` change). Re-seed this param after any box replacement.
+
+4. **Confirm on-box Postgres listens on the private interface.** This is a runtime/host concern
+   Terraform cannot fully assert. The web SG already allows tcp/5432 from the digest SG, but the
+   `docker-compose.prod.yml` Postgres service has no host port mapping, so it is only reachable
+   on the docker bridge, not the box's private interface. Publish it before the first run, for
+   example by adding a `ports` mapping to the postgres service (`"5432:5432"`, or better the
+   private IP form `"<private-ip>:5432:5432"` so it is not bound on all interfaces) and
+   redeploying. Validate from the box over SSM Session Manager:
+
+   ```bash
+   ss -tlnp | grep 5432          # postgres listening on 0.0.0.0:5432 or the private IP, not just 127.0.0.1
+   ```
+
+   The SG restricts inbound 5432 to the digest SG regardless, so a `0.0.0.0` bind is not
+   internet-exposed, but the private-IP bind is the tighter choice.
+
+5. **Build + push the arm64 image to ECR** (the task def pins `arm64`, so the image must be arm64).
+   The digest binary ships in the shared `backend/Dockerfile` (it builds `api`/`worker`/`seed`/`digest`
+   side by side); the task def selects it with `command = ["digest"]`, so push that same image to the
+   digest ECR repo:
+
+   ```bash
+   AWS_REGION=ap-southeast-2
+   ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+   REPO=$(terraform -chdir=path/to/portfolio-site/deploy/terraform output -raw digest_ecr_repository_url)
+   aws ecr get-login-password --region "$AWS_REGION" \
+     | docker login --username AWS --password-stdin "$ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com"
+   docker buildx build --platform linux/arm64 -t "$REPO:latest" --push -f backend/Dockerfile backend
+   ```
+
+6. **Redeploy the backend, then enable the schedule.** `deploy-backend.yml` rebuilds `.env` from
+   SSM on every deploy, so a redeploy picks up `DIGEST_MODE=fargate` and the seeded secrets. Once
+   the manual test run (step 7) is green, enable the daily cron by dispatching the `Terraform`
+   workflow with `enable_digest_schedule = true` (or flip the default and reconcile, per the
+   Cloudflare-cutover pattern above).
+
+7. **Trigger a manual test run.** Send one `digest.build` message to the shared queue and watch
+   the worker launch the task:
+
+   ```bash
+   QURL=$(terraform -chdir=path/to/portfolio-site/deploy/terraform output -raw sqs_queue_url)
+   aws sqs send-message --region ap-southeast-2 --queue-url "$QURL" \
+     --message-body '{"type":"digest.build","payload":{}}'
+   ```
+
+   Confirm a Fargate task appears in the `portfolio-wa` cluster, its logs land in CloudWatch
+   `/ecs/portfolio-digest`, it exits 0, and a Digest row is written. A run that fails 3 times
+   lands in `portfolio-jobs-dlq`; inspect it with `aws sqs receive-message` on the DLQ URL.
+
+Notes: the task runs in a public subnet with `assignPublicIp=ENABLED` (no NAT) so it can pull
+from ECR, read SSM, and reach `api.anthropic.com`. Retry is SQS redelivery (`maxReceiveCount`
+`jobs_max_receive_count`, default 3) then the DLQ; the daily schedule is the backstop. The jobs
+queue visibility timeout (`jobs_visibility_timeout_seconds`, default 1200s) sits above the digest
+launcher's 15m (900s) hard runtime cap so a slow run is never redelivered mid-flight, and applies to `contact.notify`
+too (harmless, it runs inline in well under a second). The first ECR push is manual; digest CI is
+a later follow-up.

@@ -53,6 +53,24 @@ locals {
     WA_SUBNET_IDS        = join(",", aws_subnet.public[*].id)
     WA_SECURITY_GROUP_ID = aws_security_group.wa_sidecar.id
     WA_ASSIGN_PUBLIC_IP  = "true"
+
+    # Digest / scheduled jobs on Fargate (ADR 13, see digest.tf). These drive
+    # the worker's run-to-completion launcher: on a digest.build job it RunTasks
+    # the digest task def in the shared WA cluster/subnets, passing DIGEST_DATE
+    # as a container override, then polls DescribeTasks until STOPPED. The
+    # cluster/subnets/SG are reused from the WA set; only the SG and task def
+    # differ. AssignPublicIp must be true (public subnets, no NAT: the ECS agent
+    # needs a public IP to pull from ECR and read SSM). DIGEST_MODEL /
+    # DIGEST_MAX_TOKENS are also baked into the task def (digest.tf) from the
+    # same variables, so the two never drift.
+    DIGEST_MODE              = "fargate"
+    DIGEST_ECS_CLUSTER       = aws_ecs_cluster.wa.name
+    DIGEST_TASK_DEFINITION   = aws_ecs_task_definition.digest.family
+    DIGEST_SUBNET_IDS        = join(",", aws_subnet.public[*].id)
+    DIGEST_SECURITY_GROUP_ID = aws_security_group.digest.id
+    DIGEST_ASSIGN_PUBLIC_IP  = "true"
+    DIGEST_MODEL             = var.digest_model
+    DIGEST_MAX_TOKENS        = var.digest_max_tokens
   }
 
   # Secret slots. Seeded with a placeholder, then pushed out-of-band.
@@ -68,7 +86,9 @@ locals {
     "GOOGLE_CLIENT_SECRET",
     "ADMIN_EMAILS",
     "FRIEND_EMAILS",
-    "WA_SIDECAR_SECRET", # backend<->sidecar shared bearer secret (see whatsapp.tf)
+    "WA_SIDECAR_SECRET",   # backend<->sidecar shared bearer secret (see whatsapp.tf)
+    "ANTHROPIC_API_KEY",   # digest LLM key, injected into the Fargate task (ADR 13)
+    "DIGEST_DATABASE_URL", # on-box Postgres DSN for the digest task (box private IP, not "postgres")
   ]
 }
 
