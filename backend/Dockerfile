@@ -20,7 +20,8 @@ RUN go mod tidy
 
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build -ldflags="-s -w" -o /out/api    ./cmd/api  \
  && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build -ldflags="-s -w" -o /out/worker ./cmd/worker \
- && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build -ldflags="-s -w" -o /out/seed   ./cmd/seed
+ && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build -ldflags="-s -w" -o /out/seed   ./cmd/seed \
+ && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build -ldflags="-s -w" -o /out/digest ./cmd/digest
 
 # --- runtime stage ---
 FROM alpine:3.20
@@ -28,5 +29,6 @@ RUN apk add --no-cache ca-certificates && adduser -D -u 10001 app
 COPY --from=builder /out/ /usr/local/bin/
 USER app
 EXPOSE 8080
-# Override `command:` in compose to run `worker` or `seed`.
+# Override `command:` in compose to run `worker`, `seed`, or `digest`.
+# `digest` is the run-to-completion Fargate task entrypoint (ADR 0013).
 CMD ["api"]

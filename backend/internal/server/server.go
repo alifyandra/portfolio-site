@@ -17,7 +17,9 @@ import (
 	"github.com/alifyandra/portfolio-site/backend/internal/api"
 	"github.com/alifyandra/portfolio-site/backend/internal/auth"
 	"github.com/alifyandra/portfolio-site/backend/internal/config"
+	"github.com/alifyandra/portfolio-site/backend/internal/digest"
 	"github.com/alifyandra/portfolio-site/backend/internal/email"
+	"github.com/alifyandra/portfolio-site/backend/internal/fargate"
 	"github.com/alifyandra/portfolio-site/backend/internal/queue"
 	"github.com/alifyandra/portfolio-site/backend/internal/spotify"
 	"github.com/alifyandra/portfolio-site/backend/internal/storage"
@@ -39,6 +41,12 @@ type Deps struct {
 	// selected by WA_SIDECAR_MODE). Built in bootstrap; nil in cmd/spec, which the
 	// create-batch handler tolerates (it 503s when the provider is nil).
 	WA whatsapp.SidecarProvider
+	// Digest builds the dated Digest; the worker runs it inline (DIGEST_MODE=local).
+	// Built in bootstrap; nil in cmd/spec. See ADR 0013.
+	Digest *digest.Builder
+	// DigestLauncher runs digest.build on a run-to-completion Fargate task
+	// (DIGEST_MODE=fargate); nil in local mode and in cmd/spec. See ADR 0013.
+	DigestLauncher *fargate.Launcher
 }
 
 // New builds the Chi router with Huma mounted on it and all routes registered.
