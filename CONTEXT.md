@@ -140,10 +140,26 @@ server, never trusting the client gate). Distinct from a possible future admin
 Admin Console is the lightweight, standardised editor that predates it.
 
 ### Job (async)
-A unit of background work placed on a queue and processed by a worker out of
-band from the web request. The first real Job is **`contact.notify`** — emailing
-Alif (via SES) when a Contact Message arrives. Further Jobs (e.g. an LLM-powered
-task) slot into the same seam. See `docs/adr/0007-sqs-async-queue.md`.
+A unit of background work placed on a queue and run out of band from the web
+request. A Job is triggered either by an **event** (a producer reacting to
+something, e.g. a Contact Message produces `contact.notify`, which emails Alif
+via SES) or by a **schedule** (the clock, e.g. a nightly `digest.build`). The
+worker consumes the queue and **dispatches** each Job by weight: light Jobs it
+runs inline on the host; heavy Jobs it launches on a dedicated Fargate task that
+does the work and then exits (run to completion). Distinct from a [Batch], which
+is user-triggered and watched live. See `docs/adr/0007-sqs-async-queue.md` and
+`docs/adr/0013-scheduled-heavy-compute-jobs.md`.
+
+### Digest
+A dated, machine-generated summary of a fixed set of public [Source]s, produced
+by the scheduled `digest.build` [Job (async)] and stored for later reading. It is
+the first scheduled Job that fetches external data and summarizes it with an LLM,
+the same shape the future personal dashboard's periodic briefings will follow.
+
+### Source
+A public origin the [Digest] job reads from, such as an RSS feed or a web page.
+Sources are read-only and unauthenticated (no OAuth), which is what keeps the
+[Digest] job free of any per-user credential handling.
 
 ### Template
 A reusable WhatsApp message body owned by a [User], optionally containing a
