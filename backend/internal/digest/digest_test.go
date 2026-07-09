@@ -136,12 +136,16 @@ func TestParseDate(t *testing.T) {
 }
 
 func TestParseDate_EmptyIsTodayUTC(t *testing.T) {
+	before := NormalizeDate(time.Now())
 	got, err := ParseDate("")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	want := NormalizeDate(time.Now())
-	if !got.Equal(want) {
-		t.Errorf("ParseDate(\"\") = %s, want today UTC %s", got, want)
+	after := NormalizeDate(time.Now())
+	// Empty input means "today at UTC midnight". If the test happens to straddle a
+	// UTC-midnight boundary, before and after differ by a day; accept either so the
+	// test cannot flake.
+	if !got.Equal(before) && !got.Equal(after) {
+		t.Errorf("ParseDate(\"\") = %s, want today UTC (%s or %s)", got, before, after)
 	}
 }

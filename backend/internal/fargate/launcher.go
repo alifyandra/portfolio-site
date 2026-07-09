@@ -116,7 +116,15 @@ func (l *Launcher) awaitExit(ctx context.Context, taskArn string) error {
 			return fmt.Errorf("fargate: describe tasks: %w", err)
 		}
 		if len(out.Tasks) == 0 {
-			return fmt.Errorf("fargate: task %s disappeared", taskArn)
+			// DescribeTasks reports an unobservable task via Failures with an empty
+			// Tasks list. Best-effort stop in case it is still running, and surface
+			// the failure reason instead of a bare "disappeared".
+			reason := "not returned"
+			if len(out.Failures) > 0 {
+				reason = fmt.Sprintf("%s (%s)", aws.ToString(out.Failures[0].Reason), aws.ToString(out.Failures[0].Detail))
+			}
+			l.stopTask(taskArn, "digest: task not observable")
+			return fmt.Errorf("fargate: task %s not observable: %s", taskArn, reason)
 		}
 		t := out.Tasks[0]
 		if aws.ToString(t.LastStatus) == "STOPPED" {
