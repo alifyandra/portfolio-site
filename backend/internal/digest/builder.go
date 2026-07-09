@@ -8,8 +8,6 @@ import (
 	"time"
 
 	"github.com/alifyandra/portfolio-site/backend/ent"
-	entdigest "github.com/alifyandra/portfolio-site/backend/ent/digest"
-	"github.com/alifyandra/portfolio-site/backend/ent/source"
 )
 
 // ErrNotConfigured is returned when the Anthropic API key is absent. Callers treat
@@ -30,49 +28,41 @@ type sourceFetcher interface {
 	Fetch(ctx context.Context, url string) (string, error)
 }
 
-// Builder runs digest.build: it reads the active Sources, fetches each, asks the
-// Anthropic API for one Markdown summary, and upserts the dated Digest row. This
-// is the run-to-completion work — invoked inline by the worker (DIGEST_MODE=local)
-// or as the cmd/digest entrypoint inside a Fargate task (fargate). See ADR 0013.
-type Builder struct {
-	ent       *ent.Client
+// ContentBuilder does the off-box half of digest.build: it fetches the given
+// Sources and asks the Anthropic API for one Markdown summary, returning a Result.
+// It never touches Postgres, so it runs inside the Fargate task with no database
+// access (ADR 0013, Shape B). The worker persists the Result.
+type ContentBuilder struct {
 	anthropic *Anthropic
 	fetcher   sourceFetcher
 }
 
-// NewBuilder wires the builder. The Anthropic client and Fetcher are cheap to
-// construct (no network), so this never fails.
-func NewBuilder(entClient *ent.Client, anthropic *Anthropic, fetcher sourceFetcher) *Builder {
-	return &Builder{ent: entClient, anthropic: anthropic, fetcher: fetcher}
+// NewContentBuilder wires the content builder. The Anthropic client and Fetcher are
+// cheap to construct (no network), so this never fails.
+func NewContentBuilder(anthropic *Anthropic, fetcher sourceFetcher) *ContentBuilder {
+	return &ContentBuilder{anthropic: anthropic, fetcher: fetcher}
 }
 
 // Configured reports whether a summary can be produced (Anthropic key present).
-func (b *Builder) Configured() bool { return b.anthropic.Configured() }
+func (b *ContentBuilder) Configured() bool { return b.anthropic.Configured() }
 
-// Run builds the Digest for date (normalized to UTC midnight). It is idempotent by
-// date: a redelivery upserts the same day's row. Returns ErrNotConfigured when the
-// Anthropic key is absent (callers ack). A fetch/summarize failure writes a failed
-// Digest row (best effort) and returns the error so the run fails (exit non-zero /
-// SQS redelivery), the schedule being the backstop.
-func (b *Builder) Run(ctx context.Context, date time.Time) error {
+// Build fetches sources, summarizes them, and returns the Result for date
+// (normalized to UTC midnight). It expects at least one source (callers ack early
+// when there are none). Returns:
+//   - (completed Result, nil) on success;
+//   - (failed Result, err) on a content failure (all fetches failed, or the
+//     summarize call errored) so the caller both persists the failure and signals
+//     a retry (task exits non-zero / SQS redelivery, the schedule being the
+//     backstop);
+//   - (nil, ErrNotConfigured) when the Anthropic key is absent (caller acks).
+func (b *ContentBuilder) Build(ctx context.Context, date time.Time, sources []SourceInput) (*Result, error) {
 	day := NormalizeDate(date)
-	log := slog.With("date", day.Format("2006-01-02"))
+	dayStr := day.Format("2006-01-02")
+	log := slog.With("date", dayStr)
 
 	if !b.Configured() {
 		log.Warn("digest: anthropic not configured; skipping")
-		return ErrNotConfigured
-	}
-
-	sources, err := b.ent.Source.Query().
-		Where(source.ActiveEQ(true)).
-		Order(ent.Asc(source.FieldID)).
-		All(ctx)
-	if err != nil {
-		return fmt.Errorf("digest: load sources: %w", err)
-	}
-	if len(sources) == 0 {
-		log.Warn("digest: no active sources; nothing to build")
-		return nil
+		return nil, ErrNotConfigured
 	}
 
 	var doc strings.Builder
@@ -89,12 +79,10 @@ func (b *Builder) Run(ctx context.Context, date time.Time) error {
 		fmt.Fprintf(&doc, "## Source: %s (%s, %s)\n\n%s\n\n", s.Name, s.Type, s.URL, content)
 	}
 
-	// Every source failed: nothing to summarize. Record the failure and let the run
-	// fail so it is retried.
+	// Every source failed: nothing to summarize. Fail so it is retried.
 	if fetched == 0 {
 		runErr := fmt.Errorf("digest: all %d sources failed to fetch", len(sources))
-		b.writeFailed(ctx, day, runErr)
-		return runErr
+		return &Result{Date: dayStr, Status: StatusFailed, Error: runErr.Error()}, runErr
 	}
 	if len(failures) > 0 {
 		fmt.Fprintf(&doc, "## Sources that could not be fetched\n\n%s\n", strings.Join(failures, "\n"))
@@ -102,46 +90,69 @@ func (b *Builder) Run(ctx context.Context, date time.Time) error {
 
 	summary, err := b.anthropic.Summarize(ctx, systemPrompt, doc.String())
 	if err != nil {
-		b.writeFailed(ctx, day, err)
-		return err
+		return &Result{Date: dayStr, Status: StatusFailed, Error: err.Error()}, err
 	}
 	if summary.Truncated {
 		log.Warn("digest: summary truncated at max_tokens")
 	}
 
-	if err := b.ent.Digest.Create().
-		SetDate(day).
-		SetStatus(entdigest.StatusCompleted).
-		SetContent(summary.Text).
-		SetModel(summary.Model).
-		SetError("").
-		OnConflictColumns(entdigest.FieldDate).
-		UpdateNewValues().
-		Exec(ctx); err != nil {
-		return fmt.Errorf("digest: upsert digest: %w", err)
-	}
-
 	log.Info("digest: built",
 		"sources", fetched, "failed_sources", len(failures), "model", summary.Model,
 		"input_tokens", summary.InputTokens, "output_tokens", summary.OutputTokens)
-	return nil
+	return &Result{
+		Date:         dayStr,
+		Status:       StatusCompleted,
+		Content:      summary.Text,
+		Model:        summary.Model,
+		InputTokens:  summary.InputTokens,
+		OutputTokens: summary.OutputTokens,
+		Truncated:    summary.Truncated,
+	}, nil
 }
 
-// writeFailed records a failed Digest for the day (best effort). It uses ON CONFLICT
-// DO NOTHING, NOT UpdateNewValues: a redelivery of a date that already succeeded can
-// hit a transient error, and demoting an existing completed digest back to failed
-// would destroy a good day's briefing. So a failed row is only inserted when no row
-// exists for the date yet; an existing completed (or failed) row is left untouched.
-// The success path still upserts (UpdateNewValues), so a genuine failed->completed
-// re-run is self-healing.
-func (b *Builder) writeFailed(ctx context.Context, day time.Time, cause error) {
-	if err := b.ent.Digest.Create().
-		SetDate(day).
-		SetStatus(entdigest.StatusFailed).
-		SetError(cause.Error()).
-		OnConflictColumns(entdigest.FieldDate).
-		DoNothing().
-		Exec(ctx); err != nil {
-		slog.Warn("digest: recording failed digest", "date", day.Format("2006-01-02"), "err", err)
+// Builder runs the whole digest.build inline in one process: it reads the active
+// Sources from Postgres, builds the content, and persists the row. This is the
+// DIGEST_MODE=local path used in dev (no AWS). In prod (DIGEST_MODE=fargate) the
+// worker splits the two halves: the Fargate task runs ContentBuilder, the worker
+// runs Persist. See ADR 0013.
+type Builder struct {
+	ent     *ent.Client
+	content *ContentBuilder
+}
+
+// NewBuilder wires the inline builder.
+func NewBuilder(entClient *ent.Client, anthropic *Anthropic, fetcher sourceFetcher) *Builder {
+	return &Builder{ent: entClient, content: NewContentBuilder(anthropic, fetcher)}
+}
+
+// Configured reports whether a summary can be produced (Anthropic key present).
+func (b *Builder) Configured() bool { return b.content.Configured() }
+
+// Run builds and persists the Digest for date, idempotent by date. Returns
+// ErrNotConfigured when the Anthropic key is absent (callers ack). A content
+// failure persists a failed row (best effort, no-demote) and returns the error.
+func (b *Builder) Run(ctx context.Context, date time.Time) error {
+	// Detect not-configured first (before any DB work), so a blank key is a clean ack
+	// regardless of whether any Sources exist.
+	if !b.content.Configured() {
+		slog.Warn("digest: anthropic not configured; skipping", "date", NormalizeDate(date).Format("2006-01-02"))
+		return ErrNotConfigured
 	}
+
+	sources, err := ActiveSourceInputs(ctx, b.ent)
+	if err != nil {
+		return err
+	}
+	if len(sources) == 0 {
+		slog.Warn("digest: no active sources; nothing to build", "date", NormalizeDate(date).Format("2006-01-02"))
+		return nil
+	}
+
+	result, buildErr := b.content.Build(ctx, date, sources)
+	if result != nil {
+		if perr := Persist(ctx, b.ent, result); perr != nil {
+			return perr
+		}
+	}
+	return buildErr // nil on success; the content error on a persisted failure (retry)
 }

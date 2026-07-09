@@ -67,6 +67,36 @@ resource "aws_s3_bucket_lifecycle_configuration" "backups" {
   }
 }
 
+# Digest result objects are ephemeral (ADR 13, Shape B): the Fargate task writes
+# one, the worker reads it and deletes it. This rule is only a backstop for orphans
+# from a crashed run — it expires objects under digest_result_prefix (and, on this
+# versioned bucket, their noncurrent versions and delete markers) after a week.
+# Scoped by prefix so the project images elsewhere in the assets bucket are untouched.
+resource "aws_s3_bucket_lifecycle_configuration" "assets" {
+  bucket = aws_s3_bucket.assets.id
+
+  rule {
+    id     = "expire-digest-results"
+    status = "Enabled"
+
+    filter {
+      prefix = var.digest_result_prefix
+    }
+
+    expiration {
+      days = 7
+    }
+
+    noncurrent_version_expiration {
+      noncurrent_days = 1
+    }
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 1
+    }
+  }
+}
+
 # The shared jobs queue (ADR 13). Despite the -contact-notify name (kept to
 # avoid a destructive rename), it now carries every Job type: contact.notify
 # (event-triggered, run inline on the box) and digest.build (scheduled, run on

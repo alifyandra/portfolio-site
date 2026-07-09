@@ -1,27 +1,25 @@
-// Command digest builds the dated Digest and exits: it is the run-to-completion
-// Fargate task entrypoint for the digest.build Job (ADR 0013). It reads the active
-// Sources, summarizes them with the Anthropic API, upserts the Digest for the
-// target date, and exits 0 on success / non-zero on any failure (the worker acks
-// SQS only on exit 0). The target date comes from DIGEST_DATE (RFC3339 or
-// YYYY-MM-DD), defaulting to today in UTC.
+// Command digest is the run-to-completion Fargate task for the digest.build Job
+// (ADR 0013, Shape B). It receives the target date, the active Sources, and an S3
+// result key as container-env overrides from the worker; fetches each Source,
+// summarizes them with the Anthropic API, and writes the Result as JSON to S3. It
+// never touches Postgres — the worker reads the Result back and writes the Digest
+// row. Exit 0 on a completed result, non-zero on a content or infrastructure
+// failure (the worker acks SQS only on exit 0).
 package main
 
 import (
 	"context"
-	"database/sql"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
 
-	"entgo.io/ent/dialect"
-	entsql "entgo.io/ent/dialect/sql"
-	_ "github.com/jackc/pgx/v5/stdlib" // register the "pgx" database/sql driver
-
-	"github.com/alifyandra/portfolio-site/backend/ent"
 	"github.com/alifyandra/portfolio-site/backend/internal/config"
 	"github.com/alifyandra/portfolio-site/backend/internal/digest"
+	"github.com/alifyandra/portfolio-site/backend/internal/storage"
 )
 
 func main() {
@@ -37,36 +35,61 @@ func run() error {
 		return err
 	}
 
+	// Inputs arrive as container-env overrides set by the worker at RunTask.
 	date, err := digest.ParseDate(os.Getenv("DIGEST_DATE"))
 	if err != nil {
 		return err
+	}
+	resultKey := os.Getenv("DIGEST_RESULT_KEY")
+	if resultKey == "" {
+		return fmt.Errorf("digest: DIGEST_RESULT_KEY is required (set by the worker)")
+	}
+	var sources []digest.SourceInput
+	if raw := os.Getenv("DIGEST_SOURCES"); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &sources); err != nil {
+			return fmt.Errorf("digest: bad DIGEST_SOURCES: %w", err)
+		}
+	}
+	if len(sources) == 0 {
+		// The worker only launches when there is work, so this is anomalous. Exit 0
+		// (nothing to summarize, nothing to write) rather than fail-loop.
+		slog.Warn("digest: no sources provided; nothing to build")
+		return nil
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// Open Ent directly (pgx stdlib + entsql.OpenDB, never ent.Open): this task only
-	// needs Postgres + Anthropic, not the full app (Redis/S3/SQS). Schema migration
-	// is owned by the API, so we deliberately do NOT auto-migrate here.
-	db, err := sql.Open("pgx", cfg.DatabaseURL)
+	store, err := storage.New(ctx, cfg)
 	if err != nil {
 		return err
 	}
-	entClient := ent.NewClient(ent.Driver(entsql.OpenDB(dialect.Postgres, db)))
-	defer entClient.Close()
 
-	builder := digest.NewBuilder(
-		entClient,
+	builder := digest.NewContentBuilder(
 		digest.NewAnthropic(cfg.AnthropicAPIKey, cfg.DigestModel, cfg.DigestMaxTokens),
 		digest.NewFetcher(),
 	)
 
-	err = builder.Run(ctx, date)
-	if errors.Is(err, digest.ErrNotConfigured) {
-		// No Anthropic key: nothing to do. Exit cleanly so the Job is acked rather
-		// than redelivered forever (mirrors the worker's contact.notify handling).
-		slog.Warn("digest: anthropic not configured; exiting 0")
+	result, buildErr := builder.Build(ctx, date, sources)
+	if errors.Is(buildErr, digest.ErrNotConfigured) {
+		// No Anthropic key: exit 0 without writing a result. The worker reads no
+		// object and acks (the degrade-without-creds pattern, ADR 0013).
+		slog.Warn("digest: anthropic not configured; exiting 0 without a result")
 		return nil
 	}
-	return err
+
+	// Build returns a Result even on a content failure (status=failed): write it so
+	// the worker records the failure reason, then propagate buildErr as a non-zero
+	// exit so the worker leaves the message for redelivery.
+	if result != nil {
+		body, err := json.Marshal(result)
+		if err != nil {
+			return fmt.Errorf("digest: marshal result: %w", err)
+		}
+		if err := store.PutObject(ctx, resultKey, "application/json", body); err != nil {
+			return fmt.Errorf("digest: write result to s3: %w", err)
+		}
+		slog.Info("digest: wrote result to s3", "key", resultKey, "status", result.Status)
+	}
+	return buildErr
 }

@@ -119,6 +119,12 @@ variable "digest_max_tokens" {
   default     = "4096"
 }
 
+variable "digest_result_prefix" {
+  description = "S3 key prefix (in the assets bucket) the digest Fargate task writes its Result JSON under and the worker reads back (ADR 13, Shape B). Trailing slash. A lifecycle rule expires objects here; the worker also deletes each after reading. Matches the backend config default."
+  type        = string
+  default     = "digest-results/"
+}
+
 variable "jobs_visibility_timeout_seconds" {
   description = "SQS visibility timeout on the shared jobs queue. MUST exceed the digest launcher's hard runtime cap (maxRunToCompletion = 15m / 900s in internal/fargate) so a slow run is not redelivered mid-flight (ADR 13). Set above 900s to leave poll/teardown margin. Also affects contact.notify (fast, so harmless)."
   type        = number

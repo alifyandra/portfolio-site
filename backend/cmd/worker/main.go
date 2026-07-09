@@ -11,6 +11,9 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/alifyandra/portfolio-site/backend/internal/bootstrap"
 	"github.com/alifyandra/portfolio-site/backend/internal/config"
@@ -18,6 +21,7 @@ import (
 	"github.com/alifyandra/portfolio-site/backend/internal/email"
 	"github.com/alifyandra/portfolio-site/backend/internal/queue"
 	"github.com/alifyandra/portfolio-site/backend/internal/server"
+	"github.com/alifyandra/portfolio-site/backend/internal/storage"
 )
 
 func main() {
@@ -135,11 +139,7 @@ func handleDigestBuild(ctx context.Context, deps *server.Deps, job queue.Job) er
 			slog.Error("digest.build in fargate mode but launcher is nil; skipping")
 			return nil
 		}
-		// Pass the resolved day so the task is not subject to a midnight-boundary
-		// race: the worker's clock decides the day, not the task's.
-		return deps.DigestLauncher.RunToCompletion(ctx, map[string]string{
-			"DIGEST_DATE": date.Format("2006-01-02"),
-		})
+		return runDigestFargate(ctx, deps, date)
 	}
 
 	// local: run inline. An unconfigured Anthropic key is an ack (nothing to do),
@@ -149,4 +149,85 @@ func handleDigestBuild(ctx context.Context, deps *server.Deps, job queue.Job) er
 		return nil
 	}
 	return err
+}
+
+// runDigestFargate is the DIGEST_MODE=fargate path (ADR 0013, Shape B): the worker
+// reads the active Sources on-box, launches the Fargate task to fetch + summarize
+// them off-box (the task writes its Result JSON to S3 and never touches Postgres),
+// then reads that Result back and writes the Digest row itself. The worker owns the
+// database; the task owns only the compute.
+func runDigestFargate(ctx context.Context, deps *server.Deps, date time.Time) error {
+	day := date.Format("2006-01-02")
+
+	sources, err := digest.ActiveSourceInputs(ctx, deps.Ent)
+	if err != nil {
+		return err
+	}
+	if len(sources) == 0 {
+		slog.Warn("digest: no active sources; nothing to build", "date", day)
+		return nil // ack: nothing to do
+	}
+	srcJSON, err := json.Marshal(sources)
+	if err != nil {
+		slog.Error("digest: marshal sources", "err", err)
+		return nil // unrecoverable (our own data) — ack rather than loop
+	}
+
+	// Unique per run so a crashed prior run for the same day can never leave a stale
+	// Result the worker would misread; the worker deletes it after reading and an S3
+	// lifecycle rule expires any orphan (see digest.tf).
+	key := deps.Config.DigestResultPrefix + day + "-" + uuid.NewString() + ".json"
+
+	// Pass the resolved day (worker clock decides, avoiding a task midnight race), the
+	// Sources, and the result key as container-env overrides on the task.
+	runErr := deps.DigestLauncher.RunToCompletion(ctx, map[string]string{
+		"DIGEST_DATE":       day,
+		"DIGEST_SOURCES":    string(srcJSON),
+		"DIGEST_RESULT_KEY": key,
+	})
+
+	// The task writes its Result before exiting and RunToCompletion blocks until the
+	// task STOPs, so the object (if any) is present now. Read it regardless of exit
+	// code: a content failure exits non-zero but still records a failure reason.
+	result := readDigestResult(ctx, deps.Storage, key)
+	_ = deps.Storage.DeleteObject(ctx, key) // best-effort cleanup; lifecycle backstops
+
+	if runErr != nil {
+		// Task failed (content failure -> non-zero exit, or an infra failure). Persist
+		// the failed Result if the task wrote one (no-demote), then leave the message
+		// for redelivery; the daily schedule is the backstop.
+		if result != nil {
+			if perr := digest.Persist(ctx, deps.Ent, result); perr != nil {
+				slog.Error("digest: persist failed result", "date", day, "err", perr)
+			}
+		}
+		return runErr
+	}
+
+	// Clean exit: expect a completed Result. A missing object here is anomalous
+	// (task exited 0 but produced nothing) — fail so it redelivers rather than
+	// silently acking an empty run.
+	if result == nil {
+		return fmt.Errorf("digest: task for %s exited 0 but wrote no result to %s", day, key)
+	}
+	return digest.Persist(ctx, deps.Ent, result)
+}
+
+// readDigestResult fetches and decodes the task's Result from S3. A missing object
+// (the task wrote nothing, e.g. Anthropic not configured) or any read/decode error
+// yields nil: the caller decides what a nil means given the task's exit code.
+func readDigestResult(ctx context.Context, store *storage.Store, key string) *digest.Result {
+	data, err := store.GetObject(ctx, key)
+	if err != nil {
+		if !errors.Is(err, storage.ErrObjectNotFound) {
+			slog.Error("digest: read result from s3", "key", key, "err", err)
+		}
+		return nil
+	}
+	var r digest.Result
+	if err := json.Unmarshal(data, &r); err != nil {
+		slog.Error("digest: decode result from s3", "key", key, "err", err)
+		return nil
+	}
+	return &r
 }

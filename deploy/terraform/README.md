@@ -253,26 +253,32 @@ push) is a later follow-up.
 
 ## Digest / scheduled jobs (Fargate) deploy
 
-The digest platform (ADR 13) runs a daily scheduled job: EventBridge Scheduler enqueues
-a `digest.build` message onto the shared jobs queue, the on-box worker consumes it and
-launches the `cmd/digest` container as a run-to-completion Fargate task, which fetches
-public Sources, summarizes them with the Anthropic API, writes a Digest row, and exits.
-The Terraform is in `digest.tf` (ECR repo, log group, arm64 task definition, egress-only
-SG, exec/task IAM roles, the instance-role RunTask additions, the SQS DLQ + redrive on the
-shared queue in `storage.tf`, and the scheduler + its role). It reuses the WhatsApp ECS
-cluster, VPC, and subnets. Local dev is unchanged.
+The digest platform (ADR 13, Shape B) runs a daily scheduled job: EventBridge Scheduler enqueues
+a `digest.build` message onto the shared jobs queue, the on-box worker consumes it, reads the
+active Sources from Postgres, and launches the `cmd/digest` container as a run-to-completion
+Fargate task. The task fetches those Sources, summarizes them with the Anthropic API, and writes
+its result as JSON to S3 (under `digest_result_prefix` in the assets bucket), then exits. The
+worker reads that result back and writes the Digest row itself, so the task never touches Postgres
+and nothing off-box reaches the database. The Terraform is in `digest.tf` (ECR repo, log group,
+arm64 task definition, egress-only SG, exec/task IAM roles including the task's S3 `PutObject`, the
+instance-role RunTask additions, the SQS DLQ + redrive on the shared queue in `storage.tf`, and the
+scheduler + its role). It reuses the WhatsApp ECS cluster, VPC, and subnets. Local dev is unchanged
+(`DIGEST_MODE=local` runs the whole job inline in the worker).
 
-This is a gated slice, applied later by the maintainer (same shape as WhatsApp Slice E).
-Do the steps in order.
+This is a gated slice, applied later by the maintainer (same shape as WhatsApp Slice E). Because
+the task writes to S3 rather than to on-box Postgres, this apply is purely additive: it does not
+touch `docker-compose.prod.yml` and so does not replace the app instance. Do the steps in order.
 
 1. **Apply the infra.** Dispatch the `Terraform` workflow (gated `plan-dispatch` -> `apply`)
    or apply locally. This creates the ECR repo `portfolio-digest`, the task definition, the
-   log group, the digest SG, the IAM, the `portfolio-jobs-dlq` queue, and the (disabled)
-   schedule, raises the jobs-queue visibility timeout to `jobs_visibility_timeout_seconds`
-   (default 1200s, above the launcher's 15m/900s cap), and sets `DIGEST_MODE=fargate`
-   plus `DIGEST_ECS_CLUSTER` / `DIGEST_TASK_DEFINITION` / `DIGEST_SUBNET_IDS` /
-   `DIGEST_SECURITY_GROUP_ID` / `DIGEST_MODEL` / `DIGEST_MAX_TOKENS` in SSM. The schedule
-   stays off until step 6 (`enable_digest_schedule` defaults to `false`).
+   log group, the digest SG, the IAM (including the task's S3 `PutObject` on `digest-results/`),
+   the `portfolio-jobs-dlq` queue, the assets-bucket lifecycle rule that expires stray result
+   objects, and the (disabled) schedule; raises the jobs-queue visibility timeout to
+   `jobs_visibility_timeout_seconds` (default 1200s, above the launcher's 15m/900s cap); and sets
+   `DIGEST_MODE=fargate` plus `DIGEST_ECS_CLUSTER` / `DIGEST_TASK_DEFINITION` / `DIGEST_SUBNET_IDS` /
+   `DIGEST_SECURITY_GROUP_ID` / `DIGEST_MODEL` / `DIGEST_MAX_TOKENS` / `DIGEST_RESULT_PREFIX` in SSM.
+   Read the plan and confirm there is no `aws_instance.app` replacement before approving the apply.
+   The schedule stays off until step 4 (`enable_digest_schedule` defaults to `false`).
 
 2. **Seed the Anthropic API key.** `ANTHROPIC_API_KEY` is a SecureString placeholder until
    seeded, so digest runs are inert:
@@ -282,41 +288,7 @@ Do the steps in order.
      --overwrite --region ap-southeast-2 --value "sk-ant-..."
    ```
 
-3. **Seed the digest DATABASE_URL with the box private IP.** The digest task reaches Postgres
-   over the box's private IP, not the docker-network name `postgres`, so it needs its own DSN.
-   Read the private IP from Terraform output and bake it in (reuse the same
-   `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` as the app's `DATABASE_URL`):
-
-   ```bash
-   IP=$(terraform -chdir=path/to/portfolio-site/deploy/terraform output -raw app_private_ip)
-   aws ssm put-parameter --name /portfolio/env/DIGEST_DATABASE_URL --type SecureString \
-     --overwrite --region ap-southeast-2 \
-     --value "postgres://portfolio:<POSTGRES_PASSWORD>@$IP:5432/portfolio?sslmode=disable"
-   ```
-
-   The private IP is stable across reboots but changes if the box is replaced (an AMI bump or
-   a `user_data` change). Re-seed this param after any box replacement.
-
-4. **Confirm on-box Postgres is reachable.** `docker-compose.prod.yml` publishes Postgres 5432
-   bound to `${POSTGRES_HOST_BIND:-0.0.0.0}`, so the redeploy in step 6 exposes it on the box.
-   The web SG admits inbound 5432 only from the digest SG, so the default `0.0.0.0` bind is not
-   internet-exposed. To bind the private interface only, seed the box private IP first (it can
-   only be a manual step, not Terraform-managed: the instance depends on the env config, so its
-   own IP cannot be fed back into it without a cycle):
-
-   ```bash
-   IP=$(terraform -chdir=path/to/portfolio-site/deploy/terraform output -raw app_private_ip)
-   aws ssm put-parameter --name /portfolio/env/POSTGRES_HOST_BIND --type String \
-     --overwrite --region ap-southeast-2 --value "$IP"
-   ```
-
-   Validate from the box over SSM Session Manager after the redeploy:
-
-   ```bash
-   ss -tlnp | grep 5432          # bound to 0.0.0.0 (or the box private IP if seeded), not just 127.0.0.1
-   ```
-
-5. **Build + push the arm64 image to ECR** (the task def pins `arm64`, so the image must be arm64).
+3. **Build + push the arm64 image to ECR** (the task def pins `arm64`, so the image must be arm64).
    The digest binary ships in the shared `backend/Dockerfile` (it builds `api`/`worker`/`seed`/`digest`
    side by side); the task def selects it with `command = ["digest"]`, so push that same image to the
    digest ECR repo:
@@ -330,13 +302,13 @@ Do the steps in order.
    docker buildx build --platform linux/arm64 -t "$REPO:latest" --push -f backend/Dockerfile backend
    ```
 
-6. **Redeploy the backend, then enable the schedule.** `deploy-backend.yml` rebuilds `.env` from
-   SSM on every deploy, so a redeploy picks up `DIGEST_MODE=fargate` and the seeded secrets. Once
-   the manual test run (step 7) is green, enable the daily cron by dispatching the `Terraform`
+4. **Redeploy the backend, then enable the schedule.** `deploy-backend.yml` rebuilds `.env` from
+   SSM on every deploy, so a redeploy picks up `DIGEST_MODE=fargate` and the `DIGEST_RESULT_PREFIX`.
+   Once the manual test run (step 5) is green, enable the daily cron by dispatching the `Terraform`
    workflow with `enable_digest_schedule = true` (or flip the default and reconcile, per the
    Cloudflare-cutover pattern above).
 
-7. **Trigger a manual test run.** Send one `digest.build` message to the shared queue and watch
+5. **Trigger a manual test run.** Send one `digest.build` message to the shared queue and watch
    the worker launch the task:
 
    ```bash
@@ -346,13 +318,16 @@ Do the steps in order.
    ```
 
    Confirm a Fargate task appears in the `portfolio-wa` cluster, its logs land in CloudWatch
-   `/ecs/portfolio-digest`, it exits 0, and a Digest row is written. A run that fails 3 times
-   lands in `portfolio-jobs-dlq`; inspect it with `aws sqs receive-message` on the DLQ URL.
+   `/ecs/portfolio-digest`, it exits 0, the worker reads the result from S3 and writes the Digest
+   row, and the result object is deleted. A run that fails 3 times lands in `portfolio-jobs-dlq`;
+   inspect it with `aws sqs receive-message` on the DLQ URL.
 
 Notes: the task runs in a public subnet with `assignPublicIp=ENABLED` (no NAT) so it can pull
-from ECR, read SSM, and reach `api.anthropic.com`. Retry is SQS redelivery (`maxReceiveCount`
-`jobs_max_receive_count`, default 3) then the DLQ; the daily schedule is the backstop. The jobs
-queue visibility timeout (`jobs_visibility_timeout_seconds`, default 1200s) sits above the digest
-launcher's 15m (900s) hard runtime cap so a slow run is never redelivered mid-flight, and applies to `contact.notify`
-too (harmless, it runs inline in well under a second). The first ECR push is manual; digest CI is
-a later follow-up.
+from ECR, read SSM, reach `api.anthropic.com`, and write to S3. Retry is SQS redelivery
+(`maxReceiveCount` `jobs_max_receive_count`, default 3) then the DLQ; the daily schedule is the
+backstop. A content failure (all Sources fail, or the summarize call errors) records a failed
+Digest row and redelivers; a clean run acks. The jobs queue visibility timeout
+(`jobs_visibility_timeout_seconds`, default 1200s) sits above the digest launcher's 15m (900s) hard
+runtime cap so a slow run is never redelivered mid-flight, and applies to `contact.notify` too
+(harmless, it runs inline in well under a second). The first ECR push is manual; digest CI is a
+later follow-up.
