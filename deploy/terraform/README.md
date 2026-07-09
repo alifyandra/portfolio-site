@@ -297,20 +297,24 @@ Do the steps in order.
    The private IP is stable across reboots but changes if the box is replaced (an AMI bump or
    a `user_data` change). Re-seed this param after any box replacement.
 
-4. **Confirm on-box Postgres listens on the private interface.** This is a runtime/host concern
-   Terraform cannot fully assert. The web SG already allows tcp/5432 from the digest SG, but the
-   `docker-compose.prod.yml` Postgres service has no host port mapping, so it is only reachable
-   on the docker bridge, not the box's private interface. Publish it before the first run, for
-   example by adding a `ports` mapping to the postgres service (`"5432:5432"`, or better the
-   private IP form `"<private-ip>:5432:5432"` so it is not bound on all interfaces) and
-   redeploying. Validate from the box over SSM Session Manager:
+4. **Confirm on-box Postgres is reachable.** `docker-compose.prod.yml` publishes Postgres 5432
+   bound to `${POSTGRES_HOST_BIND:-0.0.0.0}`, so the redeploy in step 6 exposes it on the box.
+   The web SG admits inbound 5432 only from the digest SG, so the default `0.0.0.0` bind is not
+   internet-exposed. To bind the private interface only, seed the box private IP first (it can
+   only be a manual step, not Terraform-managed: the instance depends on the env config, so its
+   own IP cannot be fed back into it without a cycle):
 
    ```bash
-   ss -tlnp | grep 5432          # postgres listening on 0.0.0.0:5432 or the private IP, not just 127.0.0.1
+   IP=$(terraform -chdir=path/to/portfolio-site/deploy/terraform output -raw app_private_ip)
+   aws ssm put-parameter --name /portfolio/env/POSTGRES_HOST_BIND --type String \
+     --overwrite --region ap-southeast-2 --value "$IP"
    ```
 
-   The SG restricts inbound 5432 to the digest SG regardless, so a `0.0.0.0` bind is not
-   internet-exposed, but the private-IP bind is the tighter choice.
+   Validate from the box over SSM Session Manager after the redeploy:
+
+   ```bash
+   ss -tlnp | grep 5432          # bound to 0.0.0.0 (or the box private IP if seeded), not just 127.0.0.1
+   ```
 
 5. **Build + push the arm64 image to ECR** (the task def pins `arm64`, so the image must be arm64).
    The digest binary ships in the shared `backend/Dockerfile` (it builds `api`/`worker`/`seed`/`digest`

@@ -11,6 +11,14 @@ services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
+    # Publish 5432 on the box so the off-box digest Fargate task can reach it
+    # (ADR 13; the app/worker still use the docker network name "postgres").
+    # Defaults to 0.0.0.0: inbound 5432 is gated by the web SG, which admits
+    # only the digest SG, so it is not internet-exposed. To bind the private
+    # interface only, seed POSTGRES_HOST_BIND with the box private IP in SSM
+    # (aws ssm put-parameter /portfolio/env/POSTGRES_HOST_BIND) and redeploy.
+    ports:
+      - "${POSTGRES_HOST_BIND:-0.0.0.0}:5432:5432"
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-portfolio}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
