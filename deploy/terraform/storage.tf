@@ -67,8 +67,34 @@ resource "aws_s3_bucket_lifecycle_configuration" "backups" {
   }
 }
 
+# The shared jobs queue (ADR 13). Despite the -contact-notify name (kept to
+# avoid a destructive rename), it now carries every Job type: contact.notify
+# (event-triggered, run inline on the box) and digest.build (scheduled, run on
+# Fargate). The worker dispatches by type.
 resource "aws_sqs_queue" "contact" {
-  name                       = "${var.project}-contact-notify"
-  message_retention_seconds  = 345600 # 4 days
-  visibility_timeout_seconds = 60
+  name                      = "${var.project}-contact-notify"
+  message_retention_seconds = 345600 # 4 days
+
+  # Must exceed the digest task's hard runtime cap so a slow run is never
+  # redelivered and duplicated mid-flight (ADR 13). The cap is ~600s (10 min),
+  # enforced by the worker via StopTask; visibility is set above it. Raising
+  # this from the old 60s also affects contact.notify redelivery timing —
+  # acceptable, since contact.notify runs inline in well under a second.
+  visibility_timeout_seconds = var.jobs_visibility_timeout_seconds
+
+  # Retry is SQS redelivery; after a small number of failed receives the message
+  # dead-letters (ADR 13). The schedule is a backstop: a dead-lettered digest is
+  # retried fresh by the next cron.
+  redrive_policy = jsonencode({
+    deadLetterTargetArn = aws_sqs_queue.jobs_dlq.arn
+    maxReceiveCount     = var.jobs_max_receive_count
+  })
+}
+
+# Dead-letter queue for poison job messages. Longer retention than the source so
+# there is time to inspect a failure before it expires. Not consumed by the
+# worker; a maintainer redrives or inspects it out-of-band (console/CLI).
+resource "aws_sqs_queue" "jobs_dlq" {
+  name                      = "${var.project}-jobs-dlq"
+  message_retention_seconds = 1209600 # 14 days
 }

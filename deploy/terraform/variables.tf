@@ -87,6 +87,50 @@ variable "backup_retention_days" {
   default     = 30
 }
 
+# --- Digest / scheduled jobs (ADR 13, see digest.tf) ---------------------------
+
+variable "enable_digest_schedule" {
+  description = "Enable the daily EventBridge Scheduler cron that enqueues digest.build. Default off: a gated slice enables it deliberately after the image is pushed and the secrets are seeded."
+  type        = bool
+  default     = false
+}
+
+variable "digest_schedule_expression" {
+  description = "Cron for the daily digest.build trigger (EventBridge Scheduler syntax). Default 18:00 UTC = ~04:00-05:00 Melbourne, off-peak."
+  type        = string
+  default     = "cron(0 18 * * ? *)"
+}
+
+variable "digest_schedule_timezone" {
+  description = "IANA timezone the digest cron is evaluated in."
+  type        = string
+  default     = "UTC"
+}
+
+variable "digest_model" {
+  description = "Anthropic model the digest task summarizes with (small/cheap by default to bound cost, ADR 13)."
+  type        = string
+  default     = "claude-haiku-4-5"
+}
+
+variable "digest_max_tokens" {
+  description = "Max output tokens per digest LLM call (cost bound, ADR 13). String: it is passed straight through as an env var. Matches the backend config default."
+  type        = string
+  default     = "4096"
+}
+
+variable "jobs_visibility_timeout_seconds" {
+  description = "SQS visibility timeout on the shared jobs queue. MUST exceed the digest launcher's hard runtime cap (maxRunToCompletion = 15m / 900s in internal/fargate) so a slow run is not redelivered mid-flight (ADR 13). Set above 900s to leave poll/teardown margin. Also affects contact.notify (fast, so harmless)."
+  type        = number
+  default     = 1200
+}
+
+variable "jobs_max_receive_count" {
+  description = "Receives before a job message dead-letters. Small, so poison messages fail fast to the DLQ; the daily schedule is the backstop for a dead-lettered digest (ADR 13)."
+  type        = number
+  default     = 3
+}
+
 # --- Cloudflare proxy cutover (two-step; see docs/security.md) -----------------
 # Default off = today's posture (grey-cloud api record, origin open to the
 # internet, Caddy runs ACME). Flip these on deliberately, in order, during the
