@@ -13,8 +13,11 @@ type Config struct {
 	Env  string `env:"APP_ENV" envDefault:"development"`
 	Port int    `env:"PORT" envDefault:"8080"`
 
-	// Postgres
-	DatabaseURL string `env:"DATABASE_URL,required"`
+	// Postgres. Not required at parse time: the run-to-completion digest Fargate
+	// task (cmd/digest) loads config but never opens the DB (ADR 0013, Shape B).
+	// The requirement is enforced where the DB is actually opened (bootstrap.New),
+	// which api and worker call and the digest task does not.
+	DatabaseURL string `env:"DATABASE_URL"`
 
 	// Redis (cache only — see ADR 0007)
 	RedisURL string `env:"REDIS_URL" envDefault:"redis://localhost:6379/0"`
