@@ -1,22 +1,34 @@
 'use client';
 
 // The Welcome (see CONTEXT.md): the post-sign-in moment. Mounted globally in
-// layout.tsx inside <Providers> so it has auth context. It runs at most once
-// per browser session and is pure UX — it never gates anything (the server
-// enforces Role independently).
+// layout.tsx inside <Providers> so it has auth context. It is pure UX — it
+// never gates anything (the server enforces Role independently).
 //
-// Kind is decided from server state at trigger time:
+// It greets only when the server's greeted_role is *behind* the user's current
+// situation, i.e. there is something new to acknowledge. A caught-up visitor
+// (greeted_role already covers the current role) is RETURNING and shows
+// nothing, so a cached session (opening the site in a new tab, a refresh, a
+// revisit) never replays the greeting. greeted_role is server-authoritative,
+// so this holds across tabs and devices without any client-side "shown" flag.
+//
+// The outcome is decided from server state when auth resolves. ONBOARD, NAMED,
+// and PROMOTED are the Kinds that render; RETURNING is not a Kind — it is the
+// no-op where the effect shows nothing (state stays null):
 //   ONBOARD    — never welcomed (greeted_role == null) AND no nickname yet:
 //                ask for a Nickname, then play the FULL greeting. Submit/skip
-//                PATCHes ack_welcome.
+//                PATCHes ack_welcome, settling to a silent RETURNING.
 //   NAMED      — never welcomed (greeted_role == null) but a nickname already
 //                exists (set on /account, or on another device where the ack
 //                did not land): do NOT re-ask. Play a SHORT greeting using the
-//                existing name and PATCH ack_welcome so it settles to RETURNING.
-//   PROMOTED   — greeted_role == 'member' and current role is friend/admin:
-//                play the FULL greeting (with the "you are my friend" beat),
-//                then PATCH ack_welcome so the celebration shows once.
-//   RETURNING  — otherwise: a SHORT greeting, no prompt, no PATCH.
+//                existing name and PATCH ack_welcome, settling to a silent
+//                RETURNING.
+//   PROMOTED   — current role outranks the role we last greeted at (a
+//                promotion, e.g. member→friend or friend→admin): play the FULL
+//                greeting (with the "you are my friend" beat), then PATCH
+//                ack_welcome so the celebration shows once.
+//   RETURNING  — otherwise (greeted_role already covers the current role): show
+//                nothing. This is the everyday cached-session case (new tab,
+//                refresh, revisit).
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
@@ -26,15 +38,19 @@ import {
   useUpdateCurrentUser,
   getGetCurrentUserQueryKey,
 } from '@/lib/api/generated';
-import { useAuth } from '@/lib/auth';
+import { useAuth, type Role } from '@/lib/auth';
 
-const SESSION_KEY = 'aliflabs:welcome:shown';
-
-type Kind = 'onboard' | 'named' | 'promoted' | 'returning';
+type Kind = 'onboard' | 'named' | 'promoted';
 type Phase = 'prompt' | 'greeting';
 // The whole Welcome is held in one state object so the decision effect makes a
 // single state write; null means nothing is showing.
 type WState = { kind: Kind; phase: Phase; name: string };
+
+// Access tiers ranked low→high (ADR 10: admin > friend > member). A promotion
+// is the current role outranking the role we last greeted at, so any upgrade
+// (member→friend, friend→admin, member→admin) is caught, not just member→*.
+const roleRank = (r: Role | null | undefined): number =>
+  r === 'admin' ? 2 : r === 'friend' ? 1 : 0;
 
 // Shared theme-aware overlay wash (palette glows over the page canvas). Uses
 // CSS vars so it reads right in both dark and light themes.
@@ -67,31 +83,20 @@ export function Welcome() {
   useEffect(() => {
     if (decidedRef.current) return;
     if (isLoading || !isAuthenticated || !user) return;
-
-    // Guard: at most once per browser session.
-    try {
-      if (sessionStorage.getItem(SESSION_KEY)) {
-        decidedRef.current = true;
-        return;
-      }
-    } catch {
-      /* sessionStorage unavailable (private mode) — fall through, show once */
-    }
     decidedRef.current = true;
-    try {
-      sessionStorage.setItem(SESSION_KEY, '1');
-    } catch {
-      /* ignore storage failures */
-    }
 
     const greeted = user.greeted_role;
     const hasNickname = Boolean(user.nickname);
     const display = user.nickname ?? user.name ?? '';
+    // A promotion is the current role outranking the role we last greeted at.
+    // Guard on greeted != null so this stands on its own (the never-greeted
+    // null cases are handled as ONBOARD/NAMED below, not here).
     const promoted =
-      greeted === 'member' &&
-      (user.role === 'friend' || user.role === 'admin');
+      greeted != null && roleRank(user.role) > roleRank(greeted);
 
-    let next: WState;
+    // Greet only when greeted_role is behind the current situation. A caught-up
+    // (RETURNING) user shows nothing, so cached loads never replay the greeting.
+    let next: WState | null = null;
     if (greeted == null && !hasNickname) {
       // Brand new: ask for a name, then the full greeting.
       next = { kind: 'onboard', phase: 'prompt', name: user.name ?? '' };
@@ -102,11 +107,13 @@ export function Welcome() {
       next = { kind: 'named', phase: 'greeting', name: display };
     } else if (promoted) {
       next = { kind: 'promoted', phase: 'greeting', name: display };
-    } else {
-      next = { kind: 'returning', phase: 'greeting', name: display };
     }
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setState(next);
+    // else RETURNING: greeted_role already covers this role — stay silent.
+
+    if (next) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setState(next);
+    }
   }, [isLoading, isAuthenticated, user]);
 
   const handleSubmit = (value: string) => {
