@@ -4,7 +4,7 @@
 # Pin the builder to the host (build) platform and cross-compile to the target
 # arch. CGO_ENABLED=0 is pure Go, so cross-compiling is fast and needs no QEMU
 # emulation for the build itself (the prod host is t4g.micro / arm64).
-FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.25.12-alpine AS builder
 RUN apk add --no-cache git
 WORKDIR /src
 
