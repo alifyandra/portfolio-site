@@ -75,11 +75,12 @@ resource "aws_sqs_queue" "contact" {
   name                      = "${var.project}-contact-notify"
   message_retention_seconds = 345600 # 4 days
 
-  # Must exceed the digest task's hard runtime cap so a slow run is never
-  # redelivered and duplicated mid-flight (ADR 13). The cap is ~600s (10 min),
-  # enforced by the worker via StopTask; visibility is set above it. Raising
-  # this from the old 60s also affects contact.notify redelivery timing —
-  # acceptable, since contact.notify runs inline in well under a second.
+  # Must exceed the digest launcher's hard runtime cap so a slow run is never
+  # redelivered and duplicated mid-flight (ADR 13). The cap is 15m/900s
+  # (maxRunToCompletion in internal/fargate), enforced by the worker via
+  # StopTask; visibility (default 1200s) is set above it. Raising this from the
+  # old 60s also affects contact.notify redelivery timing — acceptable, since
+  # contact.notify runs inline in well under a second.
   visibility_timeout_seconds = var.jobs_visibility_timeout_seconds
 
   # Retry is SQS redelivery; after a small number of failed receives the message
