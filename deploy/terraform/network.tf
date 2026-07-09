@@ -77,19 +77,10 @@ resource "aws_security_group" "web" {
     ipv6_cidr_blocks = var.lock_origin_to_cloudflare ? data.cloudflare_ip_ranges.cloudflare.ipv6_cidr_blocks : ["::/0"]
   }
 
-  # Postgres from the digest Fargate task only (ADR 13). The task connects to
-  # on-box Postgres over the box's private IP; this authorizes that inbound path
-  # by SG membership (no CIDR, so it stays inside the VPC). Runtime prerequisite:
-  # Postgres must be published on the box's private interface (docker-compose
-  # port mapping) — see deploy/terraform/README.md. No such rule exists for the
-  # WhatsApp sidecar, which never touches Postgres.
-  ingress {
-    description     = "Postgres from the digest task"
-    from_port       = 5432
-    to_port         = 5432
-    protocol        = "tcp"
-    security_groups = [aws_security_group.digest.id]
-  }
+  # No inbound Postgres rule: the digest task never touches the DB (ADR 13,
+  # Shape B). The Fargate task fetches + summarizes and writes its result to S3;
+  # the on-box worker reads that result and writes the Digest row over the docker
+  # network. Nothing off-box reaches Postgres.
 
   egress {
     description      = "All outbound"

@@ -112,3 +112,35 @@ relitigated later:
   (an HTTP fetch and an API call). Launching it on Fargate instead validates the
   run-to-completion launcher, the platform's new and unproven part, with the
   first slice, and the heavier future Jobs will not fit the micro anyway.
+
+## Amendment (2026-07-09): Shape B, the worker persists and the task writes to S3
+
+The original build had the Fargate task open Postgres directly (over the box's
+private IP) and write the Digest row itself. Wiring that up surfaced a landmine:
+the app host bakes `docker-compose.prod.yml` into its `user_data` with
+`user_data_replace_on_change = true`, and Postgres lives on the instance root
+volume. Publishing Postgres so an off-box task could reach it is a compose change,
+which changes `user_data`, which forces an instance replacement, which wipes the
+prod database (users, sessions, admin-console data). A gated `terraform apply`
+plan confirmed the replacement before anything was applied.
+
+So the data write moves to the worker. The task no longer touches Postgres:
+
+- The worker reads the active Sources on-box and passes them to the task as
+  RunTask container overrides (`DIGEST_SOURCES`), alongside `DIGEST_DATE` and a
+  per-run `DIGEST_RESULT_KEY`.
+- The task fetches those Sources, summarizes them, and writes its Result as JSON
+  to S3 under `digest_result_prefix` in the assets bucket. It needs only
+  `s3:PutObject` on that prefix, no database reach.
+- The worker blocks on the task exit (unchanged launcher), reads the Result back
+  from S3, and upserts the Digest row over the docker network (it already owns the
+  DB). It then deletes the result object; an S3 lifecycle rule expires any orphan.
+
+Retry and idempotency are unchanged: a content failure writes a failed row
+(ON CONFLICT DO NOTHING, never demoting a completed day) and leaves the message
+for redelivery, with the daily schedule as the backstop; a clean run acks. The
+gain is that the apply is now purely additive (no `docker-compose.prod.yml` change,
+no `aws_instance.app` replacement, no `5432` ingress on the web SG, no on-box
+Postgres exposure). The cost is one S3 round-trip per run and the worker holding
+the DB write, which is a good trade for a daily batch on a box that keeps state on
+its root volume.

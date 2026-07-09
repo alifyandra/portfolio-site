@@ -82,8 +82,9 @@ resource "aws_iam_role_policy_attachment" "digest_exec_managed" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
-# Resolve the SecureStrings injected via the container's secrets block:
-# ANTHROPIC_API_KEY (LLM key) and DIGEST_DATABASE_URL (on-box Postgres DSN).
+# Resolve the SecureString injected via the container's secrets block:
+# ANTHROPIC_API_KEY (the LLM key). The task takes no DB DSN — it never touches
+# Postgres (ADR 13, Shape B), it writes its result to S3 for the worker to persist.
 data "aws_iam_policy_document" "digest_exec_secret" {
   statement {
     sid     = "ReadDigestSecrets"
@@ -91,7 +92,6 @@ data "aws_iam_policy_document" "digest_exec_secret" {
     actions = ["ssm:GetParameters"]
     resources = [
       aws_ssm_parameter.secret["ANTHROPIC_API_KEY"].arn,
-      aws_ssm_parameter.secret["DIGEST_DATABASE_URL"].arn,
     ]
   }
 
@@ -116,12 +116,31 @@ resource "aws_iam_role_policy" "digest_exec_secret" {
   policy = data.aws_iam_policy_document.digest_exec_secret.json
 }
 
-# Task role: the identity of the digest process itself. It talks to Postgres
-# over the network and to api.anthropic.com over the internet, and makes no AWS
-# API calls, so it gets no policies (like wa_task) — least privilege.
+# Task role: the identity of the digest process itself. It fetches public Sources
+# and calls api.anthropic.com over the internet (no AWS API for those), and writes
+# its Result to S3 — so its only AWS permission is PutObject on the result prefix.
 resource "aws_iam_role" "digest_task" {
   name               = "${var.project}-digest-task"
   assume_role_policy = data.aws_iam_policy_document.ecs_tasks_assume.json
+}
+
+# S3 result channel (ADR 13, Shape B): the task writes its Result JSON under the
+# digest-results/ prefix of the assets bucket; the on-box worker reads and deletes
+# it (the instance role already has GetObject/DeleteObject on the assets bucket).
+# The task needs only PutObject on that prefix — least privilege, no DB reach.
+data "aws_iam_policy_document" "digest_task_s3" {
+  statement {
+    sid       = "PutDigestResult"
+    effect    = "Allow"
+    actions   = ["s3:PutObject"]
+    resources = ["${aws_s3_bucket.assets.arn}/${var.digest_result_prefix}*"]
+  }
+}
+
+resource "aws_iam_role_policy" "digest_task_s3" {
+  name   = "${var.project}-digest-task-s3"
+  role   = aws_iam_role.digest_task.id
+  policy = data.aws_iam_policy_document.digest_task_s3.json
 }
 
 # ---------------------------------------------------------------------------
@@ -130,9 +149,9 @@ resource "aws_iam_role" "digest_task" {
 
 # Egress-only: nobody dials the task (run-to-completion, no stream to connect
 # to), so no ingress. All out covers the ECR image pull, SSM secret resolution,
-# CloudWatch logs, api.anthropic.com, and the outbound connection to Postgres on
-# the box (inbound to the box is authorized by the 5432 rule on the web SG, see
-# network.tf). The task runs in a public subnet with a public IP (no NAT).
+# CloudWatch logs, api.anthropic.com, the public Source fetches, and the S3 PutObject
+# for the result. The task never connects to Postgres (ADR 13, Shape B). It runs in
+# a public subnet with a public IP (no NAT).
 resource "aws_security_group" "digest" {
   name        = "${var.project}-digest"
   description = "Digest task: no ingress, all egress."
@@ -179,23 +198,24 @@ resource "aws_ecs_task_definition" "digest" {
       # here; without this the task would run the image's default entrypoint.
       command = ["digest"]
 
-      # DIGEST_DATE is NOT baked here — the worker passes it as a RunTask
-      # container override at launch (idempotent-by-date upsert, ADR 13).
-      # DIGEST_MODEL / DIGEST_MAX_TOKENS are also mirrored into SSM env_config
-      # (see ssm.tf) so the worker can pass them as overrides if it prefers;
-      # baked here from the same variables so the two never drift.
+      # DIGEST_DATE, DIGEST_SOURCES, and DIGEST_RESULT_KEY are NOT baked here — the
+      # worker passes them as RunTask container overrides at launch (the date decided
+      # by the worker clock, the active Sources read on-box, and the per-run result
+      # key). DIGEST_MODEL / DIGEST_MAX_TOKENS are also mirrored into SSM env_config
+      # (see ssm.tf), baked here from the same variables so the two never drift.
+      # S3_BUCKET / AWS_REGION let the task construct its S3 client to write the
+      # result (ADR 13, Shape B).
       environment = [
         { name = "DIGEST_MODEL", value = var.digest_model },
         { name = "DIGEST_MAX_TOKENS", value = var.digest_max_tokens },
+        { name = "S3_BUCKET", value = aws_s3_bucket.assets.bucket },
+        { name = "AWS_REGION", value = var.aws_region },
       ]
 
-      # DATABASE_URL points at the box's PRIVATE IP (not the docker-network name
-      # "postgres"), so it can't reuse the app's DATABASE_URL secret. It comes
-      # from a dedicated SecureString the maintainer seeds with the box IP baked
-      # in (see the README runbook). ANTHROPIC_API_KEY is the LLM key.
+      # ANTHROPIC_API_KEY is the LLM key. No DB secret: the task never touches
+      # Postgres (ADR 13, Shape B) — it writes its result to S3 for the worker.
       secrets = [
         { name = "ANTHROPIC_API_KEY", valueFrom = aws_ssm_parameter.secret["ANTHROPIC_API_KEY"].arn },
-        { name = "DATABASE_URL", valueFrom = aws_ssm_parameter.secret["DIGEST_DATABASE_URL"].arn },
       ]
 
       logConfiguration = {

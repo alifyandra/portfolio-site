@@ -1,15 +1,23 @@
 package storage
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"time"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 
 	appconfig "github.com/alifyandra/portfolio-site/backend/internal/config"
 )
+
+// ErrObjectNotFound is returned by GetObject when the key does not exist. The
+// digest worker treats it as "the task produced no result" (see ADR 0013).
+var ErrObjectNotFound = errors.New("storage: object not found")
 
 // Store wraps an S3 client for portfolio asset storage (project images, etc).
 type Store struct {
@@ -33,6 +41,58 @@ func New(ctx context.Context, cfg *appconfig.Config) (*Store, error) {
 	})
 
 	return &Store{client: client, bucket: cfg.S3Bucket}, nil
+}
+
+// PutObject writes body to key with the given content type. Used server-side (the
+// digest Fargate task writes its Result here), distinct from the presigned-URL flow
+// used for browser uploads.
+func (s *Store) PutObject(ctx context.Context, key, contentType string, body []byte) error {
+	_, err := s.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:      &s.bucket,
+		Key:         &key,
+		Body:        bytes.NewReader(body),
+		ContentType: &contentType,
+	})
+	if err != nil {
+		return fmt.Errorf("put object %q: %w", key, err)
+	}
+	return nil
+}
+
+// GetObject reads the object at key. Returns ErrObjectNotFound if it does not
+// exist, so callers can distinguish "no result yet" from a real S3 error.
+func (s *Store) GetObject(ctx context.Context, key string) ([]byte, error) {
+	out, err := s.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: &s.bucket,
+		Key:    &key,
+	})
+	if err != nil {
+		var nsk *s3types.NoSuchKey
+		var nf *s3types.NotFound
+		if errors.As(err, &nsk) || errors.As(err, &nf) {
+			return nil, ErrObjectNotFound
+		}
+		return nil, fmt.Errorf("get object %q: %w", key, err)
+	}
+	defer out.Body.Close()
+	data, err := io.ReadAll(out.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read object %q: %w", key, err)
+	}
+	return data, nil
+}
+
+// DeleteObject removes the object at key. A missing key is not an error (S3 delete
+// is idempotent), so this is safe as best-effort cleanup.
+func (s *Store) DeleteObject(ctx context.Context, key string) error {
+	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: &s.bucket,
+		Key:    &key,
+	})
+	if err != nil {
+		return fmt.Errorf("delete object %q: %w", key, err)
+	}
+	return nil
 }
 
 // PresignGetURL returns a temporary URL to read an object by key.

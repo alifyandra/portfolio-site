@@ -150,6 +150,11 @@ type Config struct {
 	// NAT gateway: the ECS agent needs a public IP to pull the image from ECR and
 	// read the Anthropic key from SSM, or the task never starts.
 	DigestAssignPublicIP bool `env:"DIGEST_ASSIGN_PUBLIC_IP" envDefault:"true"`
+	// DigestResultPrefix is the S3 key prefix (in S3_BUCKET) the worker writes the
+	// per-run result key under. The Fargate task writes its Result JSON there and the
+	// worker reads it back to persist the Digest row (ADR 0013, Shape B). Trailing
+	// slash so keys concatenate cleanly.
+	DigestResultPrefix string `env:"DIGEST_RESULT_PREFIX" envDefault:"digest-results/"`
 }
 
 // Load reads and validates configuration from the environment.
