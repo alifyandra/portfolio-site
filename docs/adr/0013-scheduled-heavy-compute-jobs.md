@@ -144,3 +144,67 @@ no `aws_instance.app` replacement, no `5432` ingress on the web SG, no on-box
 Postgres exposure). The cost is one S3 round-trip per run and the worker holding
 the DB write, which is a good trade for a daily batch on a box that keeps state on
 its root volume.
+
+## Amendment (2026-07-10): the Batch API, submit then collect
+
+The synchronous Messages call is replaced, in prod, by the Anthropic Message
+Batches API, which prices all tokens at 50% of the standard rate. One digest a day
+on a small model is only cents, so this is not about the digest's own bill; it is a
+platform decision. ADR 13 exists so future LLM work rides the same scheduled seam,
+and most of that work is not latency sensitive. Making batch the default for
+scheduled jobs means the discount compounds as the number of calls grows, which is
+where the saving actually lands.
+
+The catch is that a batch is asynchronous: you submit it and poll, and a batch
+usually ends within an hour (up to 24). That does not fit a run-to-completion
+Fargate task blocking for an hour, so the daily Job splits into two phases:
+
+- **Submit (`digest.build`).** Unchanged path up to the model call: the worker
+  reads Sources on-box and launches the Fargate task, which fetches them and, in
+  place of the synchronous summarize, submits a one-request Message Batch
+  (`custom_id` = the UTC day). It writes a *pending* Result carrying the batch id
+  to S3 and exits. The worker persists a pending Digest row (the `status` enum
+  already had `pending`; a new `batch_id` column holds the in-flight pointer).
+  Shape B is intact: the task still never touches Postgres.
+- **Collect (`digest.collect`).** A second, recurring EventBridge schedule (hourly)
+  enqueues a payload-free `digest.collect` Job. The worker runs it inline: it
+  queries pending digests, retrieves each batch, and on a batch that has ended
+  upserts the completed Digest (clearing `batch_id`) or, on a terminal batch
+  failure (errored/expired/canceled/refused/404), demotes the still-pending row to
+  failed and clears `batch_id` so it stops being polled. Collect runs inline, not
+  on Fargate, because it is trivial (two API GETs and a DB write), the box already
+  has `ANTHROPIC_API_KEY` (it is in `env_secrets`, so it is on the `.env` the box
+  rebuilds from SSM), and the box owns Postgres. It needs no new IAM: the existing
+  scheduler role already sends to the jobs queue. Collect drains every pending
+  digest each run, so a missed tick self-heals on the next one, and the daily
+  `digest.build` remains the backstop for a day left without a digest.
+
+Local dev keeps the synchronous `Summarize` path (`DIGEST_MODE=local`): immediate
+feedback matters more there than the discount, and a dev never wants to wait an
+hour for a digest. Only prod's fargate mode goes through the batch. Because local
+never creates pending rows, `digest.collect` is a safe no-op there.
+
+Idempotency is unchanged and still keyed by date. The pending insert is
+ON CONFLICT DO NOTHING, so a redelivery never demotes a completed day and, at
+worst, orphans a second batch that expires harmlessly; the completed upsert is
+last-writer-wins; the collect-side failure demote is guarded on `status = pending`
+so a race that already completed a day is never overwritten.
+
+The one visible behavior change: a day's digest now appears within about an hour of
+the 18:00 UTC run instead of within minutes. There is no reader UI yet (store
+only), so nobody is waiting on it.
+
+Rollout is self-healing in either order. Deploy the batch backend first and the old
+collect-less state simply leaves the day's digest pending until the collect
+schedule lands; apply the collect schedule against the old backend and the
+`digest.collect` messages hit the "no handler" branch and ack harmlessly. The clean
+sequence is: apply Terraform (adds the collect schedule, no new IAM), build and
+push the image, redeploy the backend.
+
+**Alternative rejected: drop Fargate for the digest entirely.** With the inference
+now async, the submit phase does no heavy compute (fetch two RSS feeds and POST a
+batch), so it could run inline on the micro and retire the digest task. Kept on
+Fargate anyway: it is zero-churn against the just-shipped Shape B machinery, and it
+keeps the platform's off-box-prep exemplar intact for future jobs whose input
+preparation genuinely is heavy. If that never materializes, collapsing submit to
+inline is a clean follow-up.
