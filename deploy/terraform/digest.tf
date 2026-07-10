@@ -1,14 +1,13 @@
-# Digest / scheduled heavy-compute jobs on the async platform (ADR 13). A daily
-# EventBridge Scheduler cron enqueues a {"type":"digest.build"} message onto the
-# shared jobs queue (aws_sqs_queue.contact, see storage.tf). The on-box worker
-# consumes it and launches this run-to-completion Fargate task (the cmd/digest
-# container), which fetches public Sources and submits them to the Anthropic
-# Message Batches API (50% cheaper; ADR 13 Batch API amendment), writes a pending
-# Result to S3, and exits. A second, recurring digest.collect cron (below) polls
-# the in-flight batches and persists the completed digests. Nothing runs (and
-# nothing bills) while idle, so these resources exist unconditionally; the
-# schedules are toggled with var.enable_digest_schedule /
-# var.enable_digest_collect_schedule.
+# Digest / scheduled heavy-compute jobs on the async platform (ADR 13, ADR 0014).
+# The daily digest.build EventBridge cron was RETIRED in the ADR 0014 cutover
+# (2026-07-10): the worker's in-process scheduler now enqueues digest.scrape (on
+# box) + digest.llm instead. digest.llm still launches this run-to-completion
+# Fargate task (the cmd/digest container) to submit the assembled doc to the
+# Anthropic Message Batches API (50% cheaper; ADR 13 Batch API amendment), writing
+# a pending Result to S3. The recurring digest.collect cron (below) stays on
+# EventBridge and polls the in-flight batches to persist the completed digests
+# (collect is not a schedulable pipeline stage). Nothing runs (and nothing bills)
+# while idle; the collect schedule is toggled with var.enable_digest_collect_schedule.
 #
 # This is the run-to-completion Fargate mode (ADR 13), distinct from the WhatsApp
 # run-and-connect mode (ADR 11). It REUSES the ECS cluster, VPC/networking, and
@@ -330,27 +329,9 @@ resource "aws_iam_role_policy" "scheduler" {
   policy = data.aws_iam_policy_document.scheduler.json
 }
 
-# The daily digest.build trigger. state is toggled by var.enable_digest_schedule
-# (default DISABLED for a gated slice) rather than count, so flipping it on/off
-# is an in-place update, not a resource churn. The Input is the Job envelope the
-# worker dispatches on (matches the contact.notify envelope shape).
-resource "aws_scheduler_schedule" "digest_build" {
-  name  = "${var.project}-digest-build"
-  state = var.enable_digest_schedule ? "ENABLED" : "DISABLED"
-
-  flexible_time_window {
-    mode = "OFF"
-  }
-
-  schedule_expression          = var.digest_schedule_expression
-  schedule_expression_timezone = var.digest_schedule_timezone
-
-  target {
-    arn      = aws_sqs_queue.contact.arn
-    role_arn = aws_iam_role.scheduler.arn
-    input    = jsonencode({ type = "digest.build", payload = {} })
-  }
-}
+# The daily digest.build trigger was removed in the ADR 0014 cutover (2026-07-10):
+# the in-process scheduler now drives digest.scrape + digest.llm. The scheduler
+# role and jobs queue below are retained for digest.collect.
 
 # The recurring digest.collect trigger (ADR 13, Batch API amendment). digest.build
 # now submits an async Anthropic Message Batch (50% cheaper) instead of a

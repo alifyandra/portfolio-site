@@ -89,23 +89,10 @@ variable "backup_retention_days" {
 
 # --- Digest / scheduled jobs (ADR 13, see digest.tf) ---------------------------
 
-variable "enable_digest_schedule" {
-  description = "Enable the daily EventBridge Scheduler cron that enqueues digest.build. Disabled 2026-07-10 for the ADR 0014 cutover: the in-process scheduler now drives digest.scrape + digest.llm ScheduledJob rows instead, so digest.build is retired. digest.collect stays enabled (it drains digest.llm's batches). Flipping it is an in-place state update on the schedule, not a resource churn."
-  type        = bool
-  default     = false
-}
-
-variable "digest_schedule_expression" {
-  description = "Cron for the daily digest.build trigger (EventBridge Scheduler syntax). Default 18:00 UTC = ~04:00-05:00 Melbourne, off-peak."
-  type        = string
-  default     = "cron(0 18 * * ? *)"
-}
-
-variable "digest_schedule_timezone" {
-  description = "IANA timezone the digest cron is evaluated in."
-  type        = string
-  default     = "UTC"
-}
+# The daily digest.build EventBridge cron was retired in the ADR 0014 cutover
+# (2026-07-10); the in-process scheduler drives digest.scrape + digest.llm now, so
+# enable_digest_schedule / digest_schedule_expression / digest_schedule_timezone
+# were removed. The digest.collect cron below stays.
 
 variable "enable_digest_collect_schedule" {
   description = "Enable the recurring EventBridge Scheduler cron that enqueues digest.collect, which polls in-flight Anthropic Message Batches and persists the completed digests (ADR 13, Batch API amendment). MUST be enabled for batch-mode digests to ever leave the pending state. Flipping it is an in-place state update on the schedule, not a resource churn."

@@ -181,3 +181,25 @@ run-to-completion mode stays intact).
   and a headless backend call needs an API key. The runner path gets the
   subscription benefit legitimately by running on the laptop where Claude Code is
   already signed in.
+
+## Cutover status (2026-07-10)
+
+The cutover is complete. The in-process scheduler drives `digest.scrape` (17:30 UTC)
+and `digest.llm` (18:00 UTC) from `ScheduledJob` rows, and the daily `digest.build`
+EventBridge cron has been retired (its Terraform resource removed; `enable_digest_schedule`
+and its cron/timezone variables dropped).
+
+One correction to the original plan: **`digest.collect` stays on EventBridge.** It is
+not a schedulable pipeline stage (the `stage` enum is only `scrape`/`llm`), and it
+drains the Anthropic batches that `digest.llm` submits, so disabling it would strand
+every batch in `pending`. It keeps its own EventBridge schedule and the shared scheduler
+IAM role.
+
+Two prod-only gaps surfaced only on the first real Fargate run (neither reachable by the
+Go tests or the local-mode dev proof) and were fixed:
+
+- The digest Fargate image is the backend image (`command=["digest"]`) pulled from ECR,
+  but was pushed manually and had drifted behind the code. A `push-digest` CI job now
+  pushes it on every backend build.
+- The `digest.llm` Fargate stage reads a worker-assembled doc from S3 (`DIGEST_DOC_KEY`),
+  but the task role only had `s3:PutObject`. Added `s3:GetObject` on the results prefix.

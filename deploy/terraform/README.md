@@ -253,6 +253,13 @@ push) is a later follow-up.
 
 ## Digest / scheduled jobs (Fargate) deploy
 
+> Note (ADR 0014 cutover, 2026-07-10): the daily `digest.build` EventBridge cron below has been
+> retired. The worker's in-process scheduler now drives `digest.scrape` + `digest.llm` from
+> `ScheduledJob` rows (managed in `/admin` -> Jobs); `digest.llm` still launches the Fargate task
+> to submit the batch, and `digest.collect` stays on EventBridge to drain it. The Fargate build +
+> push steps here still apply (the digest image is now also pushed by CI on every backend build).
+> The `enable_digest_schedule` steps are historical.
+
 The digest platform (ADR 13, Shape B) runs a daily scheduled job: EventBridge Scheduler enqueues
 a `digest.build` message onto the shared jobs queue, the on-box worker consumes it, reads the
 active Sources from Postgres, and launches the `cmd/digest` container as a run-to-completion
