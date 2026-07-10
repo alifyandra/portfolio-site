@@ -59,8 +59,13 @@ func (b *Builder) Scrape(ctx context.Context, store artifactStore, jobRunID int,
 		return nil
 	}
 
+	// Fetch every source first (network I/O, outside the transaction below so it stays
+	// short). A per-source fetch failure is tolerated: one failed source still yields a
+	// digest from the rest (ADR 0014). Only when every source fails is the run failed.
 	expires := now.Add(artifactTTL)
-	written, failed := 0, 0
+	type section struct{ label, content string }
+	sections := make([]section, 0, len(sources))
+	failed := 0
 	for _, s := range sources {
 		content, ferr := b.content.fetcher.Fetch(ctx, s.URL)
 		if ferr != nil {
@@ -68,24 +73,54 @@ func (b *Builder) Scrape(ctx context.Context, store artifactStore, jobRunID int,
 			failed++
 			continue
 		}
-		section := SourceSection(s.Name, s.Type, s.URL, content)
-		if err := b.writeArtifact(ctx, store, job.ID, jobRunID, scrapeLabelPrefix+s.Name, section, expires); err != nil {
-			// A write failure is infrastructural (DB/S3): fail the run so it retries,
-			// rather than silently producing a partial scrape.
-			return fmt.Errorf("digest: scrape: write artifact %q: %w", s.Name, err)
-		}
-		written++
+		sections = append(sections, section{
+			label:   scrapeLabelPrefix + s.Name,
+			content: SourceSection(s.Name, s.Type, s.URL, content),
+		})
 	}
-	if written == 0 {
+	if len(sections) == 0 {
 		return fmt.Errorf("digest: scrape: all %d sources failed to fetch", len(sources))
 	}
-	slog.Info("digest: scraped", "written", written, "failed", failed, "sources", len(sources))
+
+	// Persist atomically. A retry re-running this same run must not stack duplicate
+	// artifacts, and a mid-loop write failure must not leave a partial scrape. Both are
+	// covered by one transaction that first clears any still-pending source artifacts
+	// this run produced before (idempotent per run+source), then writes the fresh set; a
+	// write failure rolls the whole batch back and fails the run for the next tick.
+	tx, err := b.ent.Tx(ctx)
+	if err != nil {
+		return fmt.Errorf("digest: scrape: begin tx: %w", err)
+	}
+	if _, err := tx.Artifact.Delete().
+		Where(
+			artifact.HasProducedByWith(jobrun.IDEQ(jobRunID)),
+			artifact.LabelHasPrefix(scrapeLabelPrefix),
+			artifact.StatusEQ(artifact.StatusPending),
+		).
+		Exec(ctx); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("digest: scrape: clear prior artifacts: %w", err)
+	}
+	for _, sec := range sections {
+		if err := b.writeArtifact(ctx, tx.Artifact, store, job.ID, jobRunID, sec.label, sec.content, expires); err != nil {
+			_ = tx.Rollback()
+			// A write failure is infrastructural (DB/S3): fail the run so it retries,
+			// rather than committing a partial scrape.
+			return fmt.Errorf("digest: scrape: write artifact %q: %w", sec.label, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("digest: scrape: commit: %w", err)
+	}
+	slog.Info("digest: scraped", "written", len(sections), "failed", failed, "sources", len(sources))
 	return nil
 }
 
-// writeArtifact persists one scrape Artifact, inline when small and in S3 otherwise.
-func (b *Builder) writeArtifact(ctx context.Context, store artifactStore, jobID, runID int, label, content string, expires time.Time) error {
-	create := b.ent.Artifact.Create().
+// writeArtifact persists one scrape Artifact through the given client (a *ent.Client
+// artifact client or a transaction's), inline when small and in S3 otherwise. Taking
+// the client explicitly lets Scrape write the whole set inside one transaction.
+func (b *Builder) writeArtifact(ctx context.Context, artifacts *ent.ArtifactClient, store artifactStore, jobID, runID int, label, content string, expires time.Time) error {
+	create := artifacts.Create().
 		SetLabel(label).
 		SetContentType("text/markdown").
 		SetSizeBytes(len(content)).
@@ -109,16 +144,42 @@ func (b *Builder) writeArtifact(ctx context.Context, store artifactStore, jobID,
 	return create.Exec(ctx)
 }
 
-// AssembleFromArtifacts builds the digest document from the pending scrape Artifacts
-// (status pending, label "source:*"), in stable id order, reading each payload inline
-// or from S3. It returns the document and the ids of the artifacts that composed it
-// (to be marked consumed once the LLM stage succeeds). Zero pending artifacts yields
-// an empty doc and no ids. See ADR 0014.
+// AssembleFromArtifacts builds the digest document from ONE scrape run's pending
+// Artifacts (status pending, label "source:*"), in stable id order, reading each
+// payload inline or from S3. It scopes to the NEWEST scrape run's artifacts: if a
+// prior day's llm stage failed, that day's source artifacts stay pending, and folding
+// every pending artifact globally would merge two days into one digest. The newest
+// scrape run is the one that produced the highest-id still-pending source artifact (a
+// later run's artifacts are all inserted after an earlier run's), found via the
+// produced_by edge. Older stale pending artifacts are left for the sweeper. It returns
+// the document and the ids of the artifacts that composed it (to be marked consumed
+// once the LLM stage succeeds). Zero pending artifacts yields an empty doc and no ids.
+// See ADR 0014.
 func (b *Builder) AssembleFromArtifacts(ctx context.Context, store artifactStore) (doc string, ids []int, err error) {
+	newest, err := b.ent.Artifact.Query().
+		Where(
+			artifact.StatusEQ(artifact.StatusPending),
+			artifact.LabelHasPrefix(scrapeLabelPrefix),
+		).
+		Order(ent.Desc(artifact.FieldID)).
+		WithProducedBy().
+		First(ctx)
+	if ent.IsNotFound(err) {
+		return "", nil, nil // no pending scrape artifacts
+	}
+	if err != nil {
+		return "", nil, fmt.Errorf("digest: assemble: find newest scrape run: %w", err)
+	}
+	if newest.Edges.ProducedBy == nil {
+		return "", nil, fmt.Errorf("digest: assemble: artifact %d has no producing run", newest.ID)
+	}
+	runID := newest.Edges.ProducedBy.ID
+
 	arts, err := b.ent.Artifact.Query().
 		Where(
 			artifact.StatusEQ(artifact.StatusPending),
 			artifact.LabelHasPrefix(scrapeLabelPrefix),
+			artifact.HasProducedByWith(jobrun.IDEQ(runID)),
 		).
 		Order(ent.Asc(artifact.FieldID)).
 		All(ctx)
