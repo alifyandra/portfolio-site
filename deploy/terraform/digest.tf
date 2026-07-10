@@ -130,12 +130,17 @@ resource "aws_iam_role" "digest_task" {
 # S3 result channel (ADR 13, Shape B): the task writes its Result JSON under the
 # digest-results/ prefix of the assets bucket; the on-box worker reads and deletes
 # it (the instance role already has GetObject/DeleteObject on the assets bucket).
-# The task needs only PutObject on that prefix — least privilege, no DB reach.
+# For the digest.llm fargate stage (ADR 0014) the worker also writes a pre-assembled
+# doc under the same prefix and passes it as DIGEST_DOC_KEY, so the task additionally
+# needs GetObject to read that doc back. Still least privilege (one prefix, no DB reach).
 data "aws_iam_policy_document" "digest_task_s3" {
   statement {
-    sid       = "PutDigestResult"
-    effect    = "Allow"
-    actions   = ["s3:PutObject"]
+    sid    = "ReadWriteDigestResults"
+    effect = "Allow"
+    actions = [
+      "s3:PutObject",
+      "s3:GetObject",
+    ]
     resources = ["${aws_s3_bucket.assets.arn}/${var.digest_result_prefix}*"]
   }
 }
