@@ -12,6 +12,7 @@ import { useQueryClient } from '@tanstack/react-query';
 
 import {
   useListJobs,
+  useCreateJob,
   useUpdateJob,
   useStartJobRun,
   useListJobRuns,
@@ -23,7 +24,11 @@ import {
   getListApiTokensQueryKey,
 } from '@/lib/api/generated';
 import type { JobDTO, JobRunDTO, ApiTokenDTO } from '@/lib/api/model';
-import { UpdateJobInputBodyRunner } from '@/lib/api/model';
+import {
+  UpdateJobInputBodyRunner,
+  CreateJobInputBodyRunner,
+  CreateJobInputBodyStage,
+} from '@/lib/api/model';
 import {
   citronCard,
   citronBadge,
@@ -89,6 +94,8 @@ export function JobsSection() {
           </div>
         </header>
 
+        <CreateJobForm />
+
         {isLoading ? (
           <p className="text-sm text-slate-400">Loading…</p>
         ) : jobs.length === 0 ? (
@@ -103,6 +110,160 @@ export function JobsSection() {
       </section>
 
       <TokensPanel />
+    </div>
+  );
+}
+
+// Register a new ScheduledJob row (ADR 0014). Mirrors the PlaylistsSection create
+// pattern: local field state, the generated cookie-transport hook, invalidate the
+// list on success, and surface a 409 (duplicate key) / 422 (bad cron or timezone)
+// inline. next_run_at is left to the scheduler, so a new job is dormant until enabled.
+function CreateJobForm() {
+  const queryClient = useQueryClient();
+  const create = useCreateJob();
+
+  const [key, setKey] = useState('');
+  const [name, setName] = useState('');
+  const [stage, setStage] = useState<CreateJobInputBodyStage>(
+    CreateJobInputBodyStage.scrape,
+  );
+  const [schedule, setSchedule] = useState('');
+  const [timezone, setTimezone] = useState('UTC');
+  const [runner, setRunner] = useState<CreateJobInputBodyRunner>(
+    CreateJobInputBodyRunner.server,
+  );
+  const [enabled, setEnabled] = useState(false);
+
+  const reset = () => {
+    setKey('');
+    setName('');
+    setStage(CreateJobInputBodyStage.scrape);
+    setSchedule('');
+    setTimezone('UTC');
+    setRunner(CreateJobInputBodyRunner.server);
+    setEnabled(false);
+  };
+
+  const canCreate =
+    key.trim().length > 0 &&
+    name.trim().length > 0 &&
+    schedule.trim().length > 0 &&
+    !create.isPending;
+
+  const submit = () => {
+    if (!canCreate) return;
+    create.mutate(
+      {
+        data: {
+          key: key.trim(),
+          name: name.trim(),
+          stage,
+          schedule: schedule.trim(),
+          timezone: timezone.trim() || 'UTC',
+          runner,
+          enabled,
+        },
+      },
+      {
+        onSuccess: () => {
+          queryClient.invalidateQueries({ queryKey: getListJobsQueryKey() });
+          reset();
+        },
+      },
+    );
+  };
+
+  return (
+    <div className="flex flex-col gap-3 rounded-lg border border-slate-700 bg-deepsea/40 p-4">
+      <p className="text-sm font-medium text-white">Add job</p>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <label className={labelClass}>
+          Key
+          <input
+            type="text"
+            className={inputClass}
+            placeholder="digest.scrape"
+            value={key}
+            onChange={(e) => setKey(e.target.value)}
+          />
+        </label>
+        <label className={labelClass}>
+          Name
+          <input
+            type="text"
+            className={inputClass}
+            placeholder="Digest scrape"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+          />
+        </label>
+        <label className={labelClass}>
+          Stage
+          <select
+            className={selectClass}
+            value={stage}
+            onChange={(e) => setStage(e.target.value as CreateJobInputBodyStage)}
+          >
+            <option value={CreateJobInputBodyStage.scrape}>scrape</option>
+            <option value={CreateJobInputBodyStage.llm}>llm</option>
+          </select>
+        </label>
+        <label className={labelClass}>
+          Runner
+          <select
+            className={selectClass}
+            value={runner}
+            onChange={(e) =>
+              setRunner(e.target.value as CreateJobInputBodyRunner)
+            }
+          >
+            <option value={CreateJobInputBodyRunner.server}>server</option>
+            <option value={CreateJobInputBodyRunner.local}>local</option>
+            <option value={CreateJobInputBodyRunner.any}>any</option>
+          </select>
+        </label>
+        <label className={labelClass}>
+          Cron schedule
+          <input
+            type="text"
+            className={inputClass}
+            placeholder="0 18 * * *"
+            value={schedule}
+            onChange={(e) => setSchedule(e.target.value)}
+          />
+        </label>
+        <label className={labelClass}>
+          Timezone
+          <input
+            type="text"
+            className={inputClass}
+            placeholder="UTC"
+            value={timezone}
+            onChange={(e) => setTimezone(e.target.value)}
+          />
+        </label>
+      </div>
+      <label className="flex items-center gap-2 text-sm text-slate-300">
+        <input
+          type="checkbox"
+          checked={enabled}
+          onChange={(e) => setEnabled(e.target.checked)}
+        />
+        Enabled
+      </label>
+      <div className="flex flex-wrap items-center gap-3">
+        <button
+          type="button"
+          className={primaryBtn}
+          disabled={!canCreate}
+          onClick={submit}
+        >
+          {create.isPending ? 'Adding…' : 'Add job'}
+        </button>
+        {create.error ? (
+          <p className="text-sm text-coral">{(create.error as Error).message}</p>
+        ) : null}
+      </div>
     </div>
   );
 }
