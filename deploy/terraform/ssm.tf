@@ -89,7 +89,7 @@ locals {
     "ADMIN_EMAILS",
     "FRIEND_EMAILS",
     "WA_SIDECAR_SECRET", # backend<->sidecar shared bearer secret (see whatsapp.tf)
-    "ANTHROPIC_API_KEY", # digest LLM key, injected into the Fargate task (ADR 13)
+    "ANTHROPIC_API_KEY", # digest LLM key: injected into the Fargate task (submit) and on the box .env for the worker's inline digest.collect (ADR 13 Batch API amendment)
   ]
 }
 

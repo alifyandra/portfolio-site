@@ -2,10 +2,13 @@
 # EventBridge Scheduler cron enqueues a {"type":"digest.build"} message onto the
 # shared jobs queue (aws_sqs_queue.contact, see storage.tf). The on-box worker
 # consumes it and launches this run-to-completion Fargate task (the cmd/digest
-# container), which fetches public Sources, summarizes them with the Anthropic
-# API, writes a Digest row to Postgres, and exits. Nothing runs (and nothing
-# bills) while idle, so these resources exist unconditionally; the schedule
-# itself is toggled with var.enable_digest_schedule.
+# container), which fetches public Sources and submits them to the Anthropic
+# Message Batches API (50% cheaper; ADR 13 Batch API amendment), writes a pending
+# Result to S3, and exits. A second, recurring digest.collect cron (below) polls
+# the in-flight batches and persists the completed digests. Nothing runs (and
+# nothing bills) while idle, so these resources exist unconditionally; the
+# schedules are toggled with var.enable_digest_schedule /
+# var.enable_digest_collect_schedule.
 #
 # This is the run-to-completion Fargate mode (ADR 13), distinct from the WhatsApp
 # run-and-connect mode (ADR 11). It REUSES the ECS cluster, VPC/networking, and
@@ -341,5 +344,31 @@ resource "aws_scheduler_schedule" "digest_build" {
     arn      = aws_sqs_queue.contact.arn
     role_arn = aws_iam_role.scheduler.arn
     input    = jsonencode({ type = "digest.build", payload = {} })
+  }
+}
+
+# The recurring digest.collect trigger (ADR 13, Batch API amendment). digest.build
+# now submits an async Anthropic Message Batch (50% cheaper) instead of a
+# synchronous call, so a second, more frequent schedule polls the in-flight batches
+# and persists the completed digests. It reuses the same scheduler role and jobs
+# queue; the worker handles it inline (the box already has ANTHROPIC_API_KEY and
+# owns Postgres — no Fargate task and no new IAM). collect drains ALL pending
+# digests each run, so a missed tick self-heals on the next one. Must be ENABLED
+# for batch-mode digests to ever leave the pending state.
+resource "aws_scheduler_schedule" "digest_collect" {
+  name  = "${var.project}-digest-collect"
+  state = var.enable_digest_collect_schedule ? "ENABLED" : "DISABLED"
+
+  flexible_time_window {
+    mode = "OFF"
+  }
+
+  schedule_expression          = var.digest_collect_schedule_expression
+  schedule_expression_timezone = var.digest_collect_schedule_timezone
+
+  target {
+    arn      = aws_sqs_queue.contact.arn
+    role_arn = aws_iam_role.scheduler.arn
+    input    = jsonencode({ type = "digest.collect", payload = {} })
   }
 }

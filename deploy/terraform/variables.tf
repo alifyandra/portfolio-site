@@ -107,6 +107,24 @@ variable "digest_schedule_timezone" {
   default     = "UTC"
 }
 
+variable "enable_digest_collect_schedule" {
+  description = "Enable the recurring EventBridge Scheduler cron that enqueues digest.collect, which polls in-flight Anthropic Message Batches and persists the completed digests (ADR 13, Batch API amendment). MUST be enabled for batch-mode digests to ever leave the pending state. Flipping it is an in-place state update on the schedule, not a resource churn."
+  type        = bool
+  default     = true
+}
+
+variable "digest_collect_schedule_expression" {
+  description = "Cron for the recurring digest.collect trigger (EventBridge Scheduler syntax). Hourly by default: batches usually finish within the hour, and collect drains all pending batches each run, so hourly keeps availability latency low while a missed run self-heals on the next tick."
+  type        = string
+  default     = "cron(0 * * * ? *)"
+}
+
+variable "digest_collect_schedule_timezone" {
+  description = "IANA timezone the digest.collect cron is evaluated in."
+  type        = string
+  default     = "UTC"
+}
+
 variable "digest_model" {
   description = "Anthropic model the digest task summarizes with (small/cheap by default to bound cost, ADR 13)."
   type        = string
