@@ -84,6 +84,8 @@ func handle(ctx context.Context, deps *server.Deps, job queue.Job) error {
 		return handleContactNotify(ctx, deps, job)
 	case queue.TypeDigestBuild:
 		return handleDigestBuild(ctx, deps, job)
+	case queue.TypeDigestCollect:
+		return handleDigestCollect(ctx, deps, job)
 	default:
 		slog.Warn("no handler for job type", "type", job.Type)
 		return nil
@@ -151,11 +153,32 @@ func handleDigestBuild(ctx context.Context, deps *server.Deps, job queue.Job) er
 	return err
 }
 
-// runDigestFargate is the DIGEST_MODE=fargate path (ADR 0013, Shape B): the worker
-// reads the active Sources on-box, launches the Fargate task to fetch + summarize
-// them off-box (the task writes its Result JSON to S3 and never touches Postgres),
-// then reads that Result back and writes the Digest row itself. The worker owns the
-// database; the task owns only the compute.
+// handleDigestCollect runs the recurring digest.collect Job: it polls every
+// in-flight Anthropic Message Batch submitted by digest.build (prod batch mode)
+// and persists any that have ended. It carries no payload — it drains all pending
+// digests. It runs inline on the worker (the box already has ANTHROPIC_API_KEY and
+// owns Postgres; there is no heavy compute to push off-box). A blank key is an ack.
+// In local (synchronous) mode there are never any pending rows, so this is a no-op.
+// See ADR 0013 (Batch API amendment).
+func handleDigestCollect(ctx context.Context, deps *server.Deps, _ queue.Job) error {
+	if deps.Digest == nil {
+		slog.Error("digest.collect but digest builder is nil; skipping")
+		return nil
+	}
+	err := deps.Digest.Collect(ctx)
+	if errors.Is(err, digest.ErrNotConfigured) {
+		return nil
+	}
+	return err // nil after a clean sweep; a query error redelivers (next sweep retries)
+}
+
+// runDigestFargate is the DIGEST_MODE=fargate path (ADR 0013, Shape B + Batch API
+// amendment): the worker reads the active Sources on-box, launches the Fargate task
+// to fetch them off-box and submit a Message Batch (the task writes its pending
+// Result JSON — carrying the batch id — to S3 and never touches Postgres), then
+// reads that Result back and writes the pending Digest row itself. The recurring
+// digest.collect job resolves the batch later. The worker owns the database; the
+// task owns only the compute.
 func runDigestFargate(ctx context.Context, deps *server.Deps, date time.Time) error {
 	day := date.Format("2006-01-02")
 
@@ -204,9 +227,10 @@ func runDigestFargate(ctx context.Context, deps *server.Deps, date time.Time) er
 		return runErr
 	}
 
-	// Clean exit: expect a completed Result. A missing object here is anomalous
-	// (task exited 0 but produced nothing) — fail so it redelivers rather than
-	// silently acking an empty run.
+	// Clean exit: expect a pending Result (the batch was submitted). Persist writes
+	// the pending row; digest.collect resolves it once the batch ends. A missing
+	// object here is anomalous (task exited 0 but produced nothing) — fail so it
+	// redelivers rather than silently acking an empty run.
 	if result == nil {
 		return fmt.Errorf("digest: task for %s exited 0 but wrote no result to %s", day, key)
 	}

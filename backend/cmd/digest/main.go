@@ -1,10 +1,12 @@
 // Command digest is the run-to-completion Fargate task for the digest.build Job
-// (ADR 0013, Shape B). It receives the target date, the active Sources, and an S3
-// result key as container-env overrides from the worker; fetches each Source,
-// summarizes them with the Anthropic API, and writes the Result as JSON to S3. It
-// never touches Postgres — the worker reads the Result back and writes the Digest
-// row. Exit 0 on a completed result, non-zero on a content or infrastructure
-// failure (the worker acks SQS only on exit 0).
+// (ADR 0013, Shape B + Batch API amendment). It receives the target date, the
+// active Sources, and an S3 result key as container-env overrides from the worker;
+// fetches each Source and submits them to the Anthropic Message Batches API (50%
+// cheaper than a synchronous call), then writes a pending Result (carrying the
+// batch id) as JSON to S3. It never touches Postgres — the worker reads the Result
+// back and writes the pending Digest row, and the recurring digest.collect job
+// resolves the batch later. Exit 0 once the batch is submitted, non-zero on a
+// content or infrastructure failure (the worker acks SQS only on exit 0).
 package main
 
 import (
@@ -70,7 +72,7 @@ func run() error {
 		digest.NewFetcher(),
 	)
 
-	result, buildErr := builder.Build(ctx, date, sources)
+	result, buildErr := builder.Submit(ctx, date, sources)
 	if errors.Is(buildErr, digest.ErrNotConfigured) {
 		// No Anthropic key: exit 0 without writing a result. The worker reads no
 		// object and acks (the degrade-without-creds pattern, ADR 0013).
@@ -78,9 +80,10 @@ func run() error {
 		return nil
 	}
 
-	// Build returns a Result even on a content failure (status=failed): write it so
+	// Submit returns a Result even on a content failure (status=failed): write it so
 	// the worker records the failure reason, then propagate buildErr as a non-zero
-	// exit so the worker leaves the message for redelivery.
+	// exit so the worker leaves the message for redelivery. On success it is a
+	// pending Result carrying the batch id for the worker to persist.
 	if result != nil {
 		body, err := json.Marshal(result)
 		if err != nil {
