@@ -63,5 +63,8 @@ func (User) Edges() []ent.Edge {
 		edge.To("wa_templates", WaTemplate.Type),
 		edge.To("wa_recipient_lists", WaRecipientList.Type),
 		edge.To("wa_batches", WaBatch.Type),
+		// Scheduled-job platform (ADR 0014): scope-only bearer tokens for
+		// external runners. FK lives on api_tokens, no new column on users.
+		edge.To("api_tokens", ApiToken.Type),
 	}
 }
