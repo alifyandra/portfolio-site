@@ -380,8 +380,10 @@ func TestTick_ReapsStuckRunningRun(t *testing.T) {
 	}
 }
 
-// TestTick_SweepsExpiredArtifacts: a pending artifact past its TTL is expired; a done
-// artifact past its TTL and a pending artifact still within TTL are both left alone.
+// TestTick_SweepsExpiredArtifacts: a lapsed pending artifact is expired; a lapsed
+// CLAIMED artifact is left untouched (its expires_at is a reclaimable lease the work
+// API owns, not a TTL the sweeper may terminally expire); a lapsed done artifact and an
+// in-TTL pending artifact are both left alone.
 func TestTick_SweepsExpiredArtifacts(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)
@@ -409,6 +411,7 @@ func TestTick_SweepsExpiredArtifacts(t *testing.T) {
 			SaveX(ctx).ID
 	}
 	expiredPending := mk(artifact.StatusPending, past)
+	claimedPast := mk(artifact.StatusClaimed, past)
 	donePast := mk(artifact.StatusDone, past)
 	pendingFuture := mk(artifact.StatusPending, future)
 
@@ -418,6 +421,9 @@ func TestTick_SweepsExpiredArtifacts(t *testing.T) {
 
 	if got := client.Artifact.GetX(ctx, expiredPending).Status; got != artifact.StatusExpired {
 		t.Errorf("lapsed pending artifact status = %q, want expired", got)
+	}
+	if got := client.Artifact.GetX(ctx, claimedPast).Status; got != artifact.StatusClaimed {
+		t.Errorf("lapsed claimed artifact status = %q, want it left claimed (reclaim is the work API's job, not the sweeper's)", got)
 	}
 	if got := client.Artifact.GetX(ctx, donePast).Status; got != artifact.StatusDone {
 		t.Errorf("done artifact status = %q, want it left done (not swept)", got)
