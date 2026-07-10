@@ -68,6 +68,13 @@ func mintToken(t *testing.T, ctx context.Context, svc *auth.Service, client *ent
 // is this job.
 func seedClaimable(t *testing.T, ctx context.Context, client *ent.Client, jobKey string, runner scheduledjob.Runner, n int) (runID int, artIDs []int) {
 	t.Helper()
+	return seedClaimableAt(t, ctx, client, jobKey, runner, n, time.Now().UTC().Truncate(24*time.Hour))
+}
+
+// seedClaimableAt is seedClaimable with an explicit run scheduled_for, so a test can
+// pin the day the digest would be written for (to prove it is derived from the run).
+func seedClaimableAt(t *testing.T, ctx context.Context, client *ent.Client, jobKey string, runner scheduledjob.Runner, n int, when time.Time) (runID int, artIDs []int) {
+	t.Helper()
 	job := client.ScheduledJob.Create().
 		SetKey(jobKey).
 		SetName(jobKey).
@@ -78,7 +85,7 @@ func seedClaimable(t *testing.T, ctx context.Context, client *ent.Client, jobKey
 		SaveX(ctx)
 	run := client.JobRun.Create().
 		SetTrigger(jobrun.TriggerSchedule).
-		SetScheduledFor(time.Now().UTC().Truncate(24 * time.Hour)).
+		SetScheduledFor(when).
 		SetJobID(job.ID).
 		SaveX(ctx)
 	for i := 0; i < n; i++ {
@@ -278,12 +285,10 @@ func TestClaimThenComplete_HappyPath(t *testing.T) {
 		}
 	}
 
-	date := time.Now().UTC().Format("2006-01-02")
 	resp = api.Post("/api/work/complete", map[string]any{
 		"job":          "test.job",
 		"job_run_id":   runID,
 		"artifact_ids": artIDs,
-		"date":         date,
 		"content":      "# Daily briefing\n\nbody",
 	}, bearer(raw))
 	if resp.Code != http.StatusOK {
@@ -326,7 +331,6 @@ func TestComplete_OwnershipGuard(t *testing.T) {
 		"job":          "test.job",
 		"job_run_id":   runID,
 		"artifact_ids": artIDs,
-		"date":         time.Now().UTC().Format("2006-01-02"),
 		"content":      "stolen",
 	}, bearer(rawB))
 	if resp.Code != http.StatusConflict {
@@ -350,7 +354,6 @@ func TestComplete_StaleDoubleCompleteIsIdempotent(t *testing.T) {
 		"job":          "test.job",
 		"job_run_id":   runID,
 		"artifact_ids": artIDs,
-		"date":         time.Now().UTC().Format("2006-01-02"),
 		"content":      "briefing",
 	}
 	if resp := api.Post("/api/work/complete", body, bearer(raw)); resp.Code != http.StatusOK {
@@ -369,6 +372,12 @@ func TestComplete_StaleDoubleCompleteIsIdempotent(t *testing.T) {
 // get claimed=false. The conditional UPDATE is the mutual-exclusion point (a
 // concurrent claimer sees zero pending rows once the winner commits), so an artifact
 // is never handed to two runners.
+//
+// Caveat: the test DB is in-memory SQLite with MaxOpenConns(1), which serializes
+// every transaction on the single connection. So this exercises the WHERE-predicate
+// logic (a second flip matches zero rows once the first commits) but NOT a true
+// concurrent row race. Real row-level contention is a Postgres property; a
+// Postgres-backed integration test is a follow-up, not part of this suite.
 func TestClaim_ConcurrentSingleWinner(t *testing.T) {
 	api, svc, client := newWorkTestAPI(t)
 	ctx := context.Background()
@@ -410,5 +419,131 @@ func TestClaim_ConcurrentSingleWinner(t *testing.T) {
 		if a.Status != artifact.StatusClaimed || a.ClaimedBy != "laptop" {
 			t.Errorf("artifact %d status=%s claimed_by=%q, want claimed/laptop", a.ID, a.Status, a.ClaimedBy)
 		}
+	}
+}
+
+// --- authorization: complete binds every object to claim + scope ---
+
+// TestComplete_ForeignJobRunRejected (#1): a token scoped to test.job cannot close a
+// JobRun that belongs to a DIFFERENT ScheduledJob, even though it passes the string
+// scope check on body.Job. The run stays open.
+func TestComplete_ForeignJobRunRejected(t *testing.T) {
+	api, svc, client := newWorkTestAPI(t)
+	ctx := context.Background()
+	// A run under a different job the token is NOT scoped to.
+	otherRunID, _ := seedClaimable(t, ctx, client, "other.job", scheduledjob.RunnerLocal, 1)
+	raw := mintToken(t, ctx, svc, client, "laptop", []string{"test.job"})
+
+	resp := api.Post("/api/work/complete", map[string]any{
+		"job":        "test.job",
+		"job_run_id": otherRunID,
+		"content":    "x",
+	}, bearer(raw))
+	if resp.Code != http.StatusForbidden {
+		t.Fatalf("closing a foreign job's run = %d, want 403; body=%s", resp.Code, resp.Body.String())
+	}
+	if run := client.JobRun.GetX(ctx, otherRunID); run.Status != jobrun.StatusQueued || run.FinishedAt != nil {
+		t.Errorf("foreign run was mutated: status=%s finished=%v", run.Status, run.FinishedAt)
+	}
+}
+
+// TestComplete_ForeignArtifactRejected (#2): supplying an artifact_id that belongs to
+// a different run/job (here, another job's still-pending artifact) is rejected, and
+// that artifact is left untouched (not force-marked done).
+func TestComplete_ForeignArtifactRejected(t *testing.T) {
+	api, svc, client := newWorkTestAPI(t)
+	ctx := context.Background()
+	// The runner's own claimable run under test.job.
+	runID, _ := seedClaimable(t, ctx, client, "test.job", scheduledjob.RunnerLocal, 1)
+	// A different job with a pending artifact the runner never claimed.
+	_, foreignArts := seedClaimable(t, ctx, client, "other.job", scheduledjob.RunnerLocal, 1)
+	foreignID := foreignArts[0]
+	raw := mintToken(t, ctx, svc, client, "laptop", []string{"test.job"})
+
+	// Claim the legit run so the runner holds test.job's artifacts.
+	if resp := api.Get("/api/work/claim?job=test.job", bearer(raw)); resp.Code != http.StatusOK {
+		t.Fatalf("claim = %d; body=%s", resp.Code, resp.Body.String())
+	}
+	// Complete the legit run but sneak in the foreign artifact id.
+	resp := api.Post("/api/work/complete", map[string]any{
+		"job":          "test.job",
+		"job_run_id":   runID,
+		"artifact_ids": []int{foreignID},
+		"content":      "x",
+	}, bearer(raw))
+	if resp.Code != http.StatusForbidden {
+		t.Fatalf("completing with a foreign artifact = %d, want 403; body=%s", resp.Code, resp.Body.String())
+	}
+	// The foreign artifact stays pending and unconsumed.
+	fa := client.Artifact.GetX(ctx, foreignID)
+	if fa.Status != artifact.StatusPending {
+		t.Errorf("foreign artifact status=%s, want it left pending (untouched)", fa.Status)
+	}
+	if _, err := fa.QueryConsumedBy().Only(ctx); err == nil {
+		t.Error("foreign artifact was attributed to a consuming run")
+	}
+}
+
+// TestComplete_ContentKeyOutsidePrefixRejected (#3): a content_key that is not under
+// the server-issued work-results/ prefix is rejected before any S3 read, so a token
+// cannot turn complete into a read-any-object primitive.
+func TestComplete_ContentKeyOutsidePrefixRejected(t *testing.T) {
+	api, svc, client := newWorkTestAPI(t)
+	ctx := context.Background()
+	runID, _ := seedClaimable(t, ctx, client, "test.job", scheduledjob.RunnerLocal, 1)
+	raw := mintToken(t, ctx, svc, client, "laptop", []string{"test.job"})
+	if resp := api.Get("/api/work/claim?job=test.job", bearer(raw)); resp.Code != http.StatusOK {
+		t.Fatalf("claim = %d; body=%s", resp.Code, resp.Body.String())
+	}
+	resp := api.Post("/api/work/complete", map[string]any{
+		"job":         "test.job",
+		"job_run_id":  runID,
+		"content_key": "projects/secret.png",
+	}, bearer(raw))
+	if resp.Code != http.StatusForbidden {
+		t.Fatalf("content_key outside work-results/ = %d, want 403; body=%s", resp.Code, resp.Body.String())
+	}
+}
+
+// TestComplete_DigestDateFromRunNotRequest (#4): the Digest date is derived from the
+// claimed run's scheduled_for, not from the request, so a token can only write the
+// day it actually claimed and cannot inject an arbitrary date. Two layers prove it:
+// (a) the request body has no date field at all, and Huma rejects unknown fields, so
+// a smuggled "date" is a 422 (asserted below); (b) the written Digest is keyed on the
+// run's distinctive past day, not today.
+func TestComplete_DigestDateFromRunNotRequest(t *testing.T) {
+	api, svc, client := newWorkTestAPI(t)
+	ctx := context.Background()
+	// A run scheduled for a distinctive past day (not today).
+	when := time.Date(2021, time.March, 4, 0, 0, 0, 0, time.UTC)
+	runID, _ := seedClaimableAt(t, ctx, client, "test.job", scheduledjob.RunnerLocal, 1, when)
+	raw := mintToken(t, ctx, svc, client, "laptop", []string{"test.job"})
+	if resp := api.Get("/api/work/claim?job=test.job", bearer(raw)); resp.Code != http.StatusOK {
+		t.Fatalf("claim = %d; body=%s", resp.Code, resp.Body.String())
+	}
+
+	// A smuggled date field is an unknown property: rejected (422), never honored.
+	if resp := api.Post("/api/work/complete", map[string]any{
+		"job":        "test.job",
+		"job_run_id": runID,
+		"content":    "x",
+		"date":       "1999-12-31",
+	}, bearer(raw)); resp.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("smuggled date field = %d, want 422 (unknown property rejected); body=%s", resp.Code, resp.Body.String())
+	}
+
+	// A valid complete writes the Digest for the run's day, proving the date is
+	// server-derived from scheduled_for.
+	resp := api.Post("/api/work/complete", map[string]any{
+		"job":        "test.job",
+		"job_run_id": runID,
+		"content":    "briefing",
+	}, bearer(raw))
+	if resp.Code != http.StatusOK {
+		t.Fatalf("complete = %d, want 200; body=%s", resp.Code, resp.Body.String())
+	}
+	d := client.Digest.Query().OnlyX(ctx)
+	if got := d.Date.UTC().Format("2006-01-02"); got != "2021-03-04" {
+		t.Errorf("digest written for %s, want 2021-03-04 (the run's scheduled_for, not a caller value)", got)
 	}
 }

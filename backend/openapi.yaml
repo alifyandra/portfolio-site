@@ -202,7 +202,7 @@ components:
           readOnly: true
           type: string
         artifact_ids:
-          description: the claimed artifacts to mark done
+          description: the claimed artifacts to mark done; each must belong to job_run_id and be claimed by this runner
           items:
             format: int64
             type: integer
@@ -213,10 +213,7 @@ components:
           description: inline result content (the digest markdown)
           type: string
         content_key:
-          description: S3 key of a large result previously uploaded via the presigned PUT
-          type: string
-        date:
-          description: YYYY-MM-DD idempotency key for the resulting Digest
+          description: S3 key of a large result previously uploaded via the presigned PUT; must be under the server-issued work-results/ prefix
           type: string
         error:
           description: failure reason when status is failed
@@ -226,7 +223,7 @@ components:
           minLength: 1
           type: string
         job_run_id:
-          description: the run returned by /claim, to close
+          description: the run returned by /claim, to close; must be a run this runner claimed under this job
           format: int64
           type: integer
         status:

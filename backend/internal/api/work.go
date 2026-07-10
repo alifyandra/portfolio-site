@@ -114,15 +114,18 @@ type claimOutput struct {
 type completeInput struct {
 	Body struct {
 		Job         string `json:"job" minLength:"1" doc:"ScheduledJob key; must be in the token's scope"`
-		JobRunID    int    `json:"job_run_id,omitempty" doc:"the run returned by /claim, to close"`
-		ArtifactIDs []int  `json:"artifact_ids,omitempty" doc:"the claimed artifacts to mark done"`
+		// JobRunID is optional at the schema level so the scope/auth gate (requireBearer)
+		// runs before shape validation and returns 401/403 rather than a 422 that would
+		// mask it; the handler enforces presence after the gate. See ADR 0014.
+		JobRunID    int    `json:"job_run_id,omitempty" doc:"the run returned by /claim, to close; must be a run this runner claimed under this job"`
+		ArtifactIDs []int  `json:"artifact_ids,omitempty" doc:"the claimed artifacts to mark done; each must belong to job_run_id and be claimed by this runner"`
 		Status      string `json:"status,omitempty" enum:"completed,failed" doc:"terminal outcome; defaults to completed"`
 		Error       string `json:"error,omitempty" doc:"failure reason when status is failed"`
-		// Digest-style result. A dated result is written via the existing idempotent
-		// Digest upsert; generic jobs with no dated output omit these.
-		Date       string `json:"date,omitempty" doc:"YYYY-MM-DD idempotency key for the resulting Digest"`
+		// Result content for the digest LLM stage. The Digest date is NOT taken from
+		// the request: it is derived server-side from the claimed run's scheduled_for,
+		// so a token can only write the day it actually claimed. See ADR 0014 (Security).
 		Content    string `json:"content,omitempty" doc:"inline result content (the digest markdown)"`
-		ContentKey string `json:"content_key,omitempty" doc:"S3 key of a large result previously uploaded via the presigned PUT"`
+		ContentKey string `json:"content_key,omitempty" doc:"S3 key of a large result previously uploaded via the presigned PUT; must be under the server-issued work-results/ prefix"`
 		// UploadContentType, set with no inline content, requests a presigned S3 PUT
 		// for a large result instead of finalizing the run.
 		UploadContentType string `json:"upload_content_type,omitempty" doc:"request a presigned PUT for a large result of this MIME type"`
@@ -285,12 +288,20 @@ func (h *Handler) claimWork(ctx context.Context, in *claimInput) (*claimOutput, 
 //     We hand back a presigned S3 PUT (Content-Type bound into the signature exactly
 //     as admin_uploads.go) and leave the run open; the caller uploads then calls
 //     complete again with content_key.
-//   - Finalize: write the dated Digest via the existing idempotent upsert, mark the
+//   - Finalize: write the digest result via the existing idempotent upsert, mark the
 //     claimed artifacts done, and close the run with the runner's identity.
 //
-// A runner may only finalize artifacts it currently holds, UNLESS the lease has
-// already expired. A stale double-complete is harmless: the Digest upsert and the
-// done-marking are both idempotent, so re-running writes the same terminal state.
+// Authorization is object-bound, not string-bound. requireBearer only proves the
+// token's scope names the job KEY; it says nothing about the objects this request
+// references. So every object the handler mutates is re-verified to belong to a
+// ScheduledJob whose key == body.Job AND to have been claimed by THIS runner
+// (id.Runner): the JobRun, each Artifact, the Digest date (derived from the run,
+// never the request), and the S3 content key (must be under the server-issued
+// prefix). Everything is validated and mutated inside ONE transaction, so a bad or
+// foreign reference commits nothing. A same-runner idempotent re-complete stays
+// safe (the Digest upsert and done-marking re-write the same terminal state); a
+// different runner trying to finalize a live claim still gets 409. See ADR 0014
+// (Security).
 func (h *Handler) completeWork(ctx context.Context, in *completeInput) (*completeOutput, error) {
 	id, err := requireBearer(ctx, in.Body.Job)
 	if err != nil {
@@ -304,7 +315,9 @@ func (h *Handler) completeWork(ctx context.Context, in *completeInput) (*complet
 
 	// Phase 1: hand back a presigned PUT for a large result if asked (and nothing was
 	// sent inline yet). The run stays claimed; the runner uploads then re-calls with
-	// content_key.
+	// content_key. The key is server-generated under workResultPrefix, and the
+	// finalize path only reads keys under that same prefix, so a token can never point
+	// the read at an arbitrary object.
 	if in.Body.UploadContentType != "" && in.Body.Content == "" && in.Body.ContentKey == "" {
 		if h.deps.Storage == nil {
 			return nil, huma.Error503ServiceUnavailable("object storage is not available")
@@ -329,25 +342,18 @@ func (h *Handler) completeWork(ctx context.Context, in *completeInput) (*complet
 		return out, nil
 	}
 
-	// Ownership guard: reject an attempt to finalize an artifact that is currently
-	// claimed by a DIFFERENT runner with a still-live lease. A lapsed lease, or an
-	// artifact the caller itself holds, is fine (stale double-complete is harmless).
-	if len(in.Body.ArtifactIDs) > 0 {
-		arts, err := h.deps.Ent.Artifact.Query().Where(artifact.IDIn(in.Body.ArtifactIDs...)).All(ctx)
-		if err != nil {
-			return nil, huma.Error500InternalServerError("failed to load artifacts", err)
-		}
-		for _, a := range arts {
-			leaseLive := a.ExpiresAt == nil || a.ExpiresAt.After(now)
-			if a.Status == artifact.StatusClaimed && a.ClaimedBy != id.Runner && leaseLive {
-				return nil, huma.Error409Conflict("one or more artifacts are claimed by another runner with a live lease")
-			}
-		}
+	if in.Body.JobRunID == 0 {
+		return nil, huma.Error422UnprocessableEntity("job_run_id is required to finalize a claim")
 	}
 
-	// Resolve the result content: inline, or read back a large result uploaded to S3.
+	// Resolve the result content BEFORE the tx (a read, no mutation). A large result
+	// referenced by content_key must live under the server-issued prefix; any other
+	// key is a read-any-object attempt and is rejected, never fetched.
 	content := in.Body.Content
 	if content == "" && in.Body.ContentKey != "" {
+		if !strings.HasPrefix(in.Body.ContentKey, workResultPrefix) {
+			return nil, huma.Error403Forbidden("content_key must be a server-issued work-results key")
+		}
 		if h.deps.Storage == nil {
 			return nil, huma.Error503ServiceUnavailable("object storage is not available")
 		}
@@ -359,13 +365,99 @@ func (h *Handler) completeWork(ctx context.Context, in *completeInput) (*complet
 	}
 
 	failed := in.Body.Status == "failed"
+	runStatus := jobrun.StatusSucceeded
+	if failed {
+		runStatus = jobrun.StatusFailed
+	}
 
-	// Write the dated Digest via the existing idempotent upsert (digest.Persist
-	// upserts a completed row and no-demotes a failed one), so a redelivered or
-	// duplicated complete never corrupts a good day. Runs outside the tx below; it is
-	// idempotent, so a later tx failure just re-persists the same row on retry.
-	if in.Body.Date != "" {
-		r := &digest.Result{Date: in.Body.Date}
+	tx, err := h.deps.Ent.Tx(ctx)
+	if err != nil {
+		return nil, huma.Error500InternalServerError("failed to start completion", err)
+	}
+
+	// (1) Load the run and bind it to the token's scope: it must belong to the
+	// ScheduledJob key the token is scoped to. Never close a run of a different job.
+	run, err := tx.JobRun.Query().
+		Where(jobrun.IDEQ(in.Body.JobRunID)).
+		WithJob().
+		Only(ctx)
+	if ent.IsNotFound(err) {
+		_ = tx.Rollback()
+		return nil, huma.Error404NotFound("job run not found")
+	}
+	if err != nil {
+		_ = tx.Rollback()
+		return nil, huma.Error500InternalServerError("failed to load job run", err)
+	}
+	job := run.Edges.Job
+	if job == nil || job.Key != in.Body.Job {
+		_ = tx.Rollback()
+		return nil, huma.Error403Forbidden("job run does not belong to the scoped job")
+	}
+
+	// (2) Validate every caller-supplied artifact reference against the run and the
+	// runner. A live claim held by a DIFFERENT runner is a steal attempt (409); any
+	// other foreign reference (another run, another/no runner) is 403. Both reject
+	// BEFORE any write, so the referenced artifacts stay untouched. An artifact this
+	// runner already holds (claimed or already-done, for an idempotent re-complete)
+	// passes.
+	if len(in.Body.ArtifactIDs) > 0 {
+		arts, err := tx.Artifact.Query().
+			Where(artifact.IDIn(in.Body.ArtifactIDs...)).
+			WithProducedBy().
+			All(ctx)
+		if err != nil {
+			_ = tx.Rollback()
+			return nil, huma.Error500InternalServerError("failed to load artifacts", err)
+		}
+		byID := make(map[int]*ent.Artifact, len(arts))
+		for _, a := range arts {
+			byID[a.ID] = a
+		}
+		for _, wantID := range in.Body.ArtifactIDs {
+			a, ok := byID[wantID]
+			if !ok || a.Edges.ProducedBy == nil || a.Edges.ProducedBy.ID != run.ID {
+				_ = tx.Rollback()
+				return nil, huma.Error403Forbidden("an artifact does not belong to the claimed run")
+			}
+			if a.ClaimedBy != id.Runner {
+				leaseLive := a.ExpiresAt == nil || a.ExpiresAt.After(now)
+				if a.Status == artifact.StatusClaimed && leaseLive {
+					_ = tx.Rollback()
+					return nil, huma.Error409Conflict("an artifact is claimed by another runner with a live lease")
+				}
+				_ = tx.Rollback()
+				return nil, huma.Error403Forbidden("an artifact was not claimed by this runner")
+			}
+		}
+	}
+
+	// (3) Confirm this runner actually claimed this run, evidenced by at least one of
+	// the run's produced artifacts still attributed to it (claimed, or done from an
+	// earlier complete). If the runner never claimed it (or lost the claim to a
+	// reclaim), it cannot close the run.
+	held, err := tx.Artifact.Query().
+		Where(
+			artifact.HasProducedByWith(jobrun.IDEQ(run.ID)),
+			artifact.ClaimedByEQ(id.Runner),
+		).
+		Count(ctx)
+	if err != nil {
+		_ = tx.Rollback()
+		return nil, huma.Error500InternalServerError("failed to verify claim", err)
+	}
+	if held == 0 {
+		_ = tx.Rollback()
+		return nil, huma.Error403Forbidden("this runner did not claim that run")
+	}
+
+	// (4) Write the digest result for the LLM stage, keyed on the run's own
+	// scheduled_for day (derived server-side, never from the request) via the existing
+	// idempotent upsert. Runs on the tx client, so it commits atomically with the run
+	// close. digest.Persist upserts a completed row and no-demotes a failed one.
+	if job.Stage == scheduledjob.StageLlm && (content != "" || failed) {
+		day := digest.NormalizeDate(run.ScheduledFor).Format("2006-01-02")
+		r := &digest.Result{Date: day}
 		if failed {
 			r.Status = digest.StatusFailed
 			r.Error = in.Body.Error
@@ -373,49 +465,41 @@ func (h *Handler) completeWork(ctx context.Context, in *completeInput) (*complet
 			r.Status = digest.StatusCompleted
 			r.Content = content
 		}
-		if err := digest.Persist(ctx, h.deps.Ent, r); err != nil {
+		if err := digest.Persist(ctx, tx.Client(), r); err != nil {
+			_ = tx.Rollback()
 			return nil, huma.Error500InternalServerError("failed to persist result", err)
 		}
 	}
 
-	// Mark the claimed artifacts done and attribute them to the closing run, then
-	// close the run, in one transaction. Idempotent: re-running sets the same values.
-	runStatus := jobrun.StatusSucceeded
-	if failed {
-		runStatus = jobrun.StatusFailed
+	// (5) Mark done exactly the run's artifacts this runner holds (scoped by the
+	// produced-by/claimed-by predicate, NOT by caller-supplied ids), and attribute
+	// them to the closing run. A no-op on an idempotent re-complete (already done).
+	if _, err := tx.Artifact.Update().
+		Where(
+			artifact.HasProducedByWith(jobrun.IDEQ(run.ID)),
+			artifact.ClaimedByEQ(id.Runner),
+			artifact.StatusEQ(artifact.StatusClaimed),
+		).
+		SetStatus(artifact.StatusDone).
+		SetConsumedByID(run.ID).
+		Save(ctx); err != nil {
+		_ = tx.Rollback()
+		return nil, huma.Error500InternalServerError("failed to mark artifacts done", err)
 	}
-	tx, err := h.deps.Ent.Tx(ctx)
-	if err != nil {
-		return nil, huma.Error500InternalServerError("failed to start completion", err)
+
+	// (6) Close the run.
+	u := tx.JobRun.UpdateOneID(run.ID).
+		SetStatus(runStatus).
+		SetRunner(id.Runner).
+		SetFinishedAt(now)
+	if failed && in.Body.Error != "" {
+		u = u.SetError(in.Body.Error)
 	}
-	if len(in.Body.ArtifactIDs) > 0 {
-		upd := tx.Artifact.Update().
-			Where(artifact.IDIn(in.Body.ArtifactIDs...)).
-			SetStatus(artifact.StatusDone)
-		if in.Body.JobRunID != 0 {
-			upd = upd.SetConsumedByID(in.Body.JobRunID)
-		}
-		if _, err := upd.Save(ctx); err != nil {
-			_ = tx.Rollback()
-			return nil, huma.Error500InternalServerError("failed to mark artifacts done", err)
-		}
+	if err := u.Exec(ctx); err != nil {
+		_ = tx.Rollback()
+		return nil, huma.Error500InternalServerError("failed to close run", err)
 	}
-	if in.Body.JobRunID != 0 {
-		u := tx.JobRun.UpdateOneID(in.Body.JobRunID).
-			SetStatus(runStatus).
-			SetRunner(id.Runner).
-			SetFinishedAt(now)
-		if failed && in.Body.Error != "" {
-			u = u.SetError(in.Body.Error)
-		}
-		if err := u.Exec(ctx); err != nil {
-			_ = tx.Rollback()
-			if ent.IsNotFound(err) {
-				return nil, huma.Error404NotFound("job run not found")
-			}
-			return nil, huma.Error500InternalServerError("failed to close run", err)
-		}
-	}
+
 	if err := tx.Commit(); err != nil {
 		return nil, huma.Error500InternalServerError("failed to commit completion", err)
 	}
