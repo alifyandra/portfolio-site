@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -113,6 +114,96 @@ func TestScrape_AllSourcesFailErrors(t *testing.T) {
 	}
 	if n := client.Artifact.Query().CountX(ctx); n != 0 {
 		t.Fatalf("want 0 artifacts, got %d", n)
+	}
+}
+
+// TestScrape_RetryDoesNotDuplicate: re-running scrape for the SAME run (e.g. a
+// re-driven stranded run) clears the run's prior pending artifacts first, so the
+// artifact count stays at one-per-source instead of doubling.
+func TestScrape_RetryDoesNotDuplicate(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	seedSource(t, client, "HN", "https://hn.example")
+	seedSource(t, client, "BBC", "https://bbc.example")
+	runID := seedScrapeJobRun(t, client, "digest.scrape", entscheduledjob.StageScrape)
+
+	b := NewBuilder(client, summarizeStub("unused"), stubFetcher{content: "body"})
+	if err := b.Scrape(ctx, nil, runID, time.Now()); err != nil {
+		t.Fatalf("first scrape: %v", err)
+	}
+	if err := b.Scrape(ctx, nil, runID, time.Now()); err != nil {
+		t.Fatalf("second scrape (retry): %v", err)
+	}
+
+	if n := client.Artifact.Query().CountX(ctx); n != 2 {
+		t.Fatalf("want 2 artifacts after a retry (idempotent per run+source), got %d", n)
+	}
+}
+
+// TestScrape_WriteFailureRollsBackNoPartial: when one artifact write fails mid-loop
+// (an over-inline-limit payload with no object store), the whole scrape rolls back —
+// no partial set of artifacts is committed — and the run is failed for a retry.
+func TestScrape_WriteFailureRollsBackNoPartial(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	seedSource(t, client, "Small", "https://small.example")
+	seedSource(t, client, "Huge", "https://huge.example")
+	runID := seedScrapeJobRun(t, client, "digest.scrape", entscheduledjob.StageScrape)
+
+	fetch := mapFetcher{
+		"https://small.example": {content: "tiny"},
+		"https://huge.example":  {content: strings.Repeat("x", ArtifactInlineMaxBytes+1)},
+	}
+	// store is nil, so the over-limit "Huge" section cannot be written and its write
+	// fails, which must roll back the "Small" write committed just before it.
+	b := NewBuilder(client, summarizeStub("unused"), fetch)
+	if err := b.Scrape(ctx, nil, runID, time.Now()); err == nil {
+		t.Fatal("Scrape should fail when an artifact write fails")
+	}
+	if n := client.Artifact.Query().CountX(ctx); n != 0 {
+		t.Fatalf("want 0 artifacts (write failure rolled back the whole scrape), got %d", n)
+	}
+}
+
+// TestAssembleFromArtifacts_ScopesToNewestScrapeRun: two scrape runs leave two sets of
+// pending source artifacts (the first run's llm never consumed them). Assembly must
+// pick ONLY the newest run's artifacts, never folding the older day into the digest.
+func TestAssembleFromArtifacts_ScopesToNewestScrapeRun(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	seedSource(t, client, "HN", "https://hn.example")
+
+	run1 := seedScrapeJobRun(t, client, "digest.scrape.a", entscheduledjob.StageScrape)
+	b1 := NewBuilder(client, summarizeStub("unused"), stubFetcher{content: "day one body"})
+	if err := b1.Scrape(ctx, nil, run1, time.Now()); err != nil {
+		t.Fatalf("scrape run1: %v", err)
+	}
+	run2 := seedScrapeJobRun(t, client, "digest.scrape.b", entscheduledjob.StageScrape)
+	b2 := NewBuilder(client, summarizeStub("unused"), stubFetcher{content: "day two body"})
+	if err := b2.Scrape(ctx, nil, run2, time.Now()); err != nil {
+		t.Fatalf("scrape run2: %v", err)
+	}
+
+	// Two pending artifacts now exist (one per run); assembly must scope to run2 only.
+	if n := client.Artifact.Query().Where(entartifact.StatusEQ(entartifact.StatusPending)).CountX(ctx); n != 2 {
+		t.Fatalf("want 2 pending artifacts across both runs, got %d", n)
+	}
+
+	doc, ids, err := b2.AssembleFromArtifacts(ctx, nil)
+	if err != nil {
+		t.Fatalf("AssembleFromArtifacts: %v", err)
+	}
+	if len(ids) != 1 {
+		t.Fatalf("want 1 assembled artifact (newest run only), got %d", len(ids))
+	}
+	if !strings.Contains(doc, "day two body") {
+		t.Errorf("assembled doc missing the newest run's content: %q", doc)
+	}
+	if strings.Contains(doc, "day one body") {
+		t.Errorf("assembled doc folded in the older run's content: %q", doc)
+	}
+	if run := client.Artifact.GetX(ctx, ids[0]).QueryProducedBy().OnlyIDX(ctx); run != run2 {
+		t.Errorf("assembled artifact produced_by = %d, want the newest run %d", run, run2)
 	}
 }
 
