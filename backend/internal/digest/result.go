@@ -14,6 +14,9 @@ import (
 
 // Status values a Result (and the persisted Digest row) can carry.
 const (
+	// StatusPending: a batch has been submitted and is in flight (prod batch mode).
+	// The Result carries the BatchID; digest.collect resolves it later. See ADR 0013.
+	StatusPending   = "pending"
 	StatusCompleted = "completed"
 	StatusFailed    = "failed"
 )
@@ -32,9 +35,10 @@ type SourceInput struct {
 // the Digest row. In local mode the same struct is passed in-process.
 type Result struct {
 	Date         string `json:"date"`   // YYYY-MM-DD, the UTC day (idempotency key)
-	Status       string `json:"status"` // StatusCompleted | StatusFailed
+	Status       string `json:"status"` // StatusPending | StatusCompleted | StatusFailed
 	Content      string `json:"content,omitempty"`
 	Model        string `json:"model,omitempty"`
+	BatchID      string `json:"batch_id,omitempty"` // the in-flight batch id when Status is pending
 	Error        string `json:"error,omitempty"`
 	InputTokens  int    `json:"input_tokens,omitempty"`
 	OutputTokens int    `json:"output_tokens,omitempty"`
@@ -73,6 +77,25 @@ func Persist(ctx context.Context, client *ent.Client, r *Result) error {
 	}
 	day = NormalizeDate(day)
 
+	if r.Status == StatusPending {
+		// Record the in-flight batch as a pending row. ON CONFLICT DO NOTHING: never
+		// demote a completed digest back to pending, and on a redelivery keep the first
+		// batch in flight (the second is orphaned and expires harmlessly). digest.collect
+		// resolves the pending row once the batch ends. See ADR 0013 (Batch API amendment).
+		if err := client.Digest.Create().
+			SetDate(day).
+			SetStatus(entdigest.StatusPending).
+			SetModel(r.Model).
+			SetBatchID(r.BatchID).
+			OnConflictColumns(entdigest.FieldDate).
+			DoNothing().
+			Exec(ctx); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("digest: persist pending digest: %w", err)
+		}
+		slog.Info("digest: submitted batch", "date", r.Date, "batch", r.BatchID, "model", r.Model)
+		return nil
+	}
+
 	if r.Status == StatusFailed {
 		// ON CONFLICT DO NOTHING: only insert a failed row when the date has none yet,
 		// never demote an existing completed digest (ADR 0013). When a row already
@@ -97,6 +120,7 @@ func Persist(ctx context.Context, client *ent.Client, r *Result) error {
 		SetContent(r.Content).
 		SetModel(r.Model).
 		SetError("").
+		SetBatchID(""). // clear the in-flight pointer: the batch is resolved
 		OnConflictColumns(entdigest.FieldDate).
 		UpdateNewValues().
 		Exec(ctx); err != nil {

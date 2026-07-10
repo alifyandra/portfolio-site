@@ -2,6 +2,7 @@ package digest
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -24,6 +25,125 @@ func stubAnthropic(status int, body string) *Anthropic {
 		}, nil
 	})
 	return NewAnthropic("key", "claude-haiku-4-5", 1024, WithHTTPClient(&http.Client{Transport: rt}))
+}
+
+func jsonResp(status int, body string) *http.Response {
+	return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body)), Header: http.Header{}}
+}
+
+// submitStub answers a batch create (POST /v1/messages/batches) with the given id.
+func submitStub(batchID string) *Anthropic {
+	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/messages/batches") {
+			return jsonResp(http.StatusOK, fmt.Sprintf(`{"id":%q,"processing_status":"in_progress"}`, batchID)), nil
+		}
+		return jsonResp(http.StatusInternalServerError, `{"error":"unexpected call"}`), nil
+	})
+	return NewAnthropic("key", "claude-haiku-4-5", 1024, WithHTTPClient(&http.Client{Transport: rt}))
+}
+
+// collectStub answers a CollectBatch poll: the batch status at
+// /v1/messages/batches/{id}, then (when ended) the JSONL result at results_url.
+// procStatus is "in_progress" or "ended"; resultType is the per-request result
+// type on the JSONL line ("succeeded" | "errored" | "expired" | ...).
+func collectStub(batchID, customID, procStatus, resultType, text string) *Anthropic {
+	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch p := req.URL.Path; {
+		case strings.HasSuffix(p, "/messages/batches/"+batchID+"/results"):
+			line := fmt.Sprintf(
+				`{"custom_id":%q,"result":{"type":%q,"message":{"model":"claude-haiku-4-5","stop_reason":"end_turn","content":[{"type":"text","text":%q}],"usage":{"input_tokens":10,"output_tokens":20}}}}`,
+				customID, resultType, text)
+			return jsonResp(http.StatusOK, line), nil
+		case strings.HasSuffix(p, "/messages/batches/"+batchID):
+			if procStatus == "ended" {
+				return jsonResp(http.StatusOK, fmt.Sprintf(
+					`{"id":%q,"processing_status":"ended","results_url":"https://api.anthropic.com/v1/messages/batches/%s/results"}`,
+					batchID, batchID)), nil
+			}
+			return jsonResp(http.StatusOK, fmt.Sprintf(`{"id":%q,"processing_status":%q}`, batchID, procStatus)), nil
+		}
+		return jsonResp(http.StatusInternalServerError, `{"error":"unexpected call"}`), nil
+	})
+	return NewAnthropic("key", "claude-haiku-4-5", 1024, WithHTTPClient(&http.Client{Transport: rt}))
+}
+
+func TestSubmitBatch_ReturnsID(t *testing.T) {
+	id, err := submitStub("msgbatch_123").SubmitBatch(context.Background(), "sys", "user", "2026-07-10")
+	if err != nil {
+		t.Fatalf("SubmitBatch = %v, want nil", err)
+	}
+	if id != "msgbatch_123" {
+		t.Errorf("batch id = %q, want msgbatch_123", id)
+	}
+}
+
+func TestSubmitBatch_Non2xxIsError(t *testing.T) {
+	_, err := stubAnthropic(http.StatusUnauthorized, `{"error":{"message":"bad key"}}`).
+		SubmitBatch(context.Background(), "", "u", "2026-07-10")
+	if err == nil || !strings.Contains(err.Error(), "401") {
+		t.Fatalf("SubmitBatch on 401 = %v, want a status error naming 401", err)
+	}
+}
+
+func TestSubmitBatch_NotConfigured(t *testing.T) {
+	_, err := NewAnthropic("", "m", 10).SubmitBatch(context.Background(), "", "u", "d")
+	if err != ErrNotConfigured {
+		t.Fatalf("SubmitBatch without a key = %v, want ErrNotConfigured", err)
+	}
+}
+
+func TestCollectBatch_Succeeded(t *testing.T) {
+	out, err := collectStub("msgbatch_1", "2026-07-10", "ended", "succeeded", "the briefing").
+		CollectBatch(context.Background(), "msgbatch_1", "2026-07-10")
+	if err != nil {
+		t.Fatalf("CollectBatch = %v, want nil", err)
+	}
+	if out.State != BatchSucceeded {
+		t.Fatalf("state = %v, want BatchSucceeded", out.State)
+	}
+	if out.Summary.Text != "the briefing" {
+		t.Errorf("summary text = %q, want the briefing", out.Summary.Text)
+	}
+}
+
+func TestCollectBatch_Processing(t *testing.T) {
+	out, err := collectStub("msgbatch_1", "2026-07-10", "in_progress", "", "").
+		CollectBatch(context.Background(), "msgbatch_1", "2026-07-10")
+	if err != nil {
+		t.Fatalf("CollectBatch = %v, want nil", err)
+	}
+	if out.State != BatchProcessing {
+		t.Errorf("state = %v, want BatchProcessing (batch not ended)", out.State)
+	}
+}
+
+func TestCollectBatch_RequestFailed(t *testing.T) {
+	out, err := collectStub("msgbatch_1", "2026-07-10", "ended", "expired", "").
+		CollectBatch(context.Background(), "msgbatch_1", "2026-07-10")
+	if err != nil {
+		t.Fatalf("CollectBatch = %v, want nil (a per-request failure is a terminal outcome, not an error)", err)
+	}
+	if out.State != BatchFailed {
+		t.Fatalf("state = %v, want BatchFailed", out.State)
+	}
+	if !strings.Contains(out.Reason, "expired") {
+		t.Errorf("reason = %q, want it to name the expired failure", out.Reason)
+	}
+}
+
+func TestCollectBatch_NotFoundIsTerminal(t *testing.T) {
+	// A 404 on the status read is terminal (stop polling), not a transient error.
+	rt := roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return jsonResp(http.StatusNotFound, `{"error":{"type":"not_found_error"}}`), nil
+	})
+	a := NewAnthropic("key", "m", 10, WithHTTPClient(&http.Client{Transport: rt}))
+	out, err := a.CollectBatch(context.Background(), "msgbatch_gone", "2026-07-10")
+	if err != nil {
+		t.Fatalf("CollectBatch on 404 = %v, want nil (terminal, not transient)", err)
+	}
+	if out.State != BatchFailed {
+		t.Errorf("state = %v, want BatchFailed on 404", out.State)
+	}
 }
 
 func TestSummarize_ConcatenatesTextBlocks(t *testing.T) {

@@ -31,6 +31,9 @@ func (Digest) Fields() []ent.Field {
 		field.String("model").
 			Optional().
 			Comment("The Anthropic model id that produced the summary, e.g. \"claude-haiku-4-5\""),
+		field.String("batch_id").
+			Optional().
+			Comment("The in-flight Anthropic Message Batch id (msgbatch_...) while status is pending, in prod's batch mode. The async digest.collect job polls this batch and clears the field on completion or failure; empty when no batch is in flight (and always empty in local/synchronous mode). See ADR 0013 (Batch API amendment)"),
 		field.Text("error").
 			Optional().
 			Comment("The failure reason when status is failed; cleared on a later successful upsert. Text (not String) because it can carry a multi-KB API error body"),
