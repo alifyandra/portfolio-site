@@ -8,6 +8,12 @@ const (
 	// schedule-triggered (EventBridge Scheduler -> SQS), never produced in-process,
 	// so there is no Go producer for it. See ADR 0013.
 	TypeDigestBuild = "digest.build"
+	// TypeDigestCollect polls in-flight Anthropic Message Batches submitted by
+	// digest.build (prod batch mode) and persists the completed Digest for any that
+	// have ended. Like digest.build it is schedule-triggered (a recurring EventBridge
+	// Scheduler cron -> SQS) and carries no payload — it drains every pending Digest.
+	// See ADR 0013 (Batch API amendment).
+	TypeDigestCollect = "digest.collect"
 )
 
 // ContactNotifyPayload is the body of a TypeContactNotify job.
