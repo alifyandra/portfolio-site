@@ -158,6 +158,13 @@ type Config struct {
 	// worker reads it back to persist the Digest row (ADR 0013, Shape B). Trailing
 	// slash so keys concatenate cleanly.
 	DigestResultPrefix string `env:"DIGEST_RESULT_PREFIX" envDefault:"digest-results/"`
+
+	// SchedulerTickSeconds is how often the worker's in-process scheduler wakes to
+	// look for due ScheduledJob rows (ADR 0014). It ships dormant: with zero enabled
+	// jobs the tick is a cheap no-op, and it no-ops entirely when the queue is not
+	// configured (so local `make up`, which runs no worker, is unaffected). ~60s is
+	// fine for daily/hourly crons; a lower value only tightens dispatch latency.
+	SchedulerTickSeconds int `env:"SCHEDULER_TICK_SECONDS" envDefault:"60"`
 }
 
 // Load reads and validates configuration from the environment.

@@ -12,11 +12,18 @@ import (
 )
 
 // Job is the envelope placed on the queue. Type routes it to a handler in the
-// worker; Payload is the type-specific JSON body. No real jobs exist yet — this
-// is the seam for the future LLM/async work (see ADR 0007).
+// worker; Payload is the type-specific JSON body. See ADR 0007.
+//
+// JobRunID links a message to a JobRun row produced by the in-process scheduler
+// (ADR 0014). Legacy messages (contact.notify, and the EventBridge-driven
+// digest.* jobs) carry no JobRunID: it defaults to zero, and the worker runs
+// those exactly as before (omitempty keeps them byte-identical on the wire). A
+// non-zero JobRunID makes the worker wrap the dispatch in the queued->running->
+// terminal lifecycle guarded by the run's status.
 type Job struct {
-	Type    string          `json:"type"`
-	Payload json.RawMessage `json:"payload"`
+	Type     string          `json:"type"`
+	Payload  json.RawMessage `json:"payload"`
+	JobRunID int             `json:"job_run_id,omitempty"`
 }
 
 // Client is a thin SQS producer/consumer.
