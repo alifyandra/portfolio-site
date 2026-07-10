@@ -106,6 +106,77 @@ func TestPersist_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestPersist_Pending: the batch submit phase persists a pending row carrying the
+// batch id; a later completed Result for the same date upserts to completed and
+// clears batch_id (ADR 0013, Batch API amendment).
+func TestPersist_Pending(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	pending := mustRoundTrip(t, &Result{
+		Date: "2026-07-10", Status: StatusPending, Model: "claude-haiku-4-5", BatchID: "msgbatch_9",
+	})
+	if err := Persist(ctx, client, pending); err != nil {
+		t.Fatalf("persist pending: %v", err)
+	}
+	d, err := client.Digest.Query().Only(ctx)
+	if err != nil {
+		t.Fatalf("expected one digest row: %v", err)
+	}
+	if d.Status != entdigest.StatusPending {
+		t.Errorf("status = %q, want pending", d.Status)
+	}
+	if d.BatchID != "msgbatch_9" {
+		t.Errorf("batch_id = %q, want msgbatch_9", d.BatchID)
+	}
+
+	// The collect phase upserts the same date to completed.
+	completed := mustRoundTrip(t, &Result{Date: "2026-07-10", Status: StatusCompleted, Content: "briefing", Model: "claude-haiku-4-5"})
+	if err := Persist(ctx, client, completed); err != nil {
+		t.Fatalf("persist completed: %v", err)
+	}
+	d, err = client.Digest.Query().Only(ctx)
+	if err != nil {
+		t.Fatalf("expected exactly one digest row after completion: %v", err)
+	}
+	if d.Status != entdigest.StatusCompleted {
+		t.Errorf("status = %q, want completed", d.Status)
+	}
+	if d.Content != "briefing" {
+		t.Errorf("content = %q, want the completed briefing", d.Content)
+	}
+	if d.BatchID != "" {
+		t.Errorf("batch_id = %q, want it cleared once completed", d.BatchID)
+	}
+}
+
+// TestPersist_PendingDoesNotDemoteCompleted: a pending re-submit for a date that
+// already completed (a redelivery) must not overwrite the good digest.
+func TestPersist_PendingDoesNotDemoteCompleted(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	completed := mustRoundTrip(t, &Result{Date: "2026-07-10", Status: StatusCompleted, Content: "good briefing", Model: "m"})
+	if err := Persist(ctx, client, completed); err != nil {
+		t.Fatalf("persist completed: %v", err)
+	}
+	pending := mustRoundTrip(t, &Result{Date: "2026-07-10", Status: StatusPending, Model: "m", BatchID: "msgbatch_late"})
+	if err := Persist(ctx, client, pending); err != nil {
+		t.Fatalf("persist pending: %v", err)
+	}
+
+	d, err := client.Digest.Query().Only(ctx)
+	if err != nil {
+		t.Fatalf("expected exactly one digest row: %v", err)
+	}
+	if d.Status != entdigest.StatusCompleted {
+		t.Errorf("status = %q, want completed (a late pending must not demote a good digest)", d.Status)
+	}
+	if d.Content != "good briefing" {
+		t.Errorf("content = %q, want the completed briefing preserved", d.Content)
+	}
+}
+
 // mustRoundTrip marshals and unmarshals a Result, simulating the S3 hop between the
 // task and the worker, so tests exercise the same bytes that cross the wire.
 func mustRoundTrip(t *testing.T, r *Result) *Result {

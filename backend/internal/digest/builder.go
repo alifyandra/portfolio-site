@@ -65,30 +65,14 @@ func (b *ContentBuilder) Build(ctx context.Context, date time.Time, sources []So
 		return nil, ErrNotConfigured
 	}
 
-	var doc strings.Builder
-	var failures []string
-	fetched := 0
-	for _, s := range sources {
-		content, err := b.fetcher.Fetch(ctx, s.URL)
-		if err != nil {
-			log.Warn("digest: source fetch failed", "source", s.Name, "url", s.URL, "err", err)
-			failures = append(failures, fmt.Sprintf("- %s (%s): %v", s.Name, s.URL, err))
-			continue
-		}
-		fetched++
-		fmt.Fprintf(&doc, "## Source: %s (%s, %s)\n\n%s\n\n", s.Name, s.Type, s.URL, content)
-	}
-
-	// Every source failed: nothing to summarize. Fail so it is retried.
+	doc, fetched, failures := b.buildDocument(ctx, sources, log)
 	if fetched == 0 {
+		// Every source failed: nothing to summarize. Fail so it is retried.
 		runErr := fmt.Errorf("digest: all %d sources failed to fetch", len(sources))
 		return &Result{Date: dayStr, Status: StatusFailed, Error: runErr.Error()}, runErr
 	}
-	if len(failures) > 0 {
-		fmt.Fprintf(&doc, "## Sources that could not be fetched\n\n%s\n", strings.Join(failures, "\n"))
-	}
 
-	summary, err := b.anthropic.Summarize(ctx, systemPrompt, doc.String())
+	summary, err := b.anthropic.Summarize(ctx, systemPrompt, doc)
 	if err != nil {
 		return &Result{Date: dayStr, Status: StatusFailed, Error: err.Error()}, err
 	}
@@ -108,6 +92,69 @@ func (b *ContentBuilder) Build(ctx context.Context, date time.Time, sources []So
 		OutputTokens: summary.OutputTokens,
 		Truncated:    summary.Truncated,
 	}, nil
+}
+
+// Submit is the batch counterpart to Build (prod, ADR 0013 Batch API amendment):
+// it fetches the sources and submits them as a one-request Message Batch (50%
+// cheaper) instead of blocking on inference, returning a pending Result carrying
+// the batch id. The worker persists the pending row and the recurring
+// digest.collect job resolves it once the batch ends. Returns:
+//   - (pending Result, nil) once the batch is submitted;
+//   - (failed Result, err) if every fetch failed or the submit call errored (the
+//     caller persists the failure and signals a retry, same as Build);
+//   - (nil, ErrNotConfigured) when the Anthropic key is absent (caller acks).
+func (b *ContentBuilder) Submit(ctx context.Context, date time.Time, sources []SourceInput) (*Result, error) {
+	day := NormalizeDate(date)
+	dayStr := day.Format("2006-01-02")
+	log := slog.With("date", dayStr)
+
+	if !b.Configured() {
+		log.Warn("digest: anthropic not configured; skipping")
+		return nil, ErrNotConfigured
+	}
+
+	doc, fetched, failures := b.buildDocument(ctx, sources, log)
+	if fetched == 0 {
+		runErr := fmt.Errorf("digest: all %d sources failed to fetch", len(sources))
+		return &Result{Date: dayStr, Status: StatusFailed, Error: runErr.Error()}, runErr
+	}
+
+	// custom_id is the UTC day: one request per batch, keyed so collect can match it.
+	batchID, err := b.anthropic.SubmitBatch(ctx, systemPrompt, doc, dayStr)
+	if err != nil {
+		return &Result{Date: dayStr, Status: StatusFailed, Error: err.Error()}, err
+	}
+	log.Info("digest: submitted batch",
+		"sources", fetched, "failed_sources", len(failures), "batch", batchID, "model", b.anthropic.model)
+	return &Result{
+		Date:    dayStr,
+		Status:  StatusPending,
+		Model:   b.anthropic.model,
+		BatchID: batchID,
+	}, nil
+}
+
+// buildDocument fetches every source and assembles the single Markdown document
+// handed to the model, returning it with the count successfully fetched and the
+// human-readable failures (also appended as a footnote so the model knows what was
+// missing). Shared by Build (synchronous) and Submit (batch). It never touches the
+// database — the fetch is the off-box half of digest.build (ADR 0013, Shape B).
+func (b *ContentBuilder) buildDocument(ctx context.Context, sources []SourceInput, log *slog.Logger) (doc string, fetched int, failures []string) {
+	var sb strings.Builder
+	for _, s := range sources {
+		content, err := b.fetcher.Fetch(ctx, s.URL)
+		if err != nil {
+			log.Warn("digest: source fetch failed", "source", s.Name, "url", s.URL, "err", err)
+			failures = append(failures, fmt.Sprintf("- %s (%s): %v", s.Name, s.URL, err))
+			continue
+		}
+		fetched++
+		fmt.Fprintf(&sb, "## Source: %s (%s, %s)\n\n%s\n\n", s.Name, s.Type, s.URL, content)
+	}
+	if len(failures) > 0 {
+		fmt.Fprintf(&sb, "## Sources that could not be fetched\n\n%s\n", strings.Join(failures, "\n"))
+	}
+	return sb.String(), fetched, failures
 }
 
 // Builder runs the whole digest.build inline in one process: it reads the active
