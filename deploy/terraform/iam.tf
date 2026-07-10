@@ -246,6 +246,33 @@ data "aws_iam_policy_document" "app_deploy" {
     ]
     resources = ["*"]
   }
+
+  # Push the backend image to the digest ECR repo on every backend build so the
+  # Fargate digest task never drifts from the deployed code: the digest image is
+  # the same backend image (built from backend/Dockerfile), the task just selects
+  # the digest binary via command=["digest"]. The auth token is account-scoped so
+  # it needs its own "*" statement; the layer/push actions are scoped to the repo.
+  statement {
+    sid       = "EcrAuthToken"
+    effect    = "Allow"
+    actions   = ["ecr:GetAuthorizationToken"]
+    resources = ["*"]
+  }
+
+  statement {
+    sid    = "PushDigestImage"
+    effect = "Allow"
+    actions = [
+      "ecr:BatchCheckLayerAvailability",
+      "ecr:InitiateLayerUpload",
+      "ecr:UploadLayerPart",
+      "ecr:CompleteLayerUpload",
+      "ecr:PutImage",
+      "ecr:BatchGetImage",
+      "ecr:GetDownloadUrlForLayer",
+    ]
+    resources = [aws_ecr_repository.digest.arn]
+  }
 }
 
 resource "aws_iam_role_policy" "app_deploy" {
