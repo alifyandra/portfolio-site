@@ -107,8 +107,3 @@ output "jobs_dlq_arn" {
   description = "Dead-letter queue ARN for poison job messages."
   value       = aws_sqs_queue.jobs_dlq.arn
 }
-
-output "digest_schedule_name" {
-  description = "EventBridge Scheduler schedule that enqueues digest.build."
-  value       = aws_scheduler_schedule.digest_build.name
-}

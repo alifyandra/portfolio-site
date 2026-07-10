@@ -171,3 +171,13 @@ make fe-dev    # Next.js at :3000 (separate terminal)
   applied, so browser uploads are blocked until it lands. A runtime
   app-friend-only Tool toggle was **deferred** (static→dynamic refactor for
   near-zero payoff at 2-3 Tools).
+- ✅ **Job platform** ([ADR 0014](docs/adr/0014-scheduled-job-platform.md)): generic
+  `ScheduledJob`/`JobRun`/`Artifact`/`ApiToken` registry + an in-process scheduler in
+  the worker (replaces EventBridge for these jobs), scope-only bearer **work API**
+  (`/api/work/claim`+`/complete`) for external runners, and an admin **Jobs** console
+  (`/admin`, incl. create/edit/enable/force-start/run-history + runner-token mint).
+  The digest is now split into `digest.scrape` (on-box) + `digest.llm` (Fargate batch).
+  **Digest cutover complete (2026-07-10):** the scheduler drives scrape (17:30 UTC) +
+  llm (18:00 UTC); the old `digest.build` EventBridge cron is retired. **`digest.collect`
+  stays on EventBridge** (drains the batches `digest.llm` submits). The digest Fargate
+  image is pushed to ECR by CI on every backend build (`push-digest` job).
