@@ -57,6 +57,42 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  # The digest Fargate task runs the same backend image with command=["digest"],
+  # but pulls it from ECR (not GHCR). Push the image to the digest ECR repo on
+  # every backend build so the split-digest task never drifts from the deployed
+  # code (the drift that silently broke digest.llm the first time it ran). This
+  # job is independent of deploy: a failure here (e.g. before the app-deploy role
+  # is granted ECR push in iam.tf) never blocks the api/worker redeploy.
+  push-digest:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # AWS OIDC
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+      - name: Log in to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+      - name: Build and push digest image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          push: true
+          # The digest task def pins arm64 (the VPC's Fargate architecture).
+          platforms: linux/arm64
+          tags: |
+            ${{ steps.ecr.outputs.registry }}/portfolio-digest:latest
+            ${{ steps.ecr.outputs.registry }}/portfolio-digest:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   deploy:
     needs: build-and-push
     runs-on: ubuntu-latest
