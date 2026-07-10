@@ -150,6 +150,51 @@ does the work and then exits (run to completion). Distinct from a [Batch], which
 is user-triggered and watched live. See `docs/adr/0007-sqs-async-queue.md` and
 `docs/adr/0013-scheduled-heavy-compute-jobs.md`.
 
+### ScheduledJob
+The definition of a recurring [Job (async)]: a stable `key` (e.g. `digest.scrape`),
+whether it is `enabled`, its cron `schedule` and timezone, which kind of [Runner]
+should execute it, and the bookkeeping for when it last ran and runs next. Stored in
+the database and edited from the [Admin Console], so the schedule and the on/off
+switch are runtime data rather than Terraform. The in-process scheduler in the worker
+reads these rows on a tick and enqueues a run when one is due, which is what replaced
+the EventBridge schedule for these jobs. See ADR 13 (amended) and ADR 14.
+
+### JobRun
+One execution of a [ScheduledJob]: its status (queued, running, succeeded, failed,
+cancelled), whether it was triggered by the schedule or forced manually, which
+[Runner] ran it, the scheduled time it represents, timing, and any error or stats. A
+unique `(job, scheduled_for)` pairing is what makes the schedule idempotent, so a
+double tick or a redelivered queue message collapses to a single JobRun. The run
+history shown in the [Admin Console] is a list of JobRuns. See ADR 14.
+
+### Artifact
+A stored piece of a [Job (async)]'s input or output, kept so a later stage or a
+[Runner] can consume it without redoing earlier work. The [Digest]'s scrape stage
+writes one Artifact per [Source]; the LLM stage reads them. An Artifact is stored
+inline in the database when small and in S3 when large, and expires after about a
+week. It exists for three reasons: to retain what was scraped, to let the LLM stage
+be re-run over stored input without re-scraping, and to buffer scraped data for an
+external [Runner] to claim (the future home-finance hand-off). See ADR 14.
+
+### Runner
+Where a [Job (async)]'s work actually executes. Three kinds: **server** (the worker
+on the box, or a Fargate task it launches), **local**, and external runners that
+**pull** work over HTTPS instead of being pushed to, namely Alif's laptop running
+Claude Code today and a home finance-scraper server later. An external Runner claims
+a job's [Artifact]s via the work API and posts results back, so the connection is
+always outbound from the runner ("home polls AWS"), never inbound. An external Runner
+authenticates with an [API Token]. See ADR 14.
+
+### API Token
+A scope-only bearer credential that lets an external [Runner] use the work API
+(`/api/work/*`) without a login session. It resolves to a [User] and a scope on a
+request-context key separate from the session cookie's, and it gates only the work
+API, never the [Admin Console] under `/api/admin/*`. Stored as a hash, one token per
+runner (`laptop`, `home-finance`), each independently revocable, so a leaked token
+can only claim and complete the work its scope names. Distinct from the auth session
+that proves who a person is in the browser (ADR 10): an API Token authorizes a
+machine to pull job work. See ADR 14.
+
 ### Digest
 A dated, machine-generated summary of a fixed set of public [Source]s, produced
 by the scheduled `digest.build` [Job (async)] and stored for later reading. It is
