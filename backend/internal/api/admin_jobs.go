@@ -159,6 +159,19 @@ type jobIDInput struct {
 	ID int `path:"id" doc:"ScheduledJob DB id"`
 }
 
+type createJobInput struct {
+	Body struct {
+		Key      string                 `json:"key" minLength:"1" doc:"Stable machine key the scheduler and work API address the job by, e.g. \"digest.scrape\". Unique and immutable once created"`
+		Name     string                 `json:"name" minLength:"1" doc:"Human label shown in the /admin Jobs list"`
+		Stage    string                 `json:"stage" enum:"scrape,llm" doc:"Which half of the two-stage pipeline this job is: scrape fetches raw inputs and persists Artifacts; llm consumes them"`
+		Schedule string                 `json:"schedule" minLength:"1" doc:"Standard cron expression (robfig/cron form) evaluated in the timezone"`
+		Timezone string                 `json:"timezone,omitempty" doc:"IANA timezone name the cron is evaluated in (e.g. UTC, Australia/Melbourne); defaults to UTC"`
+		Runner   string                 `json:"runner,omitempty" enum:"server,local,any" doc:"Where the job may run: server (on-box worker), local (external runner), or any; defaults to server"`
+		Config   map[string]interface{} `json:"config,omitempty" doc:"Free-form per-job settings read at run time (e.g. source filters, model id); the shape is job-specific"`
+		Enabled  bool                   `json:"enabled,omitempty" doc:"Whether the ticker fires this job; defaults to false so a newly registered job stays dormant until an admin turns it on"`
+	}
+}
+
 type updateJobInput struct {
 	ID   int `path:"id" doc:"ScheduledJob DB id"`
 	Body struct {
@@ -212,6 +225,67 @@ func (h *Handler) registerAdminJobs(api huma.API) {
 			out.Body.Jobs = append(out.Body.Jobs, toJobDTO(j, h.latestRunStatus(ctx, j.ID)))
 		}
 		return out, nil
+	})
+
+	huma.Register(api, huma.Operation{
+		OperationID:   "create-job",
+		Method:        http.MethodPost,
+		Path:          "/api/admin/jobs",
+		Summary:       "Register a new scheduled job",
+		Tags:          adminTags,
+		Security:      cookieAuthSecurity,
+		DefaultStatus: http.StatusCreated,
+	}, func(ctx context.Context, in *createJobInput) (*jobOutput, error) {
+		if _, err := requireAdmin(ctx); err != nil {
+			return nil, err
+		}
+
+		stage := in.Body.Stage
+		if stage != string(scheduledjob.StageScrape) && stage != string(scheduledjob.StageLlm) {
+			return nil, huma.Error422UnprocessableEntity("stage must be scrape or llm")
+		}
+		if err := jobs.ValidateCron(in.Body.Schedule); err != nil {
+			return nil, huma.Error422UnprocessableEntity("invalid cron schedule: " + err.Error())
+		}
+		tz := strings.TrimSpace(in.Body.Timezone)
+		if tz == "" {
+			tz = "UTC"
+		}
+		if _, err := time.LoadLocation(tz); err != nil {
+			return nil, huma.Error422UnprocessableEntity("invalid timezone: " + err.Error())
+		}
+		runner := strings.TrimSpace(in.Body.Runner)
+		if runner == "" {
+			runner = string(scheduledjob.RunnerServer)
+		}
+		if runner != string(scheduledjob.RunnerServer) && runner != string(scheduledjob.RunnerLocal) && runner != string(scheduledjob.RunnerAny) {
+			return nil, huma.Error422UnprocessableEntity("runner must be server, local or any")
+		}
+
+		create := h.deps.Ent.ScheduledJob.Create().
+			SetKey(strings.TrimSpace(in.Body.Key)).
+			SetName(strings.TrimSpace(in.Body.Name)).
+			SetStage(scheduledjob.Stage(stage)).
+			SetSchedule(in.Body.Schedule).
+			SetTimezone(tz).
+			SetRunner(scheduledjob.Runner(runner)).
+			SetEnabled(in.Body.Enabled)
+		if len(in.Body.Config) > 0 {
+			create.SetConfig(in.Body.Config)
+		}
+		// next_run_at is deliberately left null: the scheduler initializes it on its
+		// first tick once the job is enabled (see jobs.evaluate), so a create never
+		// fires an immediate backfill from a stale time. Matches how the update handler
+		// clears it when a job is toggled on.
+		saved, err := create.Save(ctx)
+		if ent.IsConstraintError(err) {
+			// The key column is unique; a duplicate is a client error, not a 500.
+			return nil, huma.Error409Conflict("a job with that key already exists")
+		}
+		if err != nil {
+			return nil, huma.Error500InternalServerError("failed to create job", err)
+		}
+		return &jobOutput{Body: toJobDTO(saved, h.latestRunStatus(ctx, saved.ID))}, nil
 	})
 
 	huma.Register(api, huma.Operation{
