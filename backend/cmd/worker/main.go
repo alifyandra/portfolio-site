@@ -55,6 +55,11 @@ func run() error {
 	// no-ops whenever the queue is not configured. It stops on ctx.Done().
 	tickInterval := time.Duration(cfg.SchedulerTickSeconds) * time.Second
 	scheduler := jobs.NewScheduler(app.Deps.Ent, q, tickInterval, slog.Default())
+	// One-shot recovery pass before steady-state ticking: re-drive runs left queued,
+	// reap runs left running, and expire lapsed artifacts from a prior process, so a
+	// worker restart recovers stranded work immediately instead of after a full tick.
+	// Inert while dormant (no scheduler-produced runs, no artifacts).
+	scheduler.RecoverOnce(ctx)
 	go scheduler.Run(ctx)
 
 	slog.Info("worker started, polling for jobs")
@@ -306,7 +311,12 @@ func handleDigestLlm(ctx context.Context, deps *server.Deps, job queue.Job) erro
 	if err != nil {
 		return fmt.Errorf("digest.llm: load run %d: %w", job.JobRunID, err)
 	}
-	day := run.ScheduledFor
+	// Normalize to the UTC calendar day BEFORE keying the Digest, matching every other
+	// date-keying site (the live build, LlmLocal, Persist). ScheduledFor is stored as
+	// whatever instant the tick fired; a job timed in a non-UTC zone near a day boundary
+	// would format to the wrong UTC day and create a duplicate Digest row. Compute the
+	// day once and feed it to both the local and fargate paths.
+	day := digest.NormalizeDate(run.ScheduledFor)
 	runner := ""
 	if run.Edges.Job != nil {
 		runner = string(run.Edges.Job.Runner)
