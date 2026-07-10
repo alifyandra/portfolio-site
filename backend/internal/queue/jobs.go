@@ -14,6 +14,16 @@ const (
 	// Scheduler cron -> SQS) and carries no payload — it drains every pending Digest.
 	// See ADR 0013 (Batch API amendment).
 	TypeDigestCollect = "digest.collect"
+	// TypeDigestScrape is the scrape stage of the split digest (ADR 0014): it fetches
+	// the active Sources on-box and persists one Artifact per source, never calling
+	// Anthropic. It is driven by the in-process scheduler (carries a JobRunID), not
+	// EventBridge. Dormant until a ScheduledJob row for it is enabled.
+	TypeDigestScrape = "digest.scrape"
+	// TypeDigestLlm is the LLM stage of the split digest (ADR 0014): it assembles the
+	// pending scrape Artifacts and summarizes them (inline in local mode, or via the
+	// Fargate task submitting a batch in fargate mode), producing the dated Digest.
+	// Scheduler-driven (carries a JobRunID). Dormant until its ScheduledJob is enabled.
+	TypeDigestLlm = "digest.llm"
 )
 
 // ContactNotifyPayload is the body of a TypeContactNotify job.

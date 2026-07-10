@@ -88,13 +88,19 @@ func run() error {
 // JobRun lifecycle.
 func process(ctx context.Context, deps *server.Deps, q *queue.Client, m queue.Received) {
 	if m.Job.JobRunID == 0 {
-		if err := handle(ctx, deps, m.Job); err != nil {
+		err := handle(ctx, deps, m.Job)
+		if errors.Is(err, errNoHandler) {
+			// Unrecognized legacy type: ack so it does not redeliver forever (the prior
+			// behavior when the default case returned nil).
+			slog.Warn("no handler for job type; acking", "type", m.Job.Type)
+			ack(ctx, q, m)
+			return
+		}
+		if err != nil {
 			slog.Error("job failed", "type", m.Job.Type, "err", err)
 			return // leave on queue for redelivery
 		}
-		if err := q.Delete(ctx, m); err != nil {
-			slog.Error("ack failed", "err", err)
-		}
+		ack(ctx, q, m)
 		return
 	}
 	processScheduled(ctx, deps, q, m)
@@ -162,6 +168,12 @@ func ack(ctx context.Context, q *queue.Client, m queue.Received) {
 	}
 }
 
+// errNoHandler is returned by handle for an unrecognized job type. The legacy path
+// acks it (a stray message should not redeliver forever); the scheduler path records
+// the run failed rather than succeeded (ADR 0014: a ScheduledJob whose key has no
+// handler must not silently look green).
+var errNoHandler = errors.New("no handler for job type")
+
 // handle dispatches a job to its processor. Add cases here as job types appear.
 func handle(ctx context.Context, deps *server.Deps, job queue.Job) error {
 	switch job.Type {
@@ -171,9 +183,12 @@ func handle(ctx context.Context, deps *server.Deps, job queue.Job) error {
 		return handleDigestBuild(ctx, deps, job)
 	case queue.TypeDigestCollect:
 		return handleDigestCollect(ctx, deps, job)
+	case queue.TypeDigestScrape:
+		return handleDigestScrape(ctx, deps, job)
+	case queue.TypeDigestLlm:
+		return handleDigestLlm(ctx, deps, job)
 	default:
-		slog.Warn("no handler for job type", "type", job.Type)
-		return nil
+		return errNoHandler
 	}
 }
 
@@ -255,6 +270,120 @@ func handleDigestCollect(ctx context.Context, deps *server.Deps, _ queue.Job) er
 		return nil
 	}
 	return err // nil after a clean sweep; a query error redelivers (next sweep retries)
+}
+
+// handleDigestScrape runs the digest.scrape stage (ADR 0014): fetch the active
+// Sources on-box and persist one Artifact per source (never calling Anthropic). It is
+// scheduler-driven, so it requires the JobRunID the scheduler stamped on the envelope
+// to attribute the artifacts to the producing run. Dormant until a digest.scrape
+// ScheduledJob row is enabled.
+func handleDigestScrape(ctx context.Context, deps *server.Deps, job queue.Job) error {
+	if deps.Digest == nil {
+		slog.Error("digest.scrape but digest builder is nil; skipping")
+		return nil
+	}
+	if job.JobRunID == 0 {
+		return fmt.Errorf("digest.scrape requires a JobRunID (it is scheduler-driven)")
+	}
+	return deps.Digest.Scrape(ctx, deps.Storage, job.JobRunID, time.Now())
+}
+
+// handleDigestLlm runs the digest.llm stage (ADR 0014): assemble the pending scrape
+// Artifacts and summarize them into the dated Digest. The job's runner decides where
+// the work runs: server runs it on this box (inline in local mode, or on the Fargate
+// task in fargate mode); an external runner (local/any) leaves it claimable for the
+// work API (P5), so the box does nothing. Scheduler-driven.
+func handleDigestLlm(ctx context.Context, deps *server.Deps, job queue.Job) error {
+	if deps.Digest == nil {
+		slog.Error("digest.llm but digest builder is nil; skipping")
+		return nil
+	}
+	if job.JobRunID == 0 {
+		return fmt.Errorf("digest.llm requires a JobRunID (it is scheduler-driven)")
+	}
+
+	run, err := deps.Ent.JobRun.Query().Where(jobrun.IDEQ(job.JobRunID)).WithJob().Only(ctx)
+	if err != nil {
+		return fmt.Errorf("digest.llm: load run %d: %w", job.JobRunID, err)
+	}
+	day := run.ScheduledFor
+	runner := ""
+	if run.Edges.Job != nil {
+		runner = string(run.Edges.Job.Runner)
+	}
+
+	// An external runner pulls the work over the work API (P5); the box leaves the
+	// artifacts pending/claimable and does nothing here.
+	if runner != "" && runner != "server" {
+		slog.Info("digest.llm: job runner is not server; leaving claimable", "runner", runner, "run", job.JobRunID)
+		return nil
+	}
+
+	if deps.Config.DigestMode == "fargate" {
+		if deps.DigestLauncher == nil {
+			slog.Error("digest.llm in fargate mode but launcher is nil; skipping")
+			return nil
+		}
+		return runDigestLlmFargate(ctx, deps, job.JobRunID, day)
+	}
+
+	err = deps.Digest.LlmLocal(ctx, deps.Storage, job.JobRunID, day)
+	if errors.Is(err, digest.ErrNotConfigured) {
+		return nil
+	}
+	return err
+}
+
+// runDigestLlmFargate is the digest.llm fargate path (ADR 0014): the worker assembles
+// the document from the pending scrape Artifacts on-box, writes it to S3, launches the
+// task to read that doc (DIGEST_DOC_KEY) and submit a batch, then reads the pending
+// Result back and persists it. The doc goes via S3 because the ECS task-override env
+// is size-limited; the task never touches Postgres (Shape B). digest.collect resolves
+// the batch. The consumed artifacts are marked done only after a clean submit + persist,
+// so a failed submit leaves them pending for the next run.
+func runDigestLlmFargate(ctx context.Context, deps *server.Deps, runID int, date time.Time) error {
+	day := date.Format("2006-01-02")
+
+	doc, ids, err := deps.Digest.AssembleFromArtifacts(ctx, deps.Storage)
+	if err != nil {
+		return err
+	}
+	if len(ids) == 0 {
+		slog.Warn("digest.llm: no pending artifacts; nothing to summarize", "run", runID)
+		return nil // ack: nothing to do
+	}
+
+	docKey := deps.Config.DigestResultPrefix + "doc-" + day + "-" + uuid.NewString() + ".md"
+	if err := deps.Storage.PutObject(ctx, docKey, "text/markdown", []byte(doc)); err != nil {
+		return fmt.Errorf("digest.llm: write assembled doc to s3: %w", err)
+	}
+	resultKey := deps.Config.DigestResultPrefix + day + "-" + uuid.NewString() + ".json"
+
+	runErr := deps.DigestLauncher.RunToCompletion(ctx, map[string]string{
+		"DIGEST_DATE":       day,
+		"DIGEST_DOC_KEY":    docKey,
+		"DIGEST_RESULT_KEY": resultKey,
+	})
+
+	result := readDigestResult(ctx, deps.Storage, resultKey)
+	_ = deps.Storage.DeleteObject(ctx, resultKey) // best-effort; lifecycle backstops
+	_ = deps.Storage.DeleteObject(ctx, docKey)
+
+	if runErr != nil {
+		if result != nil {
+			if perr := digest.Persist(ctx, deps.Ent, result); perr != nil {
+				slog.Error("digest.llm: persist failed result", "date", day, "err", perr)
+			}
+		}
+		return runErr
+	}
+	if result == nil {
+		return fmt.Errorf("digest.llm: task for %s exited 0 but wrote no result to %s", day, resultKey)
+	}
+	if err := digest.Persist(ctx, deps.Ent, result); err != nil {
+		return err
+	}
+	return deps.Digest.MarkConsumed(ctx, ids, runID)
 }
 
 // runDigestFargate is the DIGEST_MODE=fargate path (ADR 0013, Shape B + Batch API
