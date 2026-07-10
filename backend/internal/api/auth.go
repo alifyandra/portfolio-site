@@ -18,6 +18,12 @@ import (
 // scheme itself is registered on the OpenAPI components in server.New.
 var cookieAuthSecurity = []map[string][]string{{"cookieAuth": {}}}
 
+// bearerAuthSecurity marks an operation as requiring a scope-only bearer token
+// (the external-runner work API, ADR 0014). It mirrors cookieAuthSecurity but for
+// the bearer scheme: work operations carry this and gate on token scope, never on
+// the admin/friend role.
+var bearerAuthSecurity = []map[string][]string{{"bearerAuth": {}}}
+
 type userOutput struct {
 	Body struct {
 		ID                 int     `json:"id"`
