@@ -378,6 +378,57 @@ components:
         - email
         - tier
       type: object
+    CreateJobInputBody:
+      additionalProperties: false
+      properties:
+        $schema:
+          description: A URL to the JSON Schema for this object.
+          examples:
+            - https://example.com/schemas/CreateJobInputBody.json
+          format: uri
+          readOnly: true
+          type: string
+        config:
+          additionalProperties: {}
+          description: Free-form per-job settings read at run time (e.g. source filters, model id); the shape is job-specific
+          type: object
+        enabled:
+          description: Whether the ticker fires this job; defaults to false so a newly registered job stays dormant until an admin turns it on
+          type: boolean
+        key:
+          description: Stable machine key the scheduler and work API address the job by, e.g. "digest.scrape". Unique and immutable once created
+          minLength: 1
+          type: string
+        name:
+          description: Human label shown in the /admin Jobs list
+          minLength: 1
+          type: string
+        runner:
+          description: "Where the job may run: server (on-box worker), local (external runner), or any; defaults to server"
+          enum:
+            - server
+            - local
+            - any
+          type: string
+        schedule:
+          description: Standard cron expression (robfig/cron form) evaluated in the timezone
+          minLength: 1
+          type: string
+        stage:
+          description: "Which half of the two-stage pipeline this job is: scrape fetches raw inputs and persists Artifacts; llm consumes them"
+          enum:
+            - scrape
+            - llm
+          type: string
+        timezone:
+          description: IANA timezone name the cron is evaluated in (e.g. UTC, Australia/Melbourne); defaults to UTC
+          type: string
+      required:
+        - key
+        - name
+        - stage
+        - schedule
+      type: object
     CreatePlaylistInputBody:
       additionalProperties: false
       properties:
@@ -1606,6 +1657,32 @@ paths:
       security:
         - cookieAuth: []
       summary: List the scheduled jobs
+      tags:
+        - admin
+    post:
+      operationId: create-job
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateJobInputBody"
+        required: true
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobDTO"
+          description: Created
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ErrorModel"
+          description: Error
+      security:
+        - cookieAuth: []
+      summary: Register a new scheduled job
       tags:
         - admin
   /api/admin/jobs/{id}:
