@@ -346,16 +346,23 @@ func (s *Scheduler) reapRunning(ctx context.Context, now time.Time) {
 	}
 }
 
-// sweepArtifacts expires artifacts whose TTL has lapsed while still pending or claimed:
-// pending ones a run never consumed (e.g. a prior failed llm day, left behind by the
-// newest-run scoping in AssembleFromArtifacts) and claimed ones whose runner lease
-// lapsed. done/failed/expired artifacts are left untouched, so a consumed (done)
-// artifact stays as retained job output. It sets status=expired rather than deleting,
-// per the schema's claim lifecycle; the S3 lifecycle rule reclaims any object bytes.
+// sweepArtifacts expires ONLY pending artifacts whose TTL has lapsed: ones a run never
+// consumed (e.g. a prior failed llm day, left behind by the newest-run scoping in
+// AssembleFromArtifacts). claimed is deliberately NOT swept. expires_at is overloaded
+// (see the schema comment): it is the TTL for a pending artifact but the claim-lease
+// expiry for a claimed one, and the P5 work API treats a lease-lapsed claimed artifact
+// as reclaimable. Terminally expiring it here would race that reclaim and strand a
+// runner's work. The claimed lease/reclaim lifecycle therefore belongs to the work API,
+// not this sweeper. On the box-local digest path artifacts go pending->done
+// synchronously and never sit claimed, so this scopes cleanly; a claimed artifact
+// abandoned forever is a rare, non-corrupting leak (a dedicated lease column is a later
+// option if the runner path gets heavy). done/failed/expired rows are left untouched,
+// so a consumed (done) artifact stays as retained job output. It sets status=expired
+// rather than deleting; the S3 lifecycle rule reclaims any object bytes.
 func (s *Scheduler) sweepArtifacts(ctx context.Context, now time.Time) {
 	n, err := s.ent.Artifact.Update().
 		Where(
-			artifact.StatusIn(artifact.StatusPending, artifact.StatusClaimed),
+			artifact.StatusEQ(artifact.StatusPending),
 			artifact.ExpiresAtNotNil(),
 			artifact.ExpiresAtLT(now),
 		).
