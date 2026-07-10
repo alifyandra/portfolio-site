@@ -90,9 +90,9 @@ variable "backup_retention_days" {
 # --- Digest / scheduled jobs (ADR 13, see digest.tf) ---------------------------
 
 variable "enable_digest_schedule" {
-  description = "Enable the daily EventBridge Scheduler cron that enqueues digest.build. Enabled 2026-07-09 after the slice was applied, the image pushed, the secrets seeded, and a manual run verified end-to-end in prod (ADR 13). Flipping it is an in-place state update on the schedule, not a resource churn."
+  description = "Enable the daily EventBridge Scheduler cron that enqueues digest.build. Disabled 2026-07-10 for the ADR 0014 cutover: the in-process scheduler now drives digest.scrape + digest.llm ScheduledJob rows instead, so digest.build is retired. digest.collect stays enabled (it drains digest.llm's batches). Flipping it is an in-place state update on the schedule, not a resource churn."
   type        = bool
-  default     = true
+  default     = false
 }
 
 variable "digest_schedule_expression" {
