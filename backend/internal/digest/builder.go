@@ -149,12 +149,91 @@ func (b *ContentBuilder) buildDocument(ctx context.Context, sources []SourceInpu
 			continue
 		}
 		fetched++
-		fmt.Fprintf(&sb, "## Source: %s (%s, %s)\n\n%s\n\n", s.Name, s.Type, s.URL, content)
+		sb.WriteString(SourceSection(s.Name, s.Type, s.URL, content))
 	}
 	if len(failures) > 0 {
 		fmt.Fprintf(&sb, "## Sources that could not be fetched\n\n%s\n", strings.Join(failures, "\n"))
 	}
 	return sb.String(), fetched, failures
+}
+
+// SourceSection formats one source's fetched content as a Markdown section for the
+// digest document. It is the single source of truth for that format, shared by the
+// monolithic buildDocument (digest.build) and the scrape stage (digest.scrape),
+// which persists one section per Source as an Artifact so digest.llm can assemble
+// the document without re-fetching (ADR 0014).
+func SourceSection(name, typ, url, content string) string {
+	return fmt.Sprintf("## Source: %s (%s, %s)\n\n%s\n\n", name, typ, url, content)
+}
+
+// SubmitAssembled is the batch counterpart to BuildAssembled and the assembled-doc
+// analogue of Submit: it submits an already-assembled document (produced by the
+// scrape stage's Artifacts, ADR 0014) as a one-request Message Batch and returns a
+// pending Result carrying the batch id. Unlike Submit it never fetches; the Fargate
+// task uses it in the digest.llm DIGEST_DOC_KEY path. Returns (nil, ErrNotConfigured)
+// with no key, (failed Result, err) on an empty doc or a submit error.
+func (b *ContentBuilder) SubmitAssembled(ctx context.Context, date time.Time, doc string) (*Result, error) {
+	day := NormalizeDate(date)
+	dayStr := day.Format("2006-01-02")
+	log := slog.With("date", dayStr)
+
+	if !b.Configured() {
+		log.Warn("digest: anthropic not configured; skipping")
+		return nil, ErrNotConfigured
+	}
+	if strings.TrimSpace(doc) == "" {
+		runErr := fmt.Errorf("digest: assembled document is empty; nothing to summarize")
+		return &Result{Date: dayStr, Status: StatusFailed, Error: runErr.Error()}, runErr
+	}
+
+	batchID, err := b.anthropic.SubmitBatch(ctx, systemPrompt, doc, dayStr)
+	if err != nil {
+		return &Result{Date: dayStr, Status: StatusFailed, Error: err.Error()}, err
+	}
+	log.Info("digest: submitted batch (assembled)", "batch", batchID, "model", b.anthropic.model)
+	return &Result{
+		Date:    dayStr,
+		Status:  StatusPending,
+		Model:   b.anthropic.model,
+		BatchID: batchID,
+	}, nil
+}
+
+// BuildAssembled is the synchronous (DIGEST_MODE=local) analogue of Build for an
+// already-assembled document (from scrape-stage Artifacts, ADR 0014): it summarizes
+// the doc in one blocking call and returns a completed Result. It never fetches.
+func (b *ContentBuilder) BuildAssembled(ctx context.Context, date time.Time, doc string) (*Result, error) {
+	day := NormalizeDate(date)
+	dayStr := day.Format("2006-01-02")
+	log := slog.With("date", dayStr)
+
+	if !b.Configured() {
+		log.Warn("digest: anthropic not configured; skipping")
+		return nil, ErrNotConfigured
+	}
+	if strings.TrimSpace(doc) == "" {
+		runErr := fmt.Errorf("digest: assembled document is empty; nothing to summarize")
+		return &Result{Date: dayStr, Status: StatusFailed, Error: runErr.Error()}, runErr
+	}
+
+	summary, err := b.anthropic.Summarize(ctx, systemPrompt, doc)
+	if err != nil {
+		return &Result{Date: dayStr, Status: StatusFailed, Error: err.Error()}, err
+	}
+	if summary.Truncated {
+		log.Warn("digest: summary truncated at max_tokens")
+	}
+	log.Info("digest: built (assembled)",
+		"model", summary.Model, "input_tokens", summary.InputTokens, "output_tokens", summary.OutputTokens)
+	return &Result{
+		Date:         dayStr,
+		Status:       StatusCompleted,
+		Content:      summary.Text,
+		Model:        summary.Model,
+		InputTokens:  summary.InputTokens,
+		OutputTokens: summary.OutputTokens,
+		Truncated:    summary.Truncated,
+	}, nil
 }
 
 // Builder runs the whole digest.build inline in one process: it reads the active
