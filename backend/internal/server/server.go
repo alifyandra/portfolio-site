@@ -104,6 +104,14 @@ func New(deps *Deps) (http.Handler, huma.API) {
 		In:   "cookie",
 		Name: "session",
 	}
+	// Register the scope-only bearer scheme the external-runner work API uses (ADR
+	// 0014). It is entirely separate from cookieAuth: work operations gate on token
+	// scope, never on the admin/friend role, and a bearer identity is invisible to
+	// the cookie-only admin console.
+	humaCfg.Components.SecuritySchemes["bearerAuth"] = &huma.SecurityScheme{
+		Type:   "http",
+		Scheme: "bearer",
+	}
 
 	humaAPI := humachi.New(r, humaCfg)
 
