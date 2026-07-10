@@ -13,6 +13,7 @@ import (
 	_ "modernc.org/sqlite" // pure-Go sqlite driver (no CGO) for in-memory test DBs
 
 	"github.com/alifyandra/portfolio-site/backend/ent"
+	"github.com/alifyandra/portfolio-site/backend/ent/artifact"
 	"github.com/alifyandra/portfolio-site/backend/ent/jobrun"
 	"github.com/alifyandra/portfolio-site/backend/ent/scheduledjob"
 	"github.com/alifyandra/portfolio-site/backend/internal/queue"
@@ -277,6 +278,152 @@ func TestTick_BadCronSkipsJobKeepsGoing(t *testing.T) {
 	}
 	if q.enqueued[0].Type != "digest.scrape" {
 		t.Errorf("enqueued type = %q, want digest.scrape", q.enqueued[0].Type)
+	}
+}
+
+// TestTick_RedrivesStrandedQueuedRun: a scheduler-driven run left `queued` past the
+// re-drive threshold (its post-commit enqueue was lost) is re-enqueued on the tick.
+// The job itself is not due (next_run_at in the future), so the only enqueue is the
+// re-drive.
+func TestTick_RedrivesStrandedQueuedRun(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	future := time.Now().Add(time.Hour)
+	job := seedJob(t, client, "digest.scrape", true, &future) // enabled but not due
+
+	// A run stranded queued long enough to cross queuedRedriveAfter.
+	stale := time.Now().Add(-queuedRedriveAfter - time.Minute)
+	run := client.JobRun.Create().
+		SetStatus(jobrun.StatusQueued).
+		SetTrigger(jobrun.TriggerSchedule).
+		SetScheduledFor(time.Now()).
+		SetCreatedAt(stale).
+		SetJobID(job.ID).
+		SaveX(ctx)
+
+	q := &stubQueue{configured: true}
+	s := NewScheduler(client, q, time.Minute, nil)
+	s.tick(ctx, time.Now())
+
+	if len(q.enqueued) != 1 {
+		t.Fatalf("enqueued %d jobs, want 1 (the re-drive)", len(q.enqueued))
+	}
+	if got := q.enqueued[0]; got.JobRunID != run.ID || got.Type != "digest.scrape" {
+		t.Errorf("re-drove %+v, want type=digest.scrape JobRunID=%d", got, run.ID)
+	}
+}
+
+// TestTick_DoesNotRedriveFreshQueuedRun: a run only just queued (within the threshold)
+// is left alone — it is presumably in flight, not stranded.
+func TestTick_DoesNotRedriveFreshQueuedRun(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	future := time.Now().Add(time.Hour)
+	job := seedJob(t, client, "digest.scrape", true, &future)
+
+	client.JobRun.Create().
+		SetStatus(jobrun.StatusQueued).
+		SetTrigger(jobrun.TriggerSchedule).
+		SetScheduledFor(time.Now()).
+		SetJobID(job.ID). // created_at defaults to now: fresh, inside the threshold
+		SaveX(ctx)
+
+	q := &stubQueue{configured: true}
+	s := NewScheduler(client, q, time.Minute, nil)
+	s.tick(ctx, time.Now())
+
+	if len(q.enqueued) != 0 {
+		t.Errorf("enqueued %d jobs, want 0 (a fresh queued run is not re-driven)", len(q.enqueued))
+	}
+}
+
+// TestTick_ReapsStuckRunningRun: a scheduler-driven run stuck `running` past the lease
+// (the worker crashed after claiming it) is marked failed, with an error and a
+// finished_at. A healthy in-flight run (started recently) is untouched.
+func TestTick_ReapsStuckRunningRun(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	job := seedJob(t, client, "digest.scrape", false, nil) // disabled: it never fires
+
+	old := time.Now().Add(-runningLease - time.Minute)
+	stuck := client.JobRun.Create().
+		SetStatus(jobrun.StatusRunning).
+		SetTrigger(jobrun.TriggerSchedule).
+		SetScheduledFor(time.Now()).
+		SetStartedAt(old).
+		SetJobID(job.ID).
+		SaveX(ctx)
+	fresh := client.JobRun.Create().
+		SetStatus(jobrun.StatusRunning).
+		SetTrigger(jobrun.TriggerSchedule).
+		SetScheduledFor(time.Now()).
+		SetStartedAt(time.Now()).
+		SetJobID(job.ID).
+		SaveX(ctx)
+
+	q := &stubQueue{configured: true}
+	s := NewScheduler(client, q, time.Minute, nil)
+	s.tick(ctx, time.Now())
+
+	reaped := client.JobRun.GetX(ctx, stuck.ID)
+	if reaped.Status != jobrun.StatusFailed {
+		t.Errorf("stuck run status = %q, want failed", reaped.Status)
+	}
+	if reaped.Error == "" {
+		t.Error("reaped run has no error message")
+	}
+	if reaped.FinishedAt == nil {
+		t.Error("reaped run has no finished_at")
+	}
+	if still := client.JobRun.GetX(ctx, fresh.ID); still.Status != jobrun.StatusRunning {
+		t.Errorf("fresh run status = %q, want it left running", still.Status)
+	}
+}
+
+// TestTick_SweepsExpiredArtifacts: a pending artifact past its TTL is expired; a done
+// artifact past its TTL and a pending artifact still within TTL are both left alone.
+func TestTick_SweepsExpiredArtifacts(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	job := seedJob(t, client, "digest.scrape", false, nil)
+	// A terminal run to hang the artifacts off of, so neither the re-drive nor the
+	// reaper touches it during the tick.
+	run := client.JobRun.Create().
+		SetStatus(jobrun.StatusSucceeded).
+		SetTrigger(jobrun.TriggerSchedule).
+		SetScheduledFor(time.Now()).
+		SetJobID(job.ID).
+		SaveX(ctx)
+
+	past := time.Now().Add(-time.Hour)
+	future := time.Now().Add(time.Hour)
+	mk := func(status artifact.Status, expires time.Time) int {
+		return client.Artifact.Create().
+			SetLabel("source:test").
+			SetStorage(artifact.StorageInline).
+			SetContent("x").
+			SetStatus(status).
+			SetExpiresAt(expires).
+			SetJobID(job.ID).
+			SetProducedByID(run.ID).
+			SaveX(ctx).ID
+	}
+	expiredPending := mk(artifact.StatusPending, past)
+	donePast := mk(artifact.StatusDone, past)
+	pendingFuture := mk(artifact.StatusPending, future)
+
+	q := &stubQueue{configured: true}
+	s := NewScheduler(client, q, time.Minute, nil)
+	s.tick(ctx, time.Now())
+
+	if got := client.Artifact.GetX(ctx, expiredPending).Status; got != artifact.StatusExpired {
+		t.Errorf("lapsed pending artifact status = %q, want expired", got)
+	}
+	if got := client.Artifact.GetX(ctx, donePast).Status; got != artifact.StatusDone {
+		t.Errorf("done artifact status = %q, want it left done (not swept)", got)
+	}
+	if got := client.Artifact.GetX(ctx, pendingFuture).Status; got != artifact.StatusPending {
+		t.Errorf("in-TTL pending artifact status = %q, want it left pending", got)
 	}
 }
 

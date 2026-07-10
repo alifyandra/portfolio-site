@@ -22,9 +22,30 @@ import (
 	"github.com/robfig/cron/v3"
 
 	"github.com/alifyandra/portfolio-site/backend/ent"
+	"github.com/alifyandra/portfolio-site/backend/ent/artifact"
 	"github.com/alifyandra/portfolio-site/backend/ent/jobrun"
 	"github.com/alifyandra/portfolio-site/backend/ent/scheduledjob"
 	"github.com/alifyandra/portfolio-site/backend/internal/queue"
+)
+
+// Maintenance thresholds for the re-drive/reaper/sweeper folded into each tick. They
+// are constants (not env): the values only need to sit well clear of normal timings,
+// and the worker's queued->running claim guard plus the digest's date-idempotency make
+// a redundant re-drive or a reap-then-finish race harmless, so there is no operational
+// reason to tune them per environment.
+const (
+	// queuedRedriveAfter is how long a JobRun may sit `queued` before the scheduler
+	// re-enqueues it. It recovers a run whose post-commit enqueue failed (the run row
+	// was committed but no SQS message exists). Comfortably longer than the worker's
+	// claim+process latency so a run merely waiting to be picked up is not re-driven
+	// mid-flight; even if it is, the worker's queued->running guard makes the duplicate
+	// message a no-op.
+	queuedRedriveAfter = 5 * time.Minute
+	// runningLease is how long a JobRun may stay `running` before the reaper fails it.
+	// It recovers a worker that crashed between claim and terminal. Far longer than any
+	// real job (the digest submit is seconds; a Fargate llm run is a couple of minutes)
+	// so a healthy long run is never reaped while genuinely in flight.
+	runningLease = 30 * time.Minute
 )
 
 // enqueuer is the queue dependency the scheduler needs: it enqueues a message and
@@ -105,6 +126,31 @@ func (s *Scheduler) tick(ctx context.Context, now time.Time) {
 			s.log.Error("scheduler: job skipped", "job", job.Key, "err", err)
 		}
 	}
+
+	// Recover stranded work and retire expired artifacts on the same tick. Inert while
+	// dormant: with zero enabled jobs there are no scheduler-produced runs and no
+	// artifacts, so all three sweeps match nothing.
+	s.maintenance(ctx, now)
+}
+
+// maintenance runs the three background sweeps once at wall-clock time now: re-drive
+// runs stuck `queued`, reap runs stuck `running`, and expire lapsed artifacts. Shared
+// by every tick and by the one-shot RecoverOnce at worker startup.
+func (s *Scheduler) maintenance(ctx context.Context, now time.Time) {
+	s.redriveQueued(ctx, now)
+	s.reapRunning(ctx, now)
+	s.sweepArtifacts(ctx, now)
+}
+
+// RecoverOnce runs the maintenance sweeps a single time. The worker calls it at
+// startup so runs stranded (or artifacts expired) while the worker was down are
+// recovered immediately, rather than only after the first full tick interval. It
+// respects the same inert-when-unconfigured guard as tick.
+func (s *Scheduler) RecoverOnce(ctx context.Context) {
+	if s.queue == nil || !s.queue.Configured() {
+		return
+	}
+	s.maintenance(ctx, time.Now())
 }
 
 // evaluate advances a single job for this tick: initialize a fresh pointer,
@@ -156,8 +202,20 @@ func (s *Scheduler) evaluate(ctx context.Context, job *ent.ScheduledJob, now tim
 
 	// Enqueue AFTER the commit. At-least-once is acceptable: the worker transitions
 	// the run queued->running only if it is still queued, so a redelivery no-ops. If
-	// the enqueue fails we log and move on rather than crash the ticker — the run
-	// sits queued and an admin force-run (P6) is the backstop.
+	// the enqueue fails we log and move on rather than crash the ticker — the run sits
+	// queued and the redriveQueued sweep re-enqueues it on a later tick.
+	if err := s.enqueueRun(ctx, job, runID); err != nil {
+		s.log.Error("scheduler: enqueue failed", "job", job.Key, "run", runID, "err", err)
+		return nil
+	}
+	s.log.Info("scheduler: enqueued run", "job", job.Key, "run", runID, "scheduled_for", scheduledFor)
+	return nil
+}
+
+// enqueueRun places one run's message on the queue, marshalling the job's config as
+// the payload (empty object when the job has none). Shared by the fire path and the
+// redriveQueued sweep so both build the envelope identically.
+func (s *Scheduler) enqueueRun(ctx context.Context, job *ent.ScheduledJob, runID int) error {
 	body := []byte("{}")
 	if len(job.Config) > 0 {
 		b, err := json.Marshal(job.Config)
@@ -166,16 +224,11 @@ func (s *Scheduler) evaluate(ctx context.Context, job *ent.ScheduledJob, now tim
 		}
 		body = b
 	}
-	if err := s.queue.Enqueue(ctx, queue.Job{
+	return s.queue.Enqueue(ctx, queue.Job{
 		Type:     job.Key,
 		Payload:  json.RawMessage(body),
 		JobRunID: runID,
-	}); err != nil {
-		s.log.Error("scheduler: enqueue failed", "job", job.Key, "run", runID, "err", err)
-		return nil
-	}
-	s.log.Info("scheduler: enqueued run", "job", job.Key, "run", runID, "scheduled_for", scheduledFor)
-	return nil
+	})
 }
 
 // fire inserts the JobRun for this tick and advances the job's pointer inside one
@@ -229,6 +282,92 @@ func (s *Scheduler) fire(ctx context.Context, job *ent.ScheduledJob, scheduledFo
 		return false, 0, fmt.Errorf("commit: %w", err)
 	}
 	return fresh, id, nil
+}
+
+// redriveQueued re-enqueues scheduler-driven runs that have sat `queued` past
+// queuedRedriveAfter. That state means the run row committed but its post-commit
+// enqueue never landed (or its message was lost), so there is no worker to pick it up.
+// Only trigger=schedule runs are touched, never the legacy JobRunID==0 live-digest
+// path (which creates no JobRun rows at all), and re-enqueue is safe because the
+// worker's queued->running claim guard collapses any duplicate.
+func (s *Scheduler) redriveQueued(ctx context.Context, now time.Time) {
+	cutoff := now.Add(-queuedRedriveAfter)
+	runs, err := s.ent.JobRun.Query().
+		Where(
+			jobrun.StatusEQ(jobrun.StatusQueued),
+			jobrun.TriggerEQ(jobrun.TriggerSchedule),
+			jobrun.CreatedAtLT(cutoff),
+		).
+		WithJob().
+		All(ctx)
+	if err != nil {
+		s.log.Error("scheduler: redrive query", "err", err)
+		return
+	}
+	for _, run := range runs {
+		if run.Edges.Job == nil {
+			// A run with no job edge cannot be re-enqueued (we would not know its key);
+			// skip rather than guess. Should not happen: the job edge is Required.
+			s.log.Error("scheduler: redrive skipped, run has no job", "run", run.ID)
+			continue
+		}
+		if err := s.enqueueRun(ctx, run.Edges.Job, run.ID); err != nil {
+			s.log.Error("scheduler: redrive enqueue failed", "run", run.ID, "job", run.Edges.Job.Key, "err", err)
+			continue
+		}
+		s.log.Info("scheduler: re-drove stranded queued run", "run", run.ID, "job", run.Edges.Job.Key)
+	}
+}
+
+// reapRunning fails scheduler-driven runs stuck `running` past runningLease. That
+// state means a worker claimed the run (queued->running) then died before writing a
+// terminal status. Failing it (rather than re-queuing) matches the scheduled-job retry
+// model: the next scheduled tick is the retry, so a reaped run does not re-run here and
+// risk duplicate side effects. Only trigger=schedule runs are touched. The lease is far
+// longer than any real job, so a healthy in-flight run is never reaped.
+func (s *Scheduler) reapRunning(ctx context.Context, now time.Time) {
+	cutoff := now.Add(-runningLease)
+	n, err := s.ent.JobRun.Update().
+		Where(
+			jobrun.StatusEQ(jobrun.StatusRunning),
+			jobrun.TriggerEQ(jobrun.TriggerSchedule),
+			jobrun.StartedAtLT(cutoff),
+		).
+		SetStatus(jobrun.StatusFailed).
+		SetError("reaped: exceeded running lease").
+		SetFinishedAt(now).
+		Save(ctx)
+	if err != nil {
+		s.log.Error("scheduler: reap running", "err", err)
+		return
+	}
+	if n > 0 {
+		s.log.Warn("scheduler: reaped stuck running runs", "count", n)
+	}
+}
+
+// sweepArtifacts expires artifacts whose TTL has lapsed while still pending or claimed:
+// pending ones a run never consumed (e.g. a prior failed llm day, left behind by the
+// newest-run scoping in AssembleFromArtifacts) and claimed ones whose runner lease
+// lapsed. done/failed/expired artifacts are left untouched, so a consumed (done)
+// artifact stays as retained job output. It sets status=expired rather than deleting,
+// per the schema's claim lifecycle; the S3 lifecycle rule reclaims any object bytes.
+func (s *Scheduler) sweepArtifacts(ctx context.Context, now time.Time) {
+	n, err := s.ent.Artifact.Update().
+		Where(
+			artifact.StatusIn(artifact.StatusPending, artifact.StatusClaimed),
+			artifact.ExpiresAtNotNil(),
+			artifact.ExpiresAtLT(now),
+		).
+		SetStatus(artifact.StatusExpired).
+		Save(ctx)
+	if err != nil {
+		s.log.Error("scheduler: sweep expired artifacts", "err", err)
+		return
+	}
+	if n > 0 {
+		s.log.Info("scheduler: expired lapsed artifacts", "count", n)
+	}
 }
 
 // parseSchedule parses a standard cron expression and resolves the job's timezone.
