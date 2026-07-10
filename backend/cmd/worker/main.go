@@ -15,10 +15,12 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/alifyandra/portfolio-site/backend/ent/jobrun"
 	"github.com/alifyandra/portfolio-site/backend/internal/bootstrap"
 	"github.com/alifyandra/portfolio-site/backend/internal/config"
 	"github.com/alifyandra/portfolio-site/backend/internal/digest"
 	"github.com/alifyandra/portfolio-site/backend/internal/email"
+	"github.com/alifyandra/portfolio-site/backend/internal/jobs"
 	"github.com/alifyandra/portfolio-site/backend/internal/queue"
 	"github.com/alifyandra/portfolio-site/backend/internal/server"
 	"github.com/alifyandra/portfolio-site/backend/internal/storage"
@@ -47,6 +49,14 @@ func run() error {
 	defer app.Close()
 
 	q := app.Deps.Queue
+
+	// Start the in-process scheduler alongside the poll loop (ADR 0014). It ships
+	// dormant: with zero enabled ScheduledJob rows it enqueues nothing, and it
+	// no-ops whenever the queue is not configured. It stops on ctx.Done().
+	tickInterval := time.Duration(cfg.SchedulerTickSeconds) * time.Second
+	scheduler := jobs.NewScheduler(app.Deps.Ent, q, tickInterval, slog.Default())
+	go scheduler.Run(ctx)
+
 	slog.Info("worker started, polling for jobs")
 
 	for {
@@ -66,14 +76,89 @@ func run() error {
 			continue
 		}
 		for _, m := range msgs {
-			if err := handle(ctx, app.Deps, m.Job); err != nil {
-				slog.Error("job failed", "type", m.Job.Type, "err", err)
-				continue // leave on queue for redelivery
-			}
-			if err := q.Delete(ctx, m); err != nil {
-				slog.Error("ack failed", "err", err)
-			}
+			process(ctx, app.Deps, q, m)
 		}
+	}
+}
+
+// process runs one received message. A message with no JobRunID is legacy
+// (contact.notify, EventBridge-driven digest.*) and keeps its exact prior
+// behavior: run handle, leave on the queue on error, ack on success. A message
+// carrying a JobRunID is scheduler-driven (ADR 0014) and is wrapped in the
+// JobRun lifecycle.
+func process(ctx context.Context, deps *server.Deps, q *queue.Client, m queue.Received) {
+	if m.Job.JobRunID == 0 {
+		if err := handle(ctx, deps, m.Job); err != nil {
+			slog.Error("job failed", "type", m.Job.Type, "err", err)
+			return // leave on queue for redelivery
+		}
+		if err := q.Delete(ctx, m); err != nil {
+			slog.Error("ack failed", "err", err)
+		}
+		return
+	}
+	processScheduled(ctx, deps, q, m)
+}
+
+// processScheduled runs a scheduler-driven message and records the JobRun
+// lifecycle (ADR 0014). The run is transitioned queued->running only if it is
+// still queued, so a duplicate or an SQS redelivery no-ops. Terminal outcomes
+// always ack: for scheduled jobs the retry is the next scheduled tick, not SQS
+// redelivery, so acking a failure avoids a redelivery loop fighting the status
+// guard.
+func processScheduled(ctx context.Context, deps *server.Deps, q *queue.Client, m queue.Received) {
+	runID := m.Job.JobRunID
+
+	// Atomically claim the run: queued -> running, but only while it is still
+	// queued. Zero rows affected means it is not queued (a duplicate/redelivery, or
+	// already terminal): ack and do not re-run.
+	claimed, err := deps.Ent.JobRun.Update().
+		Where(jobrun.IDEQ(runID), jobrun.StatusEQ(jobrun.StatusQueued)).
+		SetStatus(jobrun.StatusRunning).
+		SetStartedAt(time.Now()).
+		Save(ctx)
+	if err != nil {
+		// A DB error transitioning the run is infrastructural, not a job failure: we
+		// have not run anything and cannot record a terminal state, so leave the
+		// message on the queue for redelivery rather than acking work we did not do.
+		slog.Error("scheduled run: claim failed", "run", runID, "type", m.Job.Type, "err", err)
+		return
+	}
+	if claimed == 0 {
+		slog.Info("scheduled run: not queued (duplicate or terminal); acking", "run", runID, "type", m.Job.Type)
+		ack(ctx, q, m)
+		return
+	}
+
+	if runErr := handle(ctx, deps, m.Job); runErr != nil {
+		slog.Error("scheduled run failed", "run", runID, "type", m.Job.Type, "err", runErr)
+		finishRun(ctx, deps, runID, jobrun.StatusFailed, runErr.Error())
+		ack(ctx, q, m) // ack anyway: the next scheduled tick is the retry, not SQS
+		return
+	}
+	finishRun(ctx, deps, runID, jobrun.StatusSucceeded, "")
+	ack(ctx, q, m)
+}
+
+// finishRun writes a terminal status and finished_at onto the run (best-effort:
+// a failure to record it is logged, not propagated — the message is acked either
+// way).
+func finishRun(ctx context.Context, deps *server.Deps, runID int, status jobrun.Status, errText string) {
+	upd := deps.Ent.JobRun.UpdateOneID(runID).
+		SetStatus(status).
+		SetFinishedAt(time.Now())
+	if errText != "" {
+		upd.SetError(errText)
+	}
+	if err := upd.Exec(ctx); err != nil {
+		slog.Error("scheduled run: record terminal status failed", "run", runID, "status", status, "err", err)
+	}
+}
+
+// ack deletes the message from the queue, logging a failure.
+func ack(ctx context.Context, q *queue.Client, m queue.Received) {
+	if err := q.Delete(ctx, m); err != nil {
+		slog.Error("ack failed", "err", err)
 	}
 }
 
