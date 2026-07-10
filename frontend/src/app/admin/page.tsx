@@ -12,12 +12,14 @@ import { useAuth } from '@/lib/auth';
 import { ProjectsSection } from '@/components/admin/ProjectsSection';
 import { FriendsSection } from '@/components/admin/FriendsSection';
 import { PlaylistsSection } from '@/components/admin/PlaylistsSection';
+import { JobsSection } from '@/components/admin/JobsSection';
 import { citronCard, citronBadge } from '@/components/admin/ui';
 
 const tabs = [
   { id: 'projects', label: 'Projects' },
   { id: 'friends', label: 'Friends' },
   { id: 'playlists', label: 'Playlists' },
+  { id: 'jobs', label: 'Jobs' },
 ] as const;
 
 type TabId = (typeof tabs)[number]['id'];
@@ -37,8 +39,8 @@ export default function AdminPage() {
           <span className="text-citron">Console</span>
         </h1>
         <p className="max-w-xl leading-relaxed text-slate-300">
-          Manage portfolio projects, friend access grants and the curated
-          Spotify playlist set.
+          Manage portfolio projects, friend access grants, the curated Spotify
+          playlist set, and scheduled jobs.
         </p>
       </header>
 
@@ -129,6 +131,7 @@ export default function AdminPage() {
           {tab === 'projects' && <ProjectsSection />}
           {tab === 'friends' && <FriendsSection />}
           {tab === 'playlists' && <PlaylistsSection />}
+          {tab === 'jobs' && <JobsSection />}
         </div>
       )}
     </main>
