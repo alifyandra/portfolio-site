@@ -180,3 +180,161 @@ func TestRun_NotConfigured(t *testing.T) {
 		t.Fatalf("Run without a key = %v, want ErrNotConfigured", err)
 	}
 }
+
+// --- Batch API (ADR 0013 amendment): Submit + Collect ------------------------
+
+// seedPending inserts a pending Digest row carrying an in-flight batch id, as the
+// submit phase would (via Persist) before collect resolves it.
+func seedPending(t *testing.T, client *ent.Client, day time.Time, batchID string) {
+	t.Helper()
+	if _, err := client.Digest.Create().
+		SetDate(NormalizeDate(day)).
+		SetStatus(entdigest.StatusPending).
+		SetModel("claude-haiku-4-5").
+		SetBatchID(batchID).
+		Save(context.Background()); err != nil {
+		t.Fatalf("seed pending digest: %v", err)
+	}
+}
+
+// TestSubmit_Pending: the batch submit path returns a pending Result carrying the
+// batch id, with no DB access (off-box half, Shape B).
+func TestSubmit_Pending(t *testing.T) {
+	ctx := context.Background()
+	b := NewContentBuilder(submitStub("msgbatch_abc"), stubFetcher{content: "raw"})
+	day := time.Date(2026, 7, 10, 13, 0, 0, 0, time.UTC)
+
+	r, err := b.Submit(ctx, day, testSources)
+	if err != nil {
+		t.Fatalf("Submit = %v, want nil", err)
+	}
+	if r == nil || r.Status != StatusPending {
+		t.Fatalf("result = %+v, want a pending Result", r)
+	}
+	if r.BatchID != "msgbatch_abc" {
+		t.Errorf("batch id = %q, want msgbatch_abc", r.BatchID)
+	}
+	if r.Date != "2026-07-10" {
+		t.Errorf("date = %q, want normalized 2026-07-10", r.Date)
+	}
+	if r.Model == "" {
+		t.Error("model is empty, want it recorded on the pending row")
+	}
+}
+
+// TestSubmit_AllFail: every fetch fails -> a failed Result AND an error, without
+// submitting a batch (mirrors Build's all-fail contract).
+func TestSubmit_AllFail(t *testing.T) {
+	ctx := context.Background()
+	b := NewContentBuilder(submitStub("unused"), stubFetcher{err: io.ErrUnexpectedEOF})
+
+	r, err := b.Submit(ctx, time.Now(), testSources)
+	if err == nil {
+		t.Fatal("Submit with all fetches failing = nil error, want an error")
+	}
+	if r == nil || r.Status != StatusFailed {
+		t.Fatalf("result = %+v, want a failed Result", r)
+	}
+}
+
+// TestCollect_CompletesPending: a pending row whose batch has ended and succeeded
+// is upserted to completed, with the content written and batch_id cleared.
+func TestCollect_CompletesPending(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	day := time.Date(2026, 7, 10, 0, 0, 0, 0, time.UTC)
+	seedPending(t, client, day, "msgbatch_1")
+
+	b := NewBuilder(client, collectStub("msgbatch_1", "2026-07-10", "ended", "succeeded", "final briefing"), stubFetcher{})
+	if err := b.Collect(ctx); err != nil {
+		t.Fatalf("Collect = %v, want nil", err)
+	}
+
+	d, err := client.Digest.Query().Only(ctx)
+	if err != nil {
+		t.Fatalf("expected one digest row: %v", err)
+	}
+	if d.Status != entdigest.StatusCompleted {
+		t.Errorf("status = %q, want completed", d.Status)
+	}
+	if d.Content != "final briefing" {
+		t.Errorf("content = %q, want the collected briefing", d.Content)
+	}
+	if d.BatchID != "" {
+		t.Errorf("batch_id = %q, want it cleared once resolved", d.BatchID)
+	}
+}
+
+// TestCollect_FailsPending: a pending row whose batch ended in a terminal failure
+// is demoted to failed with the reason recorded and batch_id cleared.
+func TestCollect_FailsPending(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	day := time.Date(2026, 7, 10, 0, 0, 0, 0, time.UTC)
+	seedPending(t, client, day, "msgbatch_2")
+
+	b := NewBuilder(client, collectStub("msgbatch_2", "2026-07-10", "ended", "expired", ""), stubFetcher{})
+	if err := b.Collect(ctx); err != nil {
+		t.Fatalf("Collect = %v, want nil", err)
+	}
+
+	d, err := client.Digest.Query().Only(ctx)
+	if err != nil {
+		t.Fatalf("expected one digest row: %v", err)
+	}
+	if d.Status != entdigest.StatusFailed {
+		t.Errorf("status = %q, want failed", d.Status)
+	}
+	if d.Error == "" {
+		t.Error("error is empty, want the failure reason recorded")
+	}
+	if d.BatchID != "" {
+		t.Errorf("batch_id = %q, want it cleared so polling stops", d.BatchID)
+	}
+}
+
+// TestCollect_LeavesProcessing: a batch still in flight leaves the row pending and
+// its batch id intact, to be retried on the next sweep.
+func TestCollect_LeavesProcessing(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	day := time.Date(2026, 7, 10, 0, 0, 0, 0, time.UTC)
+	seedPending(t, client, day, "msgbatch_3")
+
+	b := NewBuilder(client, collectStub("msgbatch_3", "2026-07-10", "in_progress", "", ""), stubFetcher{})
+	if err := b.Collect(ctx); err != nil {
+		t.Fatalf("Collect = %v, want nil", err)
+	}
+
+	d, err := client.Digest.Query().Only(ctx)
+	if err != nil {
+		t.Fatalf("expected one digest row: %v", err)
+	}
+	if d.Status != entdigest.StatusPending {
+		t.Errorf("status = %q, want it left pending", d.Status)
+	}
+	if d.BatchID != "msgbatch_3" {
+		t.Errorf("batch_id = %q, want it preserved for the next sweep", d.BatchID)
+	}
+}
+
+// TestCollect_NoPendingIsNoOp: with nothing pending, Collect is a clean no-op.
+func TestCollect_NoPendingIsNoOp(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	b := NewBuilder(client, collectStub("x", "x", "ended", "succeeded", "x"), stubFetcher{})
+	if err := b.Collect(ctx); err != nil {
+		t.Fatalf("Collect with nothing pending = %v, want nil", err)
+	}
+}
+
+// TestCollect_NotConfigured: a blank key makes Collect a no-op ack.
+func TestCollect_NotConfigured(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	seedPending(t, client, time.Now(), "msgbatch_x")
+	b := NewBuilder(client, NewAnthropic("", "m", 10), stubFetcher{})
+	if err := b.Collect(ctx); err != nil {
+		t.Fatalf("Collect without a key = %v, want nil", err)
+	}
+}
