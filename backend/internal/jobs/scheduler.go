@@ -400,3 +400,17 @@ func ValidateCron(expr string) error {
 	_, err := cron.ParseStandard(expr)
 	return err
 }
+
+// NextRun computes the next activation of a cron schedule strictly after `after`,
+// evaluated in timezone. It reuses the ticker's parseSchedule, so the value is exactly
+// what evaluate() would compute for a freshly enabled job — a future instant that will
+// not fire this tick. Exported so the admin create/update handlers can populate
+// next_run_at synchronously (rather than clearing it and waiting up to a full tick for
+// the scheduler to fill it in), giving the console an immediate, correct "Next run".
+func NextRun(expr, timezone string, after time.Time) (time.Time, error) {
+	schedule, loc, err := parseSchedule(expr, timezone)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return schedule.Next(after.In(loc)), nil
+}

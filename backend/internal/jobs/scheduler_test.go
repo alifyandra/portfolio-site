@@ -442,3 +442,41 @@ func TestValidateCron(t *testing.T) {
 		t.Error("ValidateCron(invalid) = nil, want an error")
 	}
 }
+
+// TestNextRun computes the next activation in UTC and in a non-UTC zone, and matches
+// the pointer evaluate() would set for a freshly enabled job. The value must be strictly
+// after `after` (a future instant, never a stale backfill).
+func TestNextRun(t *testing.T) {
+	// 2026-01-02 09:00 UTC; the next "0 18 * * *" (18:00 daily) is the same day 18:00.
+	after := time.Date(2026, 1, 2, 9, 0, 0, 0, time.UTC)
+
+	next, err := NextRun("0 18 * * *", "UTC", after)
+	if err != nil {
+		t.Fatalf("NextRun(UTC) err = %v", err)
+	}
+	want := time.Date(2026, 1, 2, 18, 0, 0, 0, time.UTC)
+	if !next.Equal(want) {
+		t.Errorf("NextRun(UTC) = %v, want %v", next, want)
+	}
+	if !next.After(after) {
+		t.Errorf("NextRun = %v, want strictly after %v", next, after)
+	}
+
+	// Same wall-clock cron in Melbourne (UTC+11 in January) resolves to 18:00 local,
+	// i.e. 07:00 UTC the same day — proving the timezone is honoured.
+	mel, err := NextRun("0 18 * * *", "Australia/Melbourne", after)
+	if err != nil {
+		t.Fatalf("NextRun(Melbourne) err = %v", err)
+	}
+	loc, _ := time.LoadLocation("Australia/Melbourne")
+	if h := mel.In(loc).Hour(); h != 18 {
+		t.Errorf("NextRun(Melbourne) local hour = %d, want 18", h)
+	}
+
+	if _, err := NextRun("nope", "UTC", after); err == nil {
+		t.Error("NextRun(bad cron) = nil err, want an error")
+	}
+	if _, err := NextRun("0 18 * * *", "Mars/Phobos", after); err == nil {
+		t.Error("NextRun(bad tz) = nil err, want an error")
+	}
+}

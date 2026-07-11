@@ -396,7 +396,7 @@ components:
           description: Whether the ticker fires this job; defaults to false so a newly registered job stays dormant until an admin turns it on
           type: boolean
         key:
-          description: Stable machine key the scheduler and work API address the job by, e.g. "digest.scrape". Unique and immutable once created
+          description: Stable machine key from the job-kinds registry, e.g. "digest.scrape". Must be one the worker can dispatch; the stage is derived from it
           minLength: 1
           type: string
         name:
@@ -414,19 +414,12 @@ components:
           description: Standard cron expression (robfig/cron form) evaluated in the timezone
           minLength: 1
           type: string
-        stage:
-          description: "Which half of the two-stage pipeline this job is: scrape fetches raw inputs and persists Artifacts; llm consumes them"
-          enum:
-            - scrape
-            - llm
-          type: string
         timezone:
           description: IANA timezone name the cron is evaluated in (e.g. UTC, Australia/Melbourne); defaults to UTC
           type: string
       required:
         - key
         - name
-        - stage
         - schedule
       type: object
     CreatePlaylistInputBody:
@@ -621,6 +614,29 @@ components:
         - created_at
         - updated_at
       type: object
+    JobKindDTO:
+      additionalProperties: false
+      properties:
+        default_schedule:
+          type: string
+        default_timezone:
+          type: string
+        description:
+          type: string
+        key:
+          type: string
+        name:
+          type: string
+        stage:
+          type: string
+      required:
+        - key
+        - name
+        - stage
+        - default_schedule
+        - default_timezone
+        - description
+      type: object
     JobRunDTO:
       additionalProperties: false
       properties:
@@ -784,6 +800,25 @@ components:
             - "null"
       required:
         - grants
+      type: object
+    ListJobKindsOutputBody:
+      additionalProperties: false
+      properties:
+        $schema:
+          description: A URL to the JSON Schema for this object.
+          examples:
+            - https://example.com/schemas/ListJobKindsOutputBody.json
+          format: uri
+          readOnly: true
+          type: string
+        kinds:
+          items:
+            $ref: "#/components/schemas/JobKindDTO"
+          type:
+            - array
+            - "null"
+      required:
+        - kinds
       type: object
     ListJobRunsOutputBody:
       additionalProperties: false
@@ -1636,6 +1671,27 @@ paths:
       security:
         - cookieAuth: []
       summary: Revoke an access grant by email
+      tags:
+        - admin
+  /api/admin/job-kinds:
+    get:
+      operationId: list-job-kinds
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListJobKindsOutputBody"
+          description: OK
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ErrorModel"
+          description: Error
+      security:
+        - cookieAuth: []
+      summary: List the registrable job kinds the worker can dispatch
       tags:
         - admin
   /api/admin/jobs:
