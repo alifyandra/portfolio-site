@@ -151,6 +151,35 @@ type listJobsOutput struct {
 	}
 }
 
+// JobKindDTO is the frontend-facing shape of one registrable job kind (jobs.Kind). The
+// console renders these as the "Add job" dropdown so key and stage are picked from this
+// list, never typed.
+type JobKindDTO struct {
+	Key             string `json:"key"`
+	Name            string `json:"name"`
+	Stage           string `json:"stage"`
+	DefaultSchedule string `json:"default_schedule"`
+	DefaultTimezone string `json:"default_timezone"`
+	Description     string `json:"description"`
+}
+
+func toJobKindDTO(k jobs.Kind) JobKindDTO {
+	return JobKindDTO{
+		Key:             k.Key,
+		Name:            k.Name,
+		Stage:           k.Stage,
+		DefaultSchedule: k.DefaultSchedule,
+		DefaultTimezone: k.DefaultTimezone,
+		Description:     k.Description,
+	}
+}
+
+type listJobKindsOutput struct {
+	Body struct {
+		Kinds []JobKindDTO `json:"kinds"`
+	}
+}
+
 type jobOutput struct {
 	Body JobDTO
 }
@@ -161,9 +190,8 @@ type jobIDInput struct {
 
 type createJobInput struct {
 	Body struct {
-		Key      string                 `json:"key" minLength:"1" doc:"Stable machine key the scheduler and work API address the job by, e.g. \"digest.scrape\". Unique and immutable once created"`
+		Key      string                 `json:"key" minLength:"1" doc:"Stable machine key from the job-kinds registry, e.g. \"digest.scrape\". Must be one the worker can dispatch; the stage is derived from it"`
 		Name     string                 `json:"name" minLength:"1" doc:"Human label shown in the /admin Jobs list"`
-		Stage    string                 `json:"stage" enum:"scrape,llm" doc:"Which half of the two-stage pipeline this job is: scrape fetches raw inputs and persists Artifacts; llm consumes them"`
 		Schedule string                 `json:"schedule" minLength:"1" doc:"Standard cron expression (robfig/cron form) evaluated in the timezone"`
 		Timezone string                 `json:"timezone,omitempty" doc:"IANA timezone name the cron is evaluated in (e.g. UTC, Australia/Melbourne); defaults to UTC"`
 		Runner   string                 `json:"runner,omitempty" enum:"server,local,any" doc:"Where the job may run: server (on-box worker), local (external runner), or any; defaults to server"`
@@ -228,6 +256,26 @@ func (h *Handler) registerAdminJobs(api huma.API) {
 	})
 
 	huma.Register(api, huma.Operation{
+		OperationID: "list-job-kinds",
+		Method:      http.MethodGet,
+		Path:        "/api/admin/job-kinds",
+		Summary:     "List the registrable job kinds the worker can dispatch",
+		Tags:        adminTags,
+		Security:    cookieAuthSecurity,
+	}, func(ctx context.Context, _ *struct{}) (*listJobKindsOutput, error) {
+		if _, err := requireAdmin(ctx); err != nil {
+			return nil, err
+		}
+		kinds := jobs.Kinds()
+		out := &listJobKindsOutput{}
+		out.Body.Kinds = make([]JobKindDTO, 0, len(kinds))
+		for _, k := range kinds {
+			out.Body.Kinds = append(out.Body.Kinds, toJobKindDTO(k))
+		}
+		return out, nil
+	})
+
+	huma.Register(api, huma.Operation{
 		OperationID:   "create-job",
 		Method:        http.MethodPost,
 		Path:          "/api/admin/jobs",
@@ -240,9 +288,12 @@ func (h *Handler) registerAdminJobs(api huma.API) {
 			return nil, err
 		}
 
-		stage := in.Body.Stage
-		if stage != string(scheduledjob.StageScrape) && stage != string(scheduledjob.StageLlm) {
-			return nil, huma.Error422UnprocessableEntity("stage must be scrape or llm")
+		// The key must name a job the worker can dispatch; otherwise the row would sit
+		// enqueued forever (errNoHandler). The registry is the source of truth, and the
+		// stage is derived from it rather than trusted from the client.
+		kind, ok := jobs.LookupKind(strings.TrimSpace(in.Body.Key))
+		if !ok {
+			return nil, huma.Error422UnprocessableEntity("unknown job key: must be one of the registered job kinds (see GET /api/admin/job-kinds)")
 		}
 		if err := jobs.ValidateCron(in.Body.Schedule); err != nil {
 			return nil, huma.Error422UnprocessableEntity("invalid cron schedule: " + err.Error())
@@ -263,9 +314,9 @@ func (h *Handler) registerAdminJobs(api huma.API) {
 		}
 
 		create := h.deps.Ent.ScheduledJob.Create().
-			SetKey(strings.TrimSpace(in.Body.Key)).
+			SetKey(kind.Key).
 			SetName(strings.TrimSpace(in.Body.Name)).
-			SetStage(scheduledjob.Stage(stage)).
+			SetStage(scheduledjob.Stage(kind.Stage)).
 			SetSchedule(in.Body.Schedule).
 			SetTimezone(tz).
 			SetRunner(scheduledjob.Runner(runner)).
@@ -273,10 +324,16 @@ func (h *Handler) registerAdminJobs(api huma.API) {
 		if len(in.Body.Config) > 0 {
 			create.SetConfig(in.Body.Config)
 		}
-		// next_run_at is deliberately left null: the scheduler initializes it on its
-		// first tick once the job is enabled (see jobs.evaluate), so a create never
-		// fires an immediate backfill from a stale time. Matches how the update handler
-		// clears it when a job is toggled on.
+		// Populate next_run_at eagerly when the job starts enabled, so the console shows
+		// a real "Next run" the instant it is created rather than "—" until the first
+		// tick. The value is a future instant from the same parser the ticker uses (see
+		// jobs.NextRun), so it never fires an immediate backfill. A disabled job is left
+		// null (no next run). Cron and timezone are already validated above.
+		if in.Body.Enabled {
+			if next, err := jobs.NextRun(in.Body.Schedule, tz, time.Now()); err == nil {
+				create.SetNextRunAt(next)
+			}
+		}
 		saved, err := create.Save(ctx)
 		if ent.IsConstraintError(err) {
 			// The key column is unique; a duplicate is a client error, not a 500.
@@ -308,17 +365,23 @@ func (h *Handler) registerAdminJobs(api huma.API) {
 		}
 
 		upd := job.Update()
-		// Clear next_run_at whenever the schedule/timezone changes or the job is
-		// toggled, so the scheduler recomputes a fresh pointer on its next tick rather
-		// than firing an immediate backfill from a stale time (see jobs.evaluate).
-		resched := false
+
+		// Track the effective schedule/timezone/enabled after this patch (a provided
+		// value, else the existing one) so next_run_at can be recomputed from the final
+		// state below.
+		finalSchedule := job.Schedule
+		finalTimezone := job.Timezone
+		finalEnabled := job.Enabled
+
+		scheduleChanged := false
 
 		if in.Body.Schedule != nil {
 			if err := jobs.ValidateCron(*in.Body.Schedule); err != nil {
 				return nil, huma.Error422UnprocessableEntity("invalid cron schedule: " + err.Error())
 			}
 			upd.SetSchedule(*in.Body.Schedule)
-			resched = true
+			finalSchedule = *in.Body.Schedule
+			scheduleChanged = true
 		}
 		if in.Body.Timezone != nil {
 			tz := strings.TrimSpace(*in.Body.Timezone)
@@ -329,7 +392,8 @@ func (h *Handler) registerAdminJobs(api huma.API) {
 				return nil, huma.Error422UnprocessableEntity("invalid timezone: " + err.Error())
 			}
 			upd.SetTimezone(tz)
-			resched = true
+			finalTimezone = tz
+			scheduleChanged = true
 		}
 		if in.Body.Runner != nil {
 			r := *in.Body.Runner
@@ -340,10 +404,30 @@ func (h *Handler) registerAdminJobs(api huma.API) {
 		}
 		if in.Body.Enabled != nil {
 			upd.SetEnabled(*in.Body.Enabled)
-			resched = true
+			finalEnabled = *in.Body.Enabled
 		}
-		if resched {
+
+		// Keep next_run_at consistent with the final state:
+		//   - disabled  -> no next run, so clear it;
+		//   - enabled   -> ensure a fresh future pointer, but only recompute when it
+		//                  would actually change: the schedule/timezone changed, the job
+		//                  is transitioning to enabled, or it has no pointer yet.
+		// This is what fixes the console's "Next run shows —" after a disable->enable
+		// toggle (the value is written now, not a tick later). jobs.NextRun reuses the
+		// ticker's parser, so the instant matches what evaluate() would set and never
+		// double-fires. A patch that touches only the runner leaves an enabled job's
+		// existing pointer alone, so a run already due (but not yet ticked) is not skipped.
+		recompute := scheduleChanged || (in.Body.Enabled != nil && *in.Body.Enabled) || job.NextRunAt == nil
+		if !finalEnabled {
 			upd.ClearNextRunAt()
+		} else if recompute {
+			if next, err := jobs.NextRun(finalSchedule, finalTimezone, time.Now()); err == nil {
+				upd.SetNextRunAt(next)
+			} else {
+				// Enabling a row whose stored cron is somehow invalid: fall back to
+				// clearing so the ticker re-initializes (and logs) rather than 500ing.
+				upd.ClearNextRunAt()
+			}
 		}
 
 		saved, err := upd.Save(ctx)
