@@ -21,6 +21,51 @@ components:
         - tier
         - created_at
       type: object
+    Account:
+      additionalProperties: false
+      properties:
+        balance:
+          $ref: "#/components/schemas/Balance"
+          description: The account's current balance snapshot, when present
+        class:
+          description: Balance interpretation; never flips transaction signs
+          enum:
+            - asset
+            - liability
+          type: string
+        currency:
+          description: ISO currency code; defaults to AUD
+          type: string
+        guessed_type:
+          description: True when the classifier fell back; the cloud may flag for review
+          type: boolean
+        masked_number:
+          description: Masked account number; never the full number
+          type:
+            - string
+            - "null"
+        name:
+          description: Human label; the join key transactions reference
+          type: string
+        product_code:
+          description: Bank product code, or null
+          type:
+            - string
+            - "null"
+        type:
+          description: Account product type
+          enum:
+            - everyday
+            - savings
+            - credit_card
+            - steppay
+            - investment
+          type: string
+      required:
+        - name
+        - type
+        - class
+      type: object
     AdminProjectDTO:
       additionalProperties: false
       properties:
@@ -122,6 +167,31 @@ components:
           type: string
       required:
         - name
+      type: object
+    Balance:
+      additionalProperties: false
+      properties:
+        as_of:
+          description: ISO-8601 time the balance was read
+          format: date-time
+          type: string
+        available:
+          description: Available balance, or null
+          type:
+            - number
+            - "null"
+        balance:
+          description: The bank's authoritative figure; not derived from transactions
+          format: double
+          type: number
+        credit_limit:
+          description: Credit limit (set for credit_card), or null
+          type:
+            - number
+            - "null"
+      required:
+        - balance
+        - as_of
       type: object
     BatchDTO:
       additionalProperties: false
@@ -670,6 +740,21 @@ components:
         - scheduled_for
         - created_at
       type: object
+    Ledger:
+      additionalProperties: false
+      properties:
+        as_of:
+          description: Date the ledger value is as of (YYYY-MM-DD)
+          format: date
+          type: string
+        value:
+          description: Closing balance value
+          format: double
+          type: number
+      required:
+        - value
+        - as_of
+      type: object
     LineError:
       additionalProperties: false
       properties:
@@ -1062,6 +1147,73 @@ components:
       required:
         - source
       type: object
+    Payload:
+      additionalProperties: false
+      properties:
+        $schema:
+          description: A URL to the JSON Schema for this object.
+          examples:
+            - https://example.com/schemas/Payload.json
+          format: uri
+          readOnly: true
+          type: string
+        accounts:
+          description: Declared accounts with their current balance; may be empty on a transaction-only run
+          items:
+            $ref: "#/components/schemas/Account"
+          type:
+            - array
+            - "null"
+        ledger:
+          $ref: "#/components/schemas/Ledger"
+          description: Optional OFX-only closing balance; accepted but not persisted in v1
+        scraped_at:
+          description: ISO-8601 time the broker read the data; informational, not persisted in v1
+          format: date-time
+          type: string
+        source:
+          description: The broker/source, e.g. "commbank"; the identity key's source half
+          type: string
+        transactions:
+          $ref: "#/components/schemas/Transactions"
+          description: The posted (immutable) and pending (replace-set) rows for this window
+        window:
+          $ref: "#/components/schemas/Window"
+          description: The window the broker was asked to cover; informational, not persisted in v1
+      required:
+        - source
+      type: object
+    PendingRow:
+      additionalProperties: false
+      properties:
+        account:
+          description: Account name (joins to accounts[].name)
+          type: string
+        amount:
+          description: "Signed amount: out negative, in positive"
+          format: double
+          type: number
+        amount_raw:
+          description: The bank's original rendering
+          type: string
+        date:
+          description: Pending date (YYYY-MM-DD)
+          format: date
+          type: string
+        description:
+          description: Transaction narrative
+          type: string
+        merchant:
+          description: Parsed merchant, or null
+          type:
+            - string
+            - "null"
+      required:
+        - account
+        - date
+        - amount
+        - description
+      type: object
     PlaylistBody:
       additionalProperties: false
       properties:
@@ -1121,6 +1273,42 @@ components:
             - "null"
       required:
         - playlists
+      type: object
+    PostedRow:
+      additionalProperties: false
+      properties:
+        account:
+          description: Account name (joins to accounts[].name)
+          type: string
+        amount:
+          description: "Signed amount: out negative, in positive"
+          format: double
+          type: number
+        amount_raw:
+          description: The bank's original rendering, e.g. "$42.10"
+          type: string
+        balance_after:
+          description: Running balance after this row, or null
+          type:
+            - number
+            - "null"
+        description:
+          description: Transaction narrative
+          type: string
+        merchant:
+          description: Parsed merchant, or null
+          type:
+            - string
+            - "null"
+        posted_date:
+          description: Settlement date (YYYY-MM-DD); also the raw input to dedup_hash
+          format: date
+          type: string
+      required:
+        - account
+        - posted_date
+        - amount
+        - description
       type: object
     PresignUploadInputBody:
       additionalProperties: false
@@ -1294,6 +1482,42 @@ components:
       required:
         - started
       type: object
+    Summary:
+      additionalProperties: false
+      properties:
+        $schema:
+          description: A URL to the JSON Schema for this object.
+          examples:
+            - https://example.com/schemas/Summary.json
+          format: uri
+          readOnly: true
+          type: string
+        accounts_upserted:
+          format: int64
+          type: integer
+        balance_snapshots_inserted:
+          format: int64
+          type: integer
+        pending_accounts_replaced:
+          format: int64
+          type: integer
+        pending_rows_inserted:
+          format: int64
+          type: integer
+        posted_duplicates_skipped:
+          format: int64
+          type: integer
+        posted_inserted:
+          format: int64
+          type: integer
+      required:
+        - accounts_upserted
+        - balance_snapshots_inserted
+        - posted_inserted
+        - posted_duplicates_skipped
+        - pending_accounts_replaced
+        - pending_rows_inserted
+      type: object
     TemplateDTO:
       additionalProperties: false
       properties:
@@ -1402,6 +1626,24 @@ components:
           type: string
       required:
         - is_playing
+      type: object
+    Transactions:
+      additionalProperties: false
+      properties:
+        pending:
+          description: Volatile rows; the whole set is replaced per account
+          items:
+            $ref: "#/components/schemas/PendingRow"
+          type:
+            - array
+            - "null"
+        posted:
+          description: Immutable ledger rows; upserted by dedup_hash
+          items:
+            $ref: "#/components/schemas/PostedRow"
+          type:
+            - array
+            - "null"
       type: object
     UpdateJobInputBody:
       additionalProperties: false
@@ -1586,6 +1828,23 @@ components:
         - role
         - greeted_role
         - default_country_code
+      type: object
+    Window:
+      additionalProperties: false
+      properties:
+        account:
+          description: Label of the nominated account, or null
+          type:
+            - string
+            - "null"
+        from:
+          description: Window start (YYYY-MM-DD)
+          format: date
+          type: string
+        to:
+          description: Window end (YYYY-MM-DD)
+          format: date
+          type: string
       type: object
   securitySchemes:
     bearerAuth:
@@ -2338,6 +2597,33 @@ paths:
       summary: Submit a contact message
       tags:
         - contact
+  /api/finance/ingest:
+    post:
+      operationId: ingest-finance
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Payload"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Summary"
+          description: OK
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ErrorModel"
+          description: Error
+      security:
+        - bearerAuth: []
+      summary: Ingest a scraped personal-finance window (external broker runner)
+      tags:
+        - finance
   /api/projects:
     get:
       operationId: list-projects
