@@ -12,6 +12,7 @@ import { useQueryClient } from '@tanstack/react-query';
 
 import {
   useListJobs,
+  useListJobKinds,
   useCreateJob,
   useUpdateJob,
   useStartJobRun,
@@ -23,11 +24,10 @@ import {
   getListJobRunsQueryKey,
   getListApiTokensQueryKey,
 } from '@/lib/api/generated';
-import type { JobDTO, JobRunDTO, ApiTokenDTO } from '@/lib/api/model';
+import type { JobDTO, JobRunDTO, ApiTokenDTO, JobKindDTO } from '@/lib/api/model';
 import {
   UpdateJobInputBodyRunner,
   CreateJobInputBodyRunner,
-  CreateJobInputBodyStage,
 } from '@/lib/api/model';
 import {
   citronCard,
@@ -40,6 +40,20 @@ import {
   editBtn,
   dangerBtn,
 } from './ui';
+import { CronScheduleField } from './CronScheduleField';
+
+// A small curated set of IANA timezones for the schedule dropdown — enough to cover
+// where jobs actually run without a free-text field that invites typos. UTC first (the
+// default and what prod uses), then Alif's local zone and a few common others. The
+// backend still accepts any valid IANA name, so this is a convenience, not a limit.
+const TIMEZONES = [
+  'UTC',
+  'Australia/Melbourne',
+  'Australia/Sydney',
+  'Asia/Jakarta',
+  'Europe/London',
+  'America/New_York',
+];
 
 // A run is "in flight" while its most recent status is queued or running; the
 // force-start button is disabled then so an admin cannot pile up duplicate work
@@ -94,7 +108,7 @@ export function JobsSection() {
           </div>
         </header>
 
-        <CreateJobForm />
+        <CreateJobForm existingKeys={new Set(jobs.map((j) => j.key))} />
 
         {isLoading ? (
           <p className="text-sm text-slate-400">Loading…</p>
@@ -114,19 +128,24 @@ export function JobsSection() {
   );
 }
 
-// Register a new ScheduledJob row (ADR 0014). Mirrors the PlaylistsSection create
-// pattern: local field state, the generated cookie-transport hook, invalidate the
-// list on success, and surface a 409 (duplicate key) / 422 (bad cron or timezone)
-// inline. next_run_at is left to the scheduler, so a new job is dormant until enabled.
-function CreateJobForm() {
+// Register a new ScheduledJob row (ADR 0014). The job is picked from the backend
+// job-kinds registry (GET /api/admin/job-kinds) rather than typed: choosing a kind
+// derives its immutable key and stage and pre-fills a sensible name/schedule/timezone,
+// so an admin never has to know what to type (and can't register a key the worker cannot
+// dispatch). The schedule is built with CronScheduleField, not a raw cron string. Uses
+// the generated cookie-transport hook, invalidates the list on success, and surfaces a
+// 409 (duplicate) / 422 (bad cron or timezone) inline.
+function CreateJobForm({ existingKeys }: { existingKeys: Set<string> }) {
   const queryClient = useQueryClient();
+  const { data: kindsData, isLoading: kindsLoading } = useListJobKinds();
   const create = useCreateJob();
 
-  const [key, setKey] = useState('');
+  const kinds: JobKindDTO[] = kindsData?.kinds ?? [];
+  const available = kinds.filter((k) => !existingKeys.has(k.key));
+  const allRegistered = kinds.length > 0 && available.length === 0;
+
+  const [selectedKey, setSelectedKey] = useState('');
   const [name, setName] = useState('');
-  const [stage, setStage] = useState<CreateJobInputBodyStage>(
-    CreateJobInputBodyStage.scrape,
-  );
   const [schedule, setSchedule] = useState('');
   const [timezone, setTimezone] = useState('UTC');
   const [runner, setRunner] = useState<CreateJobInputBodyRunner>(
@@ -134,18 +153,31 @@ function CreateJobForm() {
   );
   const [enabled, setEnabled] = useState(false);
 
+  const selected = kinds.find((k) => k.key === selectedKey);
+
   const reset = () => {
-    setKey('');
+    setSelectedKey('');
     setName('');
-    setStage(CreateJobInputBodyStage.scrape);
     setSchedule('');
     setTimezone('UTC');
     setRunner(CreateJobInputBodyRunner.server);
     setEnabled(false);
   };
 
+  // Picking a kind pre-fills the editable fields from its registry defaults; key and
+  // stage are derived from the kind (shown read-only), never typed.
+  const pickKind = (key: string) => {
+    setSelectedKey(key);
+    const k = kinds.find((x) => x.key === key);
+    if (k) {
+      setName(k.name);
+      setSchedule(k.default_schedule);
+      setTimezone(k.default_timezone || 'UTC');
+    }
+  };
+
   const canCreate =
-    key.trim().length > 0 &&
+    selectedKey.length > 0 &&
     name.trim().length > 0 &&
     schedule.trim().length > 0 &&
     !create.isPending;
@@ -155,11 +187,10 @@ function CreateJobForm() {
     create.mutate(
       {
         data: {
-          key: key.trim(),
+          key: selectedKey,
           name: name.trim(),
-          stage,
           schedule: schedule.trim(),
-          timezone: timezone.trim() || 'UTC',
+          timezone: timezone || 'UTC',
           runner,
           enabled,
         },
@@ -173,97 +204,133 @@ function CreateJobForm() {
     );
   };
 
+  // Keep the current timezone selectable even if it is not in the curated list.
+  const tzOptions = Array.from(new Set([...TIMEZONES, timezone]));
+
   return (
     <div className="flex flex-col gap-3 rounded-lg border border-slate-700 bg-deepsea/40 p-4">
       <p className="text-sm font-medium text-white">Add job</p>
-      <div className="grid gap-3 sm:grid-cols-2">
-        <label className={labelClass}>
-          Key
-          <input
-            type="text"
-            className={inputClass}
-            placeholder="digest.scrape"
-            value={key}
-            onChange={(e) => setKey(e.target.value)}
-          />
-        </label>
-        <label className={labelClass}>
-          Name
-          <input
-            type="text"
-            className={inputClass}
-            placeholder="Digest scrape"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-          />
-        </label>
-        <label className={labelClass}>
-          Stage
-          <select
-            className={selectClass}
-            value={stage}
-            onChange={(e) => setStage(e.target.value as CreateJobInputBodyStage)}
-          >
-            <option value={CreateJobInputBodyStage.scrape}>scrape</option>
-            <option value={CreateJobInputBodyStage.llm}>llm</option>
-          </select>
-        </label>
-        <label className={labelClass}>
-          Runner
-          <select
-            className={selectClass}
-            value={runner}
-            onChange={(e) =>
-              setRunner(e.target.value as CreateJobInputBodyRunner)
-            }
-          >
-            <option value={CreateJobInputBodyRunner.server}>server</option>
-            <option value={CreateJobInputBodyRunner.local}>local</option>
-            <option value={CreateJobInputBodyRunner.any}>any</option>
-          </select>
-        </label>
-        <label className={labelClass}>
-          Cron schedule
-          <input
-            type="text"
-            className={inputClass}
-            placeholder="0 18 * * *"
-            value={schedule}
-            onChange={(e) => setSchedule(e.target.value)}
-          />
-        </label>
-        <label className={labelClass}>
-          Timezone
-          <input
-            type="text"
-            className={inputClass}
-            placeholder="UTC"
-            value={timezone}
-            onChange={(e) => setTimezone(e.target.value)}
-          />
-        </label>
-      </div>
-      <label className="flex items-center gap-2 text-sm text-slate-300">
-        <input
-          type="checkbox"
-          checked={enabled}
-          onChange={(e) => setEnabled(e.target.checked)}
-        />
-        Enabled
-      </label>
-      <div className="flex flex-wrap items-center gap-3">
-        <button
-          type="button"
-          className={primaryBtn}
-          disabled={!canCreate}
-          onClick={submit}
-        >
-          {create.isPending ? 'Adding…' : 'Add job'}
-        </button>
-        {create.error ? (
-          <p className="text-sm text-coral">{(create.error as Error).message}</p>
-        ) : null}
-      </div>
+
+      {kindsLoading ? (
+        <p className="text-sm text-slate-400">Loading available jobs…</p>
+      ) : kinds.length === 0 ? (
+        <p className="text-sm text-slate-400">No job kinds are available.</p>
+      ) : allRegistered ? (
+        <p className="text-sm text-slate-400">
+          All available jobs are already registered.
+        </p>
+      ) : (
+        <>
+          <label className={labelClass}>
+            Job
+            <select
+              className={selectClass}
+              value={selectedKey}
+              onChange={(e) => pickKind(e.target.value)}
+            >
+              <option value="" disabled>
+                Select a job…
+              </option>
+              {kinds.map((k) => {
+                const added = existingKeys.has(k.key);
+                return (
+                  <option key={k.key} value={k.key} disabled={added}>
+                    {k.name}
+                    {added ? ' (added)' : ''}
+                  </option>
+                );
+              })}
+            </select>
+          </label>
+
+          {selected ? (
+            <>
+              <div className="flex flex-wrap items-center gap-2 text-xs">
+                <span className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-slate-400">
+                  {selected.key}
+                </span>
+                <span className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-slate-400">
+                  {selected.stage}
+                </span>
+                {selected.description ? (
+                  <span className="text-slate-500">{selected.description}</span>
+                ) : null}
+              </div>
+
+              <div className="grid gap-3 sm:grid-cols-2">
+                <label className={labelClass}>
+                  Name
+                  <input
+                    type="text"
+                    className={inputClass}
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                  />
+                </label>
+                <label className={labelClass}>
+                  Timezone
+                  <select
+                    className={selectClass}
+                    value={timezone}
+                    onChange={(e) => setTimezone(e.target.value)}
+                  >
+                    {tzOptions.map((tz) => (
+                      <option key={tz} value={tz}>
+                        {tz}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className={labelClass}>
+                  Runner
+                  <select
+                    className={selectClass}
+                    value={runner}
+                    onChange={(e) =>
+                      setRunner(e.target.value as CreateJobInputBodyRunner)
+                    }
+                  >
+                    <option value={CreateJobInputBodyRunner.server}>server</option>
+                    <option value={CreateJobInputBodyRunner.local}>local</option>
+                    <option value={CreateJobInputBodyRunner.any}>any</option>
+                  </select>
+                </label>
+              </div>
+
+              <CronScheduleField
+                value={schedule}
+                onChange={setSchedule}
+                timezone={timezone}
+              />
+
+              <label className="flex items-center gap-2 text-sm text-slate-300">
+                <input
+                  type="checkbox"
+                  checked={enabled}
+                  onChange={(e) => setEnabled(e.target.checked)}
+                />
+                Enabled
+              </label>
+
+              <div className="flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  className={primaryBtn}
+                  disabled={!canCreate}
+                  onClick={submit}
+                >
+                  {create.isPending ? 'Adding…' : 'Add job'}
+                </button>
+                {create.error ? (
+                  <p className="text-sm text-coral">
+                    {(create.error as Error).message}
+                  </p>
+                ) : null}
+              </div>
+            </>
+          ) : null}
+        </>
+      )}
     </div>
   );
 }
@@ -411,49 +478,50 @@ function JobRow({ job }: { job: JobDTO }) {
 
       {/* Edit form */}
       {editing ? (
-        <div className="flex flex-col gap-3 rounded-lg border border-slate-700 bg-deepsea/60 p-3 sm:flex-row sm:items-end">
-          <label className={`flex-1 ${labelClass}`}>
-            Cron schedule
-            <input
-              type="text"
-              className={inputClass}
-              value={schedule}
-              onChange={(e) => setSchedule(e.target.value)}
-              placeholder="0 18 * * *"
-            />
-          </label>
-          <label className={`sm:w-52 ${labelClass}`}>
-            Timezone
-            <input
-              type="text"
-              className={inputClass}
-              value={timezone}
-              onChange={(e) => setTimezone(e.target.value)}
-              placeholder="UTC"
-            />
-          </label>
-          <label className={`sm:w-36 ${labelClass}`}>
-            Runner
-            <select
-              className={selectClass}
-              value={runner}
-              onChange={(e) =>
-                setRunner(e.target.value as UpdateJobInputBodyRunner)
-              }
+        <div className="flex flex-col gap-3 rounded-lg border border-slate-700 bg-deepsea/60 p-3">
+          <CronScheduleField
+            value={schedule}
+            onChange={setSchedule}
+            timezone={timezone}
+          />
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
+            <label className={`sm:w-52 ${labelClass}`}>
+              Timezone
+              <select
+                className={selectClass}
+                value={timezone}
+                onChange={(e) => setTimezone(e.target.value)}
+              >
+                {Array.from(new Set([...TIMEZONES, timezone])).map((tz) => (
+                  <option key={tz} value={tz}>
+                    {tz}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className={`sm:w-36 ${labelClass}`}>
+              Runner
+              <select
+                className={selectClass}
+                value={runner}
+                onChange={(e) =>
+                  setRunner(e.target.value as UpdateJobInputBodyRunner)
+                }
+              >
+                <option value={UpdateJobInputBodyRunner.server}>server</option>
+                <option value={UpdateJobInputBodyRunner.local}>local</option>
+                <option value={UpdateJobInputBodyRunner.any}>any</option>
+              </select>
+            </label>
+            <button
+              type="button"
+              className={primaryBtn}
+              disabled={update.isPending || schedule.trim().length === 0}
+              onClick={saveEdit}
             >
-              <option value={UpdateJobInputBodyRunner.server}>server</option>
-              <option value={UpdateJobInputBodyRunner.local}>local</option>
-              <option value={UpdateJobInputBodyRunner.any}>any</option>
-            </select>
-          </label>
-          <button
-            type="button"
-            className={primaryBtn}
-            disabled={update.isPending || schedule.trim().length === 0}
-            onClick={saveEdit}
-          >
-            {update.isPending ? 'Saving…' : 'Save'}
-          </button>
+              {update.isPending ? 'Saving…' : 'Save'}
+            </button>
+          </div>
         </div>
       ) : null}
 
