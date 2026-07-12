@@ -43,21 +43,48 @@ sudo -iu alifyandra bash bootstrap-project.sh
 
 ## Connecting and working 24/7
 
+Full reference: [`CHEATSHEET.md`](CHEATSHEET.md). The short version:
+
 ```bash
-ssh -i ~/.ssh/id_ed25519 alifyandra@<box-ip>
-tmux new -s dev          # run claude / dev servers inside tmux
-tmux attach -t dev       # survives disconnects; reattach after reconnecting
+ssh oracle          # normal login; prints a one-line tmux hint
+work                # enter (create-or-attach) the persistent "dev" session
+cc                  # Claude Code in the repo (alias defined in devrc.sh)
 ```
 
+`bootstrap-project.sh` sources [`devrc.sh`](devrc.sh) from the dev user's
+`~/.bashrc`. That gives two things:
+
+- **A login hint (not auto-attach):** an interactive SSH login prints one line
+  reminding you to run `work`. We deliberately do not `exec` into tmux on login
+  (surprising, and it hijacks the shell). You opt in with `work`, which
+  create-or-attaches the `dev` session. Detach with `Ctrl-b d` or by closing the
+  client; the session (and any running Claude / dev server) keeps going.
+  Reconnect, run `work` (or `att`), and you are back. This is what makes work
+  survive a dropped connection: a bare `claude` on a raw shell dies on SIGHUP;
+  tmux owns the process instead.
+- **Short commands:** `cc` (claude in the current repo), `pf`/`fb`/`wa` (cd to
+  portfolio-site / finance-broker / whatsapp-sidecar), `work`/`att`/`s` (tmux),
+  `up`/`down`/`logs`/`dps` (portfolio stack), `fe` (frontend), `ccbg` (headless).
+
+This box holds three repos under `~/Projects`: `portfolio-site` (public
+monorepo), and the two private siblings `finance-broker` (CommBank home broker,
+on `feat/broker-app`) and `whatsapp-sidecar` (whatsapp-web.js engine). Each
+private repo has its own `CLAUDE.md`. They are cloned over SSH
+(`git@github.com:alifyandra/...`, the box key is registered) and must never be
+pushed into the public repo.
+
+Details:
+
 - API: `http://localhost:8080` (`/healthz`, `/docs`, `/api/projects`)
-- Frontend: `cd ~/Projects/portfolio-site/frontend && npm run dev` (:3000)
+- Frontend: `fe` (or `cd frontend && npm run dev`) on `:3000`
 - Claude Code needs a one-time interactive login on the box: run `claude` and
-  follow the prompt. Auth is per-user and cannot be scripted.
+  follow the prompt. Auth is per-user and cannot be scripted (already done on
+  the live box).
 
 Reach the dev servers from your laptop with an SSH tunnel:
 
 ```bash
-ssh -i ~/.ssh/id_ed25519 -L 3000:localhost:3000 -L 8080:localhost:8080 alifyandra@<box-ip>
+ssh -L 3000:localhost:3000 -L 8080:localhost:8080 oracle
 ```
 
 ## The box
