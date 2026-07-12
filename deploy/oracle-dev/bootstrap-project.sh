@@ -46,6 +46,20 @@ done
 log "Seed starter projects"
 docker compose run --rm api seed || true
 
+log "Shell helpers (source devrc.sh from ~/.bashrc)"
+# Idempotent: adds the source line once. devrc.sh defines the short commands
+# (cc, work, att, up/down/logs, ...) and prints a login hint nudging you to run
+# `work` for a persistent tmux session so work survives disconnects. It does
+# not auto-attach.
+HOOK_MARK="# portfolio dev-box helpers (deploy/oracle-dev/devrc.sh)"
+if ! grep -qF "${HOOK_MARK}" "${HOME}/.bashrc" 2>/dev/null; then
+  cat >> "${HOME}/.bashrc" <<EOF
+
+${HOOK_MARK}
+[ -f "${REPO_DIR}/deploy/oracle-dev/devrc.sh" ] && . "${REPO_DIR}/deploy/oracle-dev/devrc.sh"
+EOF
+fi
+
 cat <<EOF
 
 Stack is up in ${REPO_DIR}
@@ -54,7 +68,9 @@ Stack is up in ${REPO_DIR}
   Logs:     docker compose logs -f api
   Stop:     docker compose down
 
-For 24/7 remote work, run inside tmux so sessions survive disconnects:
-  tmux new -s dev      # then start claude / servers inside it
-  tmux attach -t dev   # reattach after reconnecting
+Shell helpers are live on next login (or: . ~/.bashrc). See the cheatsheet:
+  deploy/oracle-dev/CHEATSHEET.md
+Login prints a hint: run 'work' to enter a persistent tmux "dev" session, so
+Claude Code and dev servers survive a dropped connection. Detach with Ctrl-b d,
+rejoin with 'att'. Short commands: cc (claude), work/att (tmux), up/down/logs.
 EOF
