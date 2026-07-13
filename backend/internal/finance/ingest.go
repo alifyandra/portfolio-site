@@ -17,7 +17,8 @@ import (
 
 // Summary is the per-run tally returned to the caller, so the broker can log what
 // a window ingest actually changed (and confirm idempotency: a re-POST is all
-// duplicates skipped and no new posted rows).
+// duplicates skipped and no new posted rows). The trailing fields carry the
+// validation seam: whether this was a dry run and whether the window reconciled.
 type Summary struct {
 	AccountsUpserted         int `json:"accounts_upserted"`
 	BalanceSnapshotsInserted int `json:"balance_snapshots_inserted"`
@@ -25,6 +26,29 @@ type Summary struct {
 	PostedDuplicatesSkipped  int `json:"posted_duplicates_skipped"`
 	PendingAccountsReplaced  int `json:"pending_accounts_replaced"`
 	PendingRowsInserted      int `json:"pending_rows_inserted"`
+
+	// DryRun echoes whether this run rolled back instead of committing.
+	DryRun bool `json:"dry_run"`
+	// PostedReceived is the number of posted rows that actually arrived in the
+	// payload; ExpectedPosted echoes the broker's declared count when it sent one.
+	PostedReceived int  `json:"posted_received"`
+	ExpectedPosted *int `json:"expected_posted,omitempty"`
+	// Reconciled is true when no discrepancy was found. A real (committing) run
+	// with Reconciled=false is rejected (422) and persists nothing; a dry run
+	// always returns so the discrepancies can be inspected.
+	Reconciled    bool     `json:"reconciled"`
+	Discrepancies []string `json:"discrepancies,omitempty"`
+}
+
+// ReconciliationError wraps the Summary of a real (committing) run that failed
+// reconciliation. Ingest has already rolled the transaction back (nothing landed);
+// the handler maps this to a 422 so a known-incomplete window cannot land silently.
+type ReconciliationError struct {
+	Summary *Summary
+}
+
+func (e *ReconciliationError) Error() string {
+	return "finance: ingest failed reconciliation: " + strings.Join(e.Summary.Discrepancies, "; ")
 }
 
 // Ingest lands one scraped window into the ledger inside a single transaction, so a
@@ -118,6 +142,14 @@ func Ingest(ctx context.Context, client *ent.Client, p *Payload) (*Summary, erro
 	// don't collapse onto one hash (see DedupHash doc for why this stays idempotent
 	// across re-scraped day-granular windows).
 	occurrence := make(map[string]int, len(p.Transactions.Posted))
+	// seenHash guards final-hash uniqueness WITHIN this payload. With the occurrence
+	// ordinal (finance-broker#4) two otherwise-identical rows get distinct ordinals
+	// and so distinct hashes, so this can only trip if the ordinal logic regresses
+	// (e.g. the counter stops advancing) -- a canary on the fix, not an expected
+	// condition. A collision here means real rows would silently collapse on the
+	// upsert, so it is surfaced as a reconciliation discrepancy (see below).
+	seenHash := make(map[string]bool, len(p.Transactions.Posted))
+	var collisions []string
 	for i := range p.Transactions.Posted {
 		row := &p.Transactions.Posted[i]
 		acc, err := resolve(row.Account)
@@ -132,6 +164,10 @@ func Ingest(ctx context.Context, client *ent.Client, p *Payload) (*Summary, erro
 		occ := occurrence[key]
 		occurrence[key] = occ + 1
 		hash := DedupHash(row.Account, row.PostedDate, row.Amount, row.Description, row.BalanceAfter.Value, occ)
+		if seenHash[hash] {
+			collisions = append(collisions, fmt.Sprintf("within-payload dedup_hash collision on posted row %d (%q %s %.2f)", i, row.Account, row.PostedDate, row.Amount))
+		}
+		seenHash[hash] = true
 		err = tx.Transaction.Create().
 			SetDedupHash(hash).
 			SetPostedDate(postedDate).
@@ -196,6 +232,35 @@ func Ingest(ctx context.Context, client *ent.Client, p *Payload) (*Summary, erro
 		sum.PendingAccountsReplaced++
 	}
 
+	// (5) Reconciliation: compare what the broker declared it scraped against what
+	// actually arrived, and surface any within-payload hash collisions. These are
+	// the tripwires the silent dedup loss (finance-broker#4) proved were missing.
+	sum.PostedReceived = len(p.Transactions.Posted)
+	sum.ExpectedPosted = p.Transactions.ExpectedPosted
+	sum.DryRun = p.DryRun
+	var discrepancies []string
+	if p.Transactions.ExpectedPosted != nil && *p.Transactions.ExpectedPosted != sum.PostedReceived {
+		discrepancies = append(discrepancies, fmt.Sprintf("expected_posted=%d but received %d posted rows", *p.Transactions.ExpectedPosted, sum.PostedReceived))
+	}
+	discrepancies = append(discrepancies, collisions...)
+	sum.Discrepancies = discrepancies
+	sum.Reconciled = len(discrepancies) == 0
+
+	// A dry run never commits: roll back and hand the (possibly-unreconciled) Summary
+	// to the caller for inspection. A real run that failed reconciliation is rejected
+	// so a known-incomplete window cannot land; only a clean real run commits.
+	if p.DryRun {
+		if err := tx.Rollback(); err != nil {
+			return nil, fmt.Errorf("finance: dry-run rollback: %w", err)
+		}
+		return sum, nil
+	}
+	if !sum.Reconciled {
+		if err := tx.Rollback(); err != nil {
+			return nil, errors.Join(&ReconciliationError{Summary: sum}, fmt.Errorf("finance: reconciliation rollback: %w", err))
+		}
+		return sum, &ReconciliationError{Summary: sum}
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("finance: commit: %w", err)
 	}

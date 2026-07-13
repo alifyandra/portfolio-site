@@ -1164,6 +1164,9 @@ components:
           type:
             - array
             - "null"
+        dry_run:
+          description: When true, run the ingest and reconciliation but roll back instead of committing; persists nothing
+          type: boolean
         ledger:
           $ref: "#/components/schemas/Ledger"
           description: Optional OFX-only closing balance; accepted but not persisted in v1
@@ -1498,6 +1501,17 @@ components:
         balance_snapshots_inserted:
           format: int64
           type: integer
+        discrepancies:
+          items:
+            type: string
+          type:
+            - array
+            - "null"
+        dry_run:
+          type: boolean
+        expected_posted:
+          format: int64
+          type: integer
         pending_accounts_replaced:
           format: int64
           type: integer
@@ -1510,6 +1524,11 @@ components:
         posted_inserted:
           format: int64
           type: integer
+        posted_received:
+          format: int64
+          type: integer
+        reconciled:
+          type: boolean
       required:
         - accounts_upserted
         - balance_snapshots_inserted
@@ -1517,6 +1536,9 @@ components:
         - posted_duplicates_skipped
         - pending_accounts_replaced
         - pending_rows_inserted
+        - dry_run
+        - posted_received
+        - reconciled
       type: object
     TemplateDTO:
       additionalProperties: false
@@ -1630,6 +1652,10 @@ components:
     Transactions:
       additionalProperties: false
       properties:
+        expected_posted:
+          description: Broker's independent count of posted rows scraped for this window; reconciled against rows received. Omit when unknown (do not send null)
+          format: int64
+          type: integer
         pending:
           description: Volatile rows; the whole set is replaced per account
           items:

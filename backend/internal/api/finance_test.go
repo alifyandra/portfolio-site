@@ -120,6 +120,27 @@ func decodeSummary(t *testing.T, body []byte) ingestSummary {
 	return s
 }
 
+// reconSummary decodes the validation-seam fields of the ingest Summary, kept
+// separate from ingestSummary so the strict struct-equality assertions in the
+// happy-path test stay unaffected by these additive fields.
+type reconSummary struct {
+	PostedInserted          int      `json:"posted_inserted"`
+	PostedDuplicatesSkipped int      `json:"posted_duplicates_skipped"`
+	DryRun                  bool     `json:"dry_run"`
+	PostedReceived          int      `json:"posted_received"`
+	Reconciled              bool     `json:"reconciled"`
+	Discrepancies           []string `json:"discrepancies"`
+}
+
+func decodeRecon(t *testing.T, body []byte) reconSummary {
+	t.Helper()
+	var s reconSummary
+	if err := json.Unmarshal(body, &s); err != nil {
+		t.Fatalf("decode recon summary: %v; body=%s", err, string(body))
+	}
+	return s
+}
+
 // TestIngest_RequiresBearer: no Authorization header is 401 (the gate wins even
 // though the body is well-formed).
 func TestIngest_RequiresBearer(t *testing.T) {
@@ -137,6 +158,104 @@ func TestIngest_ScopeMismatchDenies(t *testing.T) {
 	raw := mintToken(t, ctx, svc, client, "home-finance", []string{"other.job"})
 	if resp := api.Post("/api/finance/ingest", financePayload(), bearer(raw)); resp.Code != http.StatusForbidden {
 		t.Errorf("wrong-scope ingest = %d, want 403; body=%s", resp.Code, resp.Body.String())
+	}
+}
+
+// TestIngest_DryRunPersistsNothing: a dry_run reports the full Summary of what
+// WOULD land (reconciled, posted rows counted as inserted) but rolls back, so the
+// DB is untouched afterwards.
+func TestIngest_DryRunPersistsNothing(t *testing.T) {
+	api, svc, client := newFinanceTestAPI(t)
+	ctx := context.Background()
+	raw := mintToken(t, ctx, svc, client, "home-finance", []string{"finance.sync"})
+
+	p := financePayload()
+	p["dry_run"] = true
+	resp := api.Post("/api/finance/ingest", p, bearer(raw))
+	if resp.Code != http.StatusOK {
+		t.Fatalf("dry-run ingest = %d, want 200; body=%s", resp.Code, resp.Body.String())
+	}
+	s := decodeRecon(t, resp.Body.Bytes())
+	if !s.DryRun || !s.Reconciled || s.PostedReceived != 2 || s.PostedInserted != 2 || len(s.Discrepancies) != 0 {
+		t.Fatalf("dry-run summary = %+v, want dry_run/reconciled true, received=2 inserted=2 no discrepancies", s)
+	}
+	// Nothing persisted: the transaction rolled back.
+	if n := client.Transaction.Query().CountX(ctx); n != 0 {
+		t.Errorf("posted after dry run = %d, want 0 (rolled back)", n)
+	}
+	if n := client.Account.Query().CountX(ctx); n != 0 {
+		t.Errorf("accounts after dry run = %d, want 0 (rolled back)", n)
+	}
+	if n := client.BalanceSnapshot.Query().CountX(ctx); n != 0 {
+		t.Errorf("snapshots after dry run = %d, want 0 (rolled back)", n)
+	}
+}
+
+// TestIngest_ExpectedPostedMismatchRejectsRealRun: a real run whose declared
+// expected_posted disagrees with the rows received is refused with 422 and persists
+// nothing, so a window that lost rows in transit cannot land silently.
+func TestIngest_ExpectedPostedMismatchRejectsRealRun(t *testing.T) {
+	api, svc, client := newFinanceTestAPI(t)
+	ctx := context.Background()
+	raw := mintToken(t, ctx, svc, client, "home-finance", []string{"finance.sync"})
+
+	p := financePayload()
+	p["transactions"].(map[string]any)["expected_posted"] = 5 // but only 2 posted rows are present
+	resp := api.Post("/api/finance/ingest", p, bearer(raw))
+	if resp.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("mismatched real run = %d, want 422; body=%s", resp.Code, resp.Body.String())
+	}
+	if n := client.Transaction.Query().CountX(ctx); n != 0 {
+		t.Errorf("posted after rejected run = %d, want 0 (nothing committed)", n)
+	}
+	if n := client.Account.Query().CountX(ctx); n != 0 {
+		t.Errorf("accounts after rejected run = %d, want 0 (nothing committed)", n)
+	}
+}
+
+// TestIngest_ExpectedPostedMatchCommits: a real run whose expected_posted matches
+// the rows received reconciles and commits normally.
+func TestIngest_ExpectedPostedMatchCommits(t *testing.T) {
+	api, svc, client := newFinanceTestAPI(t)
+	ctx := context.Background()
+	raw := mintToken(t, ctx, svc, client, "home-finance", []string{"finance.sync"})
+
+	p := financePayload()
+	p["transactions"].(map[string]any)["expected_posted"] = 2
+	resp := api.Post("/api/finance/ingest", p, bearer(raw))
+	if resp.Code != http.StatusOK {
+		t.Fatalf("matched real run = %d, want 200; body=%s", resp.Code, resp.Body.String())
+	}
+	s := decodeRecon(t, resp.Body.Bytes())
+	if !s.Reconciled || s.DryRun || s.PostedReceived != 2 {
+		t.Fatalf("matched summary = %+v, want reconciled true, dry_run false, received=2", s)
+	}
+	if n := client.Transaction.Query().CountX(ctx); n != 2 {
+		t.Errorf("posted after matched run = %d, want 2 (committed)", n)
+	}
+}
+
+// TestIngest_DryRunReportsMismatch: a dry run still returns 200 even when it fails
+// reconciliation, surfacing the discrepancies so a window can be inspected before a
+// real run would refuse it.
+func TestIngest_DryRunReportsMismatch(t *testing.T) {
+	api, svc, client := newFinanceTestAPI(t)
+	ctx := context.Background()
+	raw := mintToken(t, ctx, svc, client, "home-finance", []string{"finance.sync"})
+
+	p := financePayload()
+	p["dry_run"] = true
+	p["transactions"].(map[string]any)["expected_posted"] = 5
+	resp := api.Post("/api/finance/ingest", p, bearer(raw))
+	if resp.Code != http.StatusOK {
+		t.Fatalf("mismatched dry run = %d, want 200 (reports, does not reject); body=%s", resp.Code, resp.Body.String())
+	}
+	s := decodeRecon(t, resp.Body.Bytes())
+	if s.Reconciled || len(s.Discrepancies) == 0 {
+		t.Fatalf("mismatched dry-run summary = %+v, want reconciled false with discrepancies", s)
+	}
+	if n := client.Transaction.Query().CountX(ctx); n != 0 {
+		t.Errorf("posted after mismatched dry run = %d, want 0 (rolled back)", n)
 	}
 }
 

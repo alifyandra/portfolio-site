@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -60,6 +61,14 @@ func (h *Handler) ingestFinance(ctx context.Context, in *ingestInput) (*ingestOu
 	}
 	sum, err := finance.Ingest(ctx, h.deps.Ent, &in.Body)
 	if err != nil {
+		// A real (committing) run that failed reconciliation is a 422, not a 500:
+		// nothing was persisted (Ingest already rolled back), and the discrepancies
+		// tell the broker why the window was refused. A dry run never reaches here
+		// with this error (it returns 200 with the unreconciled Summary instead).
+		var re *finance.ReconciliationError
+		if errors.As(err, &re) {
+			return nil, huma.Error422UnprocessableEntity(re.Error())
+		}
 		return nil, huma.Error500InternalServerError("failed to ingest finance data", err)
 	}
 	out := &ingestOutput{}
