@@ -20,6 +20,10 @@ type Payload struct {
 	// Ledger is the optional OFX-only closing figure. Accepted so an OFX-export
 	// payload validates, but NOT persisted in v1 (see the ingest contract).
 	Ledger *Ledger `json:"ledger,omitempty" doc:"Optional OFX-only closing balance; accepted but not persisted in v1"`
+	// DryRun runs the whole ingest inside the transaction and then ROLLS BACK
+	// instead of committing, returning the Summary (with reconciliation) so a
+	// window can be inspected before it is allowed to land. Nothing is persisted.
+	DryRun bool `json:"dry_run,omitempty" doc:"When true, run the ingest and reconciliation but roll back instead of committing; persists nothing"`
 }
 
 // Window is the scrape window the broker covered. Kept in the contract so the
@@ -54,6 +58,13 @@ type Balance struct {
 type Transactions struct {
 	Posted  []PostedRow  `json:"posted,omitempty" doc:"Immutable ledger rows; upserted by dedup_hash"`
 	Pending []PendingRow `json:"pending,omitempty" doc:"Volatile rows; the whole set is replaced per account"`
+	// ExpectedPosted is the broker's INDEPENDENT count of posted rows it read for
+	// this window (from the bank's page/OFX), computed before serializing the
+	// payload. The ingest reconciles it against the number of posted rows that
+	// actually arrived: a mismatch means rows were lost between scraping and here.
+	// It only detects loss if the broker derives it independently (not len(posted),
+	// which would be tautological). Omit the key when unknown; do NOT send null.
+	ExpectedPosted *int `json:"expected_posted,omitempty" doc:"Broker's independent count of posted rows scraped for this window; reconciled against rows received. Omit when unknown (do not send null)"`
 }
 
 // PostedRow is one settled transaction the cloud lands in the immutable ledger.
