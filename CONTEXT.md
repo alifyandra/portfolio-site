@@ -180,7 +180,7 @@ external [Runner] to claim (the future home-finance hand-off). See ADR 14.
 Where a [Job (async)]'s work actually executes. Three kinds: **server** (the worker
 on the box, or a Fargate task it launches), **local**, and external runners that
 **pull** work over HTTPS instead of being pushed to, namely Alif's laptop running
-Claude Code today and a home finance-scraper server later. An external Runner claims
+Claude Code today and a home finance runner later. An external Runner claims
 a job's [Artifact]s via the work API and posts results back, so the connection is
 always outbound from the runner ("home polls AWS"), never inbound. An external Runner
 authenticates with an [API Token]. See ADR 14.
@@ -233,6 +233,57 @@ the private sidecar for the lifetime of a single [Batch] and destroyed afterward
 never persisted server-side. Distinct from the auth session that proves a [User]'s
 identity (ADR 10): a Link connects WhatsApp, the auth session proves who you are.
 _Avoid_: session.
+
+### Finance Source
+The private, external component that acquires personal finance data and pushes only
+sanitized, derived rows to the [Finance Ingest]. It is an external [Runner] (pulls
+work outbound, authenticated by an [API Token]) and stores no credentials or session
+server-side. Its acquisition details live in a separate private repository, never in
+this one. See ADR 15.
+
+### Financial Account
+An account tracked for the personal dashboard, with a `type` (transaction, savings,
+credit, investment) and an asset-or-liability class so net worth aggregates
+correctly. An **investment** account is a portfolio (balance and holdings) rather
+than a cash ledger; v1 tracks its [Balance Snapshot] only, and holdings and trades
+are a later slice. See ADR 15.
+
+### Posted Transaction
+A settled ledger entry on a [Financial Account]: date, amount, description, and
+running balance. Posted Transactions are immutable, so they are stored once and
+upserted idempotently by a stable hash. Contrast with a [Pending Transaction]. See
+ADR 15.
+
+### Pending Transaction
+A not-yet-settled entry on a [Financial Account] whose amount, description, or date
+can still change, or which can disappear once it settles. Because it is volatile it
+is never part of the ledger: the whole pending set for an account is replaced on
+each refresh, and a Pending Transaction that settles reappears as a [Posted
+Transaction]. See ADR 15.
+
+### Balance Snapshot
+A timestamped reading of a [Financial Account]'s balance from the source on each
+refresh (balance, available balance, and any credit limit). It is the authoritative
+balance and yields a balance-over-time series; balance is never derived by summing
+transactions. See ADR 15.
+
+### Watermark
+The date through which a [Financial Account]'s [Posted Transaction]s are known
+complete. The cloud keeps it, uses it to compute each refresh window, and advances it
+only on a fully successful ingest, so a missed run is recovered by the next one. See
+ADR 15.
+
+### Refresh Handshake
+The daily human-in-the-loop step that gates a finance refresh on an approval: the
+cloud sends a push notification (an ntfy action button), the acknowledgement releases
+the [JobRun] to the [Finance Source], and the refresh runs. Designed so a stray
+acknowledgement cannot start a refresh without the human approval. See ADR 15.
+
+### Finance Ingest
+The write-only, authenticated cloud endpoint (later the work-API result path) that
+accepts sanitized finance rows from the [Finance Source]. It accepts derived data
+only, never credentials or session, upserting [Posted Transaction]s and replacing
+the [Pending Transaction] set. See ADR 15.
 
 ## Naming conventions
 
