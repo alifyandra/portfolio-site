@@ -165,6 +165,13 @@ type Config struct {
 	// configured (so local `make up`, which runs no worker, is unaffected). ~60s is
 	// fine for daily/hourly crons; a lower value only tightens dispatch latency.
 	SchedulerTickSeconds int `env:"SCHEDULER_TICK_SECONDS" envDefault:"60"`
+
+	// FinanceSyncOverlapDays is how many days before the per-account posted
+	// watermark the broker re-scans on an incremental finance sync (issue #88), so
+	// a row that settled late (backdated into an already-synced day) is still picked
+	// up. The overlap is harmless: re-scanned rows dedup on their hash. ComputeWindow
+	// applies it; a full backfill (nil watermark) ignores it.
+	FinanceSyncOverlapDays int `env:"FINANCE_SYNC_OVERLAP_DAYS" envDefault:"7"`
 }
 
 // Load reads and validates configuration from the environment.
