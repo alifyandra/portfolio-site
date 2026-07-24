@@ -50,6 +50,8 @@ func (Account) Fields() []ent.Field {
 		field.Time("updated_at").
 			Default(time.Now).
 			UpdateDefault(time.Now),
+		field.Time("posted_watermark").Optional().Nillable().
+			Comment("Date (UTC-midnight) through which posted txns are known complete; nil => never synced => full backfill"),
 	}
 }
 

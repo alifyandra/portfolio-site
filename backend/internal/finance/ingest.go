@@ -261,6 +261,66 @@ func Ingest(ctx context.Context, client *ent.Client, p *Payload) (*Summary, erro
 		}
 		return sum, &ReconciliationError{Summary: sum}
 	}
+
+	// (6) Advance the per-account posted watermark (issue #88). Reaching this point
+	// proves a real, reconciled run: posted rows are known complete through the
+	// window's `to`, so record it as the high-water mark. The watermark is the
+	// window's `to`, NOT the max posted_date -- a quiet account with no posted rows in
+	// the window is still complete through `to`, and max-posted-date would freeze it
+	// and re-scan forever. A missing window (or empty `to`) is a no-op, so pre-#88
+	// payloads stay unchanged. This runs on tx, so it commits atomically with the
+	// ledger above and rolls back if the commit fails.
+	if p.Window != nil && strings.TrimSpace(p.Window.To) != "" {
+		to, err := parseDate(p.Window.To)
+		if err != nil {
+			return nil, rollback(tx, fmt.Errorf("finance: window.to: %w", err))
+		}
+		// Clamp to today: never let a watermark claim completeness into the future.
+		if today := normalizeDate(time.Now()); to.After(today) {
+			to = today
+		}
+		// Which accounts advance: the nominated one if window.account is set, else
+		// every account actually SCANNED for this window. Scanned = declared in
+		// accounts[] OR referenced by a posted row: those are the accounts whose posted
+		// history was read for [from,to], so `to` is a true completeness mark for them
+		// (a declared-but-quiet account with zero posted rows still counts -- it was
+		// scanned and found empty). A pending-only placeholder is EXCLUDED: a pending
+		// reference is a volatile side-view, not proof the account's posted history was
+		// scanned, so advancing it would falsely mark it complete and suppress its
+		// future backfill.
+		var targets []*ent.Account
+		if name := p.Window.Account.String(); name != "" {
+			acc, err := resolve(name)
+			if err != nil {
+				return nil, rollback(tx, err)
+			}
+			targets = []*ent.Account{acc}
+		} else {
+			scanned := make(map[string]bool, len(p.Accounts)+len(p.Transactions.Posted))
+			for i := range p.Accounts {
+				scanned[p.Accounts[i].Name] = true
+			}
+			for i := range p.Transactions.Posted {
+				scanned[p.Transactions.Posted[i].Account] = true
+			}
+			targets = make([]*ent.Account, 0, len(scanned))
+			for name, acc := range byName {
+				if scanned[name] {
+					targets = append(targets, acc)
+				}
+			}
+		}
+		for _, acc := range targets {
+			// Monotonic: only ever move the watermark forward.
+			if acc.PostedWatermark != nil && !acc.PostedWatermark.Before(to) {
+				continue
+			}
+			if err := tx.Account.UpdateOne(acc).SetPostedWatermark(to).Exec(ctx); err != nil {
+				return nil, rollback(tx, fmt.Errorf("finance: advance watermark for %q: %w", acc.Name, err))
+			}
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("finance: commit: %w", err)
 	}
