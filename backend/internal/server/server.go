@@ -132,6 +132,10 @@ func New(deps *Deps) (http.Handler, huma.API) {
 
 		WaMaxBatchRecipients: deps.Config.WaMaxBatchRecipients,
 		WaMaxBatchesPerDay:   deps.Config.WaMaxBatchesPerDay,
+
+		FinanceSyncAckToken:    deps.Config.FinanceSyncAckToken,
+		FinanceBackfillYears:   deps.Config.FinanceBackfillYears,
+		FinanceSyncOverlapDays: deps.Config.FinanceSyncOverlapDays,
 	})
 	h.Register(humaAPI)
 

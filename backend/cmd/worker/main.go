@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"os/signal"
 	"syscall"
@@ -21,10 +22,29 @@ import (
 	"github.com/alifyandra/portfolio-site/backend/internal/digest"
 	"github.com/alifyandra/portfolio-site/backend/internal/email"
 	"github.com/alifyandra/portfolio-site/backend/internal/jobs"
+	"github.com/alifyandra/portfolio-site/backend/internal/notify"
 	"github.com/alifyandra/portfolio-site/backend/internal/queue"
 	"github.com/alifyandra/portfolio-site/backend/internal/server"
 	"github.com/alifyandra/portfolio-site/backend/internal/storage"
 )
+
+// ackURL derives the absolute finance sync ack endpoint from the backend's public
+// base. The base is taken from the OAuth redirect URL (the one config value that
+// already carries this backend's own scheme+host, e.g.
+// https://api.example.dev/api/auth/google/callback -> https://api.example.dev). An
+// empty or unparseable redirect yields an empty ack URL, which the notifier treats
+// as "send the notification without an action button" (ack by hand). This keeps the
+// ADR 0016 env surface to the ntfy + token vars, with no separate public-URL var.
+func ackURL(oauthRedirect string) string {
+	if oauthRedirect == "" {
+		return ""
+	}
+	u, err := url.Parse(oauthRedirect)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return ""
+	}
+	return u.Scheme + "://" + u.Host + "/api/finance/sync/ack"
+}
 
 func main() {
 	if err := run(); err != nil {
@@ -50,11 +70,22 @@ func run() error {
 
 	q := app.Deps.Queue
 
+	// Refresh-handshake notifier for the ack-gated finance sync (ADR 0016). It
+	// no-ops gracefully when ntfy is unconfigured, so local/dev needs no setup. The
+	// ack endpoint base is derived from the backend's own public host (the same host
+	// Google OAuth redirects to); a blank host just omits the action button.
+	notifier := notify.New(notify.Config{
+		BaseURL:  cfg.NtfyBaseURL,
+		Topic:    cfg.NtfyTopic,
+		AckURL:   ackURL(cfg.GoogleRedirectURL),
+		AckToken: cfg.FinanceSyncAckToken,
+	}, slog.Default())
+
 	// Start the in-process scheduler alongside the poll loop (ADR 0014). It ships
 	// dormant: with zero enabled ScheduledJob rows it enqueues nothing, and it
 	// no-ops whenever the queue is not configured. It stops on ctx.Done().
 	tickInterval := time.Duration(cfg.SchedulerTickSeconds) * time.Second
-	scheduler := jobs.NewScheduler(app.Deps.Ent, q, tickInterval, slog.Default())
+	scheduler := jobs.NewScheduler(app.Deps.Ent, q, tickInterval, slog.Default(), notifier)
 	// One-shot recovery pass before steady-state ticking: re-drive runs left queued,
 	// reap runs left running, and expire lapsed artifacts from a prior process, so a
 	// worker restart recovers stranded work immediately instead of after a full tick.
@@ -192,9 +223,23 @@ func handle(ctx context.Context, deps *server.Deps, job queue.Job) error {
 		return handleDigestScrape(ctx, deps, job)
 	case queue.TypeDigestLlm:
 		return handleDigestLlm(ctx, deps, job)
+	case queue.TypeFinanceSync:
+		return handleFinanceSync(ctx, deps, job)
 	default:
 		return errNoHandler
 	}
+}
+
+// handleFinanceSync is a defense-in-depth no-op (ADR 0016). finance.sync is
+// ack-gated: the scheduler creates its run in awaiting_ack and NEVER enqueues it, so
+// this case should never actually run. It exists only so that if a finance.sync
+// message somehow reaches the queue (a manual mis-enqueue, a leftover message), the
+// worker recognizes the type and acks it cleanly rather than failing the run via
+// errNoHandler. It does no work and touches no run lifecycle: the finance sync seam
+// (claim/ack/complete) owns that.
+func handleFinanceSync(_ context.Context, _ *server.Deps, _ queue.Job) error {
+	slog.Warn("finance.sync is ack-gated and should never be enqueued; acking no-op")
+	return nil
 }
 
 // handleContactNotify emails Alif about a new contact-form submission.

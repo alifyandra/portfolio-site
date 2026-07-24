@@ -621,6 +621,103 @@ components:
           format: uri
           type: string
       type: object
+    FinanceAckOutputBody:
+      additionalProperties: false
+      properties:
+        $schema:
+          description: A URL to the JSON Schema for this object.
+          examples:
+            - https://example.com/schemas/FinanceAckOutputBody.json
+          format: uri
+          readOnly: true
+          type: string
+        acked:
+          description: true once the run is (or already was) approved
+          type: boolean
+      required:
+        - acked
+      type: object
+    FinanceClaimOutputBody:
+      additionalProperties: false
+      properties:
+        $schema:
+          description: A URL to the JSON Schema for this object.
+          examples:
+            - https://example.com/schemas/FinanceClaimOutputBody.json
+          format: uri
+          readOnly: true
+          type: string
+        claimed:
+          description: false when there is no claimable finance sync run
+          type: boolean
+        run_id:
+          description: the leased run to pass back to /complete
+          format: int64
+          type: integer
+        windows:
+          description: one window per known account of the source; empty when the source has no accounts yet (it discovers and backfills on first run)
+          items:
+            $ref: "#/components/schemas/FinanceWindowDTO"
+          type:
+            - array
+            - "null"
+      required:
+        - claimed
+      type: object
+    FinanceCompleteInputBody:
+      additionalProperties: false
+      properties:
+        $schema:
+          description: A URL to the JSON Schema for this object.
+          examples:
+            - https://example.com/schemas/FinanceCompleteInputBody.json
+          format: uri
+          readOnly: true
+          type: string
+        run_id:
+          description: the run returned by /claim, to close
+          format: int64
+          type: integer
+        status:
+          description: terminal outcome of the sync
+          enum:
+            - succeeded
+            - failed
+          type: string
+      type: object
+    FinanceCompleteOutputBody:
+      additionalProperties: false
+      properties:
+        $schema:
+          description: A URL to the JSON Schema for this object.
+          examples:
+            - https://example.com/schemas/FinanceCompleteOutputBody.json
+          format: uri
+          readOnly: true
+          type: string
+        done:
+          description: true when the run was marked terminal
+          type: boolean
+      required:
+        - done
+      type: object
+    FinanceWindowDTO:
+      additionalProperties: false
+      properties:
+        account:
+          type: string
+        backfill:
+          type: boolean
+        from:
+          type: string
+        to:
+          type: string
+      required:
+        - account
+        - from
+        - to
+        - backfill
+      type: object
     Item:
       additionalProperties: false
       properties:
@@ -2648,6 +2745,99 @@ paths:
       security:
         - bearerAuth: []
       summary: Ingest a scraped personal-finance window (external broker runner)
+      tags:
+        - finance
+  /api/finance/sync/ack:
+    post:
+      operationId: ack-finance-sync
+      parameters:
+        - description: the awaiting_ack run to approve
+          explode: false
+          in: query
+          name: run_id
+          required: true
+          schema:
+            description: the awaiting_ack run to approve
+            format: int64
+            type: integer
+        - description: the shared ack secret (FINANCE_SYNC_ACK_TOKEN); rides in the notification action URL
+          explode: false
+          in: query
+          name: token
+          schema:
+            description: the shared ack secret (FINANCE_SYNC_ACK_TOKEN); rides in the notification action URL
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FinanceAckOutputBody"
+          description: OK
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ErrorModel"
+          description: Error
+      summary: Approve a scheduled finance refresh, making its run claimable (token-gated)
+      tags:
+        - finance
+  /api/finance/sync/claim:
+    get:
+      operationId: claim-finance-sync
+      parameters:
+        - description: Finance source whose known accounts to plan windows for; defaults to commbank
+          explode: false
+          in: query
+          name: source
+          schema:
+            default: commbank
+            description: Finance source whose known accounts to plan windows for; defaults to commbank
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FinanceClaimOutputBody"
+          description: OK
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ErrorModel"
+          description: Error
+      security:
+        - bearerAuth: []
+      summary: Claim a claimable finance sync run and get its per-account windows (finance source)
+      tags:
+        - finance
+  /api/finance/sync/complete:
+    post:
+      operationId: complete-finance-sync
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FinanceCompleteInputBody"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FinanceCompleteOutputBody"
+          description: OK
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ErrorModel"
+          description: Error
+      security:
+        - bearerAuth: []
+      summary: Close a claimed finance sync run (finance source)
       tags:
         - finance
   /api/projects:

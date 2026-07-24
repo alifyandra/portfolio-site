@@ -20,6 +20,12 @@ type Kind struct {
 	DefaultSchedule string `json:"default_schedule"`
 	DefaultTimezone string `json:"default_timezone"`
 	Description     string `json:"description"`
+	// AckGated marks a kind whose fired run does no server-side work and must pause
+	// for an explicit human approval before it is runnable (ADR 0016). The scheduler
+	// creates such a run directly in awaiting_ack, does NOT enqueue it to the worker,
+	// and sends a refresh-handshake notification instead. Default false: every other
+	// kind keeps the ordinary queued+enqueue fire path.
+	AckGated bool `json:"ack_gated,omitempty"`
 }
 
 // kinds is the registry. Order is the display order in the console dropdown (scrape
@@ -42,6 +48,18 @@ var kinds = []Kind{
 		DefaultTimezone: "UTC",
 		Description:     "Assemble the pending scrape Artifacts and summarise them into the dated Digest.",
 	},
+	{
+		Key:   "finance.sync",
+		Name:  "Finance sync",
+		Stage: "scrape",
+		// A daily coordinated refresh. The stage is a formality (finance does not use
+		// the two-stage artifact pipeline); scrape is the closest fit since the run is
+		// a "fetch fresh data" instruction handed to the external finance source.
+		DefaultSchedule: "0 20 * * *",
+		DefaultTimezone: "UTC",
+		Description:     "Plan a daily finance refresh window and hand it to the external finance source. Ack-gated: the run pauses for a one-off human approval before it becomes claimable (see ADR 0016).",
+		AckGated:        true,
+	},
 }
 
 // Kinds returns a copy of the registry so a caller cannot mutate the shared slice.
@@ -57,4 +75,18 @@ func LookupKind(key string) (Kind, bool) {
 		}
 	}
 	return Kind{}, false
+}
+
+// ackGatedKeys returns the keys of every ack-gated kind. The reaper uses it to
+// exempt ack-gated runs (ADR 0016), whose lifecycle is externally driven
+// (claim -> ingest -> complete) and so is not bounded by the in-process running
+// lease.
+func ackGatedKeys() []string {
+	var keys []string
+	for _, k := range kinds {
+		if k.AckGated {
+			keys = append(keys, k.Key)
+		}
+	}
+	return keys
 }
