@@ -111,6 +111,13 @@ func Ingest(ctx context.Context, client *ent.Client, p *Payload) (*Summary, erro
 	// (3) Posted rows: immutable ledger, upsert by dedup_hash. ON CONFLICT DO NOTHING
 	// means a re-seen row (identical by construction) is skipped, surfaced as the
 	// sql.ErrNoRows "did nothing" signal (same pattern as digest.Persist).
+	//
+	// occurrence assigns a per-key 0-based ordinal to rows that share an identical
+	// canonical key within THIS payload, in payload order, so rows the bank renders
+	// as genuinely distinct but otherwise-identical (no running balance, no FITID)
+	// don't collapse onto one hash (see DedupHash doc for why this stays idempotent
+	// across re-scraped day-granular windows).
+	occurrence := make(map[string]int, len(p.Transactions.Posted))
 	for i := range p.Transactions.Posted {
 		row := &p.Transactions.Posted[i]
 		acc, err := resolve(row.Account)
@@ -121,7 +128,10 @@ func Ingest(ctx context.Context, client *ent.Client, p *Payload) (*Summary, erro
 		if err != nil {
 			return nil, rollback(tx, fmt.Errorf("finance: posted_date for %q: %w", row.Account, err))
 		}
-		hash := DedupHash(row.Account, row.PostedDate, row.Amount, row.Description, row.BalanceAfter.Value)
+		key := canonicalFields(row.Account, row.PostedDate, row.Amount, row.Description, row.BalanceAfter.Value)
+		occ := occurrence[key]
+		occurrence[key] = occ + 1
+		hash := DedupHash(row.Account, row.PostedDate, row.Amount, row.Description, row.BalanceAfter.Value, occ)
 		err = tx.Transaction.Create().
 			SetDedupHash(hash).
 			SetPostedDate(postedDate).

@@ -9,15 +9,16 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
 // DedupHash computes the immutable-ledger idempotency key for a posted transaction.
 // The broker sends none of these hashes; the cloud derives them so a re-scraped
-// overlap window upserts the same rows. The canonical string joins five fields
+// overlap window upserts the same rows. The canonical string joins six fields
 // with '|', and the hash is its lowercase-hex SHA-256:
 //
-//		account | posted_date | amount(2dp) | description(ws-collapsed) | balance_after(2dp)
+//		account | posted_date | amount(2dp) | description(ws-collapsed) | balance_after(2dp) | occurrence
 //
 //	  - account is trimmed.
 //	  - posted_date is the RAW payload string (e.g. "2025-07-10"), not the parsed time,
@@ -26,19 +27,46 @@ import (
 //	  - description is trimmed with internal whitespace collapsed to single spaces.
 //	  - balance_after contributes an empty field when null (distinct from a 0.00
 //	    balance), so it is modeled as a *float64.
+//	  - occurrence is the 0-based index of this row among payload rows that share an
+//	    identical first five fields, assigned in payload order by the caller (see
+//	    ingest.go). It exists because legacy NetBank UI/OFX rows carry no per-row
+//	    running balance (balance_after is null) and CommBank's FITID is empty, so
+//	    genuinely distinct same-day/same-amount/same-description rows would otherwise
+//	    collapse to one hash and silently drop on ON CONFLICT DO NOTHING. Rendered as
+//	    a plain decimal, no padding.
+//
+//	    This stays idempotent because posted_date is already in the key and the
+//	    broker always re-scrapes a whole posted day on any overlap (day-granular
+//	    windows, watermark advances only over whole days): a re-scraped day yields
+//	    the same multiset of identical rows every time, hence the same set of
+//	    ordinals, hence the same hashes, hence DO NOTHING on the ones already stored.
+//	    Only the multiplicity of a key matters, not which physical row gets which
+//	    ordinal, so no stable within-group sort is required. A later, genuinely new
+//	    duplicate (e.g. a 3rd identical coffee) extends the ordinal sequence and
+//	    inserts as new. Known accepted gap: if the bank ever removes one of a set of
+//	    identical rows, the orphaned ordinal's hash stays in the ledger forever
+//	    (posted rows are append-only) -- reversals appear as separate negative txns,
+//	    not deletions, so this does not need solving.
 //
 // This is a locked contract with a pinned test vector (see hash_test.go); do not
 // change the field order, formatting, or separator.
-func DedupHash(account, postedDate string, amount float64, description string, balanceAfter *float64) string {
-	canonical := strings.Join([]string{
+func DedupHash(account, postedDate string, amount float64, description string, balanceAfter *float64, occurrence int) string {
+	canonical := canonicalFields(account, postedDate, amount, description, balanceAfter) + "|" + strconv.Itoa(occurrence)
+	sum := sha256.Sum256([]byte(canonical))
+	return hex.EncodeToString(sum[:])
+}
+
+// canonicalFields joins the five stable identity fields (everything but the
+// occurrence ordinal), so ingest.go can group posted rows into occurrence keys
+// using the exact same canonicalization DedupHash hashes.
+func canonicalFields(account, postedDate string, amount float64, description string, balanceAfter *float64) string {
+	return strings.Join([]string{
 		strings.TrimSpace(account),
 		postedDate,
 		money2dp(amount),
 		collapseWhitespace(description),
 		balanceField(balanceAfter),
 	}, "|")
-	sum := sha256.Sum256([]byte(canonical))
-	return hex.EncodeToString(sum[:])
 }
 
 // balanceField renders a nullable balance for the hash: an empty string when null,
