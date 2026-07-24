@@ -25,6 +25,14 @@ type Deps struct {
 	// environment. Zero means the default is not wired; server.New always sets them.
 	WaMaxBatchRecipients int
 	WaMaxBatchesPerDay   int
+
+	// Finance sync seam settings (ADR 0016), sourced from config. FinanceSyncAckToken
+	// gates the ack endpoint (constant-time compare); FinanceBackfillYears bounds a
+	// full backfill window; FinanceSyncOverlapDays is the incremental re-scan overlap
+	// ComputeWindow applies.
+	FinanceSyncAckToken    string
+	FinanceBackfillYears   int
+	FinanceSyncOverlapDays int
 }
 
 // Handler holds dependencies and registers operations against a Huma API.
@@ -48,4 +56,5 @@ func (h *Handler) Register(api huma.API) {
 	h.registerAdmin(api)
 	h.registerWork(api)
 	h.registerFinance(api)
+	h.registerFinanceSync(api)
 }

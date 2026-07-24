@@ -55,6 +55,21 @@ func (s *stubQueue) Enqueue(_ context.Context, job queue.Job) error {
 	return nil
 }
 
+// stubNotifier records refresh notifications so the ack-gated fire path is
+// observable (and can be told to fail, to prove a notification error is non-fatal).
+type stubNotifier struct {
+	fail  bool
+	calls []int // run ids notified
+}
+
+func (n *stubNotifier) NotifyRefresh(_ context.Context, runID int, _ string) error {
+	n.calls = append(n.calls, runID)
+	if n.fail {
+		return errors.New("notify boom")
+	}
+	return nil
+}
+
 // seedJob inserts an enabled daily-midnight ScheduledJob. When nextRunAt is
 // non-nil it is set, so the job's due-ness is fully controlled by the test.
 func seedJob(t *testing.T, client *ent.Client, key string, enabled bool, nextRunAt *time.Time) *ent.ScheduledJob {
@@ -95,7 +110,7 @@ func TestTick_DormantNoEnabledJobs(t *testing.T) {
 	seedJob(t, client, "digest.scrape", false, &past)
 
 	q := &stubQueue{configured: true}
-	s := NewScheduler(client, q, time.Minute, nil)
+	s := NewScheduler(client, q, time.Minute, nil, nil)
 	s.tick(ctx, time.Now())
 
 	if len(q.enqueued) != 0 {
@@ -115,7 +130,7 @@ func TestTick_NotConfiguredIsNoOp(t *testing.T) {
 	seedJob(t, client, "digest.scrape", true, &past)
 
 	q := &stubQueue{configured: false}
-	s := NewScheduler(client, q, time.Minute, nil)
+	s := NewScheduler(client, q, time.Minute, nil, nil)
 	s.tick(ctx, time.Now())
 
 	if len(q.enqueued) != 0 {
@@ -143,7 +158,7 @@ func TestTick_DueJobFiresOnce(t *testing.T) {
 	canonical := *seeded.NextRunAt
 
 	q := &stubQueue{configured: true}
-	s := NewScheduler(client, q, time.Minute, nil)
+	s := NewScheduler(client, q, time.Minute, nil, nil)
 	s.tick(ctx, time.Now())
 
 	// Exactly one run.
@@ -192,7 +207,7 @@ func TestTick_DedupOnDoubleTick(t *testing.T) {
 	job := seedJob(t, client, "digest.scrape", true, &past)
 
 	q := &stubQueue{configured: true}
-	s := NewScheduler(client, q, time.Minute, nil)
+	s := NewScheduler(client, q, time.Minute, nil, nil)
 
 	// First tick fires.
 	s.tick(ctx, time.Now())
@@ -225,7 +240,7 @@ func TestTick_NewlyEnabledJobInitializesOnly(t *testing.T) {
 	job := seedJob(t, client, "digest.scrape", true, nil) // no next_run_at
 
 	q := &stubQueue{configured: true}
-	s := NewScheduler(client, q, time.Minute, nil)
+	s := NewScheduler(client, q, time.Minute, nil, nil)
 	now := time.Now()
 	s.tick(ctx, now)
 
@@ -270,7 +285,7 @@ func TestTick_BadCronSkipsJobKeepsGoing(t *testing.T) {
 	seedJob(t, client, "digest.scrape", true, &past)
 
 	q := &stubQueue{configured: true}
-	s := NewScheduler(client, q, time.Minute, nil)
+	s := NewScheduler(client, q, time.Minute, nil, nil)
 	s.tick(ctx, time.Now())
 
 	if len(q.enqueued) != 1 {
@@ -302,7 +317,7 @@ func TestTick_RedrivesStrandedQueuedRun(t *testing.T) {
 		SaveX(ctx)
 
 	q := &stubQueue{configured: true}
-	s := NewScheduler(client, q, time.Minute, nil)
+	s := NewScheduler(client, q, time.Minute, nil, nil)
 	s.tick(ctx, time.Now())
 
 	if len(q.enqueued) != 1 {
@@ -329,7 +344,7 @@ func TestTick_DoesNotRedriveFreshQueuedRun(t *testing.T) {
 		SaveX(ctx)
 
 	q := &stubQueue{configured: true}
-	s := NewScheduler(client, q, time.Minute, nil)
+	s := NewScheduler(client, q, time.Minute, nil, nil)
 	s.tick(ctx, time.Now())
 
 	if len(q.enqueued) != 0 {
@@ -362,7 +377,7 @@ func TestTick_ReapsStuckRunningRun(t *testing.T) {
 		SaveX(ctx)
 
 	q := &stubQueue{configured: true}
-	s := NewScheduler(client, q, time.Minute, nil)
+	s := NewScheduler(client, q, time.Minute, nil, nil)
 	s.tick(ctx, time.Now())
 
 	reaped := client.JobRun.GetX(ctx, stuck.ID)
@@ -377,6 +392,44 @@ func TestTick_ReapsStuckRunningRun(t *testing.T) {
 	}
 	if still := client.JobRun.GetX(ctx, fresh.ID); still.Status != jobrun.StatusRunning {
 		t.Errorf("fresh run status = %q, want it left running", still.Status)
+	}
+}
+
+// TestTick_ReaperExemptsAckGatedRunning: an ack-gated (finance.sync) run stuck
+// `running` past the lease is NOT reaped — its lifecycle is externally driven
+// (claim -> ingest -> complete) and a deep backfill can legitimately exceed the
+// in-process lease — while a normal (digest.scrape) run past the lease still is.
+func TestTick_ReaperExemptsAckGatedRunning(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	normalJob := seedJob(t, client, "digest.scrape", false, nil) // disabled: never fires
+	ackJob := seedJob(t, client, "finance.sync", false, nil)     // ack-gated kind
+	old := time.Now().Add(-runningLease - time.Minute)
+
+	normalStuck := client.JobRun.Create().
+		SetStatus(jobrun.StatusRunning).
+		SetTrigger(jobrun.TriggerSchedule).
+		SetScheduledFor(time.Now()).
+		SetStartedAt(old).
+		SetJobID(normalJob.ID).
+		SaveX(ctx)
+	ackStuck := client.JobRun.Create().
+		SetStatus(jobrun.StatusRunning).
+		SetTrigger(jobrun.TriggerSchedule).
+		SetScheduledFor(time.Now()).
+		SetStartedAt(old).
+		SetJobID(ackJob.ID).
+		SaveX(ctx)
+
+	q := &stubQueue{configured: true}
+	s := NewScheduler(client, q, time.Minute, nil, nil)
+	s.tick(ctx, time.Now())
+
+	if got := client.JobRun.GetX(ctx, normalStuck.ID).Status; got != jobrun.StatusFailed {
+		t.Errorf("normal stuck run status = %q, want failed (reaped)", got)
+	}
+	if got := client.JobRun.GetX(ctx, ackStuck.ID).Status; got != jobrun.StatusRunning {
+		t.Errorf("ack-gated stuck run status = %q, want it left running (exempt from reaper)", got)
 	}
 }
 
@@ -416,7 +469,7 @@ func TestTick_SweepsExpiredArtifacts(t *testing.T) {
 	pendingFuture := mk(artifact.StatusPending, future)
 
 	q := &stubQueue{configured: true}
-	s := NewScheduler(client, q, time.Minute, nil)
+	s := NewScheduler(client, q, time.Minute, nil, nil)
 	s.tick(ctx, time.Now())
 
 	if got := client.Artifact.GetX(ctx, expiredPending).Status; got != artifact.StatusExpired {
@@ -478,5 +531,93 @@ func TestNextRun(t *testing.T) {
 	}
 	if _, err := NextRun("0 18 * * *", "Mars/Phobos", after); err == nil {
 		t.Error("NextRun(bad tz) = nil err, want an error")
+	}
+}
+
+// TestTick_AckGatedFiresAwaitingAckNoEnqueue: an ack-gated kind (finance.sync) fires
+// a run directly in awaiting_ack, does NOT enqueue it, and sends the refresh
+// notification carrying that run's id (ADR 0016).
+func TestTick_AckGatedFiresAwaitingAckNoEnqueue(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	past := time.Now().Add(-time.Hour)
+	seedJob(t, client, "finance.sync", true, &past)
+
+	q := &stubQueue{configured: true}
+	n := &stubNotifier{}
+	s := NewScheduler(client, q, time.Minute, nil, n)
+	s.tick(ctx, time.Now())
+
+	run, err := client.JobRun.Query().Only(ctx)
+	if err != nil {
+		t.Fatalf("expected exactly one JobRun: %v", err)
+	}
+	if run.Status != jobrun.StatusAwaitingAck {
+		t.Errorf("run status = %q, want awaiting_ack", run.Status)
+	}
+	if run.ClaimableAt != nil {
+		t.Errorf("claimable_at = %v, want nil until acked", run.ClaimableAt)
+	}
+	if len(q.enqueued) != 0 {
+		t.Errorf("enqueued %d jobs, want 0 (ack-gated kinds are never enqueued)", len(q.enqueued))
+	}
+	if len(n.calls) != 1 || n.calls[0] != run.ID {
+		t.Errorf("notifier calls = %v, want exactly [%d]", n.calls, run.ID)
+	}
+}
+
+// TestTick_AckGatedNotificationFailureIsNonFatal: a failing notifier does not stop
+// the run being created in awaiting_ack (it can be acked directly), and does not
+// enqueue anything.
+func TestTick_AckGatedNotificationFailureIsNonFatal(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	past := time.Now().Add(-time.Hour)
+	seedJob(t, client, "finance.sync", true, &past)
+
+	q := &stubQueue{configured: true}
+	n := &stubNotifier{fail: true}
+	s := NewScheduler(client, q, time.Minute, nil, n)
+	s.tick(ctx, time.Now())
+
+	run, err := client.JobRun.Query().Only(ctx)
+	if err != nil {
+		t.Fatalf("expected exactly one JobRun despite notify failure: %v", err)
+	}
+	if run.Status != jobrun.StatusAwaitingAck {
+		t.Errorf("run status = %q, want awaiting_ack", run.Status)
+	}
+	if len(q.enqueued) != 0 {
+		t.Errorf("enqueued %d jobs, want 0", len(q.enqueued))
+	}
+}
+
+// TestTick_NonAckGatedUnaffectedByNotifier is the regression guard: a normal kind
+// (digest.scrape) still fires queued + enqueues even when a notifier is wired, and
+// the notifier is never called. The ack-gated branch must not change the ordinary
+// fire path.
+func TestTick_NonAckGatedUnaffectedByNotifier(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	past := time.Now().Add(-time.Hour)
+	seedJob(t, client, "digest.scrape", true, &past)
+
+	q := &stubQueue{configured: true}
+	n := &stubNotifier{}
+	s := NewScheduler(client, q, time.Minute, nil, n)
+	s.tick(ctx, time.Now())
+
+	run, err := client.JobRun.Query().Only(ctx)
+	if err != nil {
+		t.Fatalf("expected exactly one JobRun: %v", err)
+	}
+	if run.Status != jobrun.StatusQueued {
+		t.Errorf("run status = %q, want queued (normal path unchanged)", run.Status)
+	}
+	if len(q.enqueued) != 1 || q.enqueued[0].JobRunID != run.ID {
+		t.Errorf("enqueued = %+v, want exactly one carrying run %d", q.enqueued, run.ID)
+	}
+	if len(n.calls) != 0 {
+		t.Errorf("notifier calls = %v, want none for a non-ack-gated kind", n.calls)
 	}
 }

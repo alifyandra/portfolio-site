@@ -20,9 +20,9 @@ type JobRun struct {
 func (JobRun) Fields() []ent.Field {
 	return []ent.Field{
 		field.Enum("status").
-			Values("queued", "running", "succeeded", "failed", "cancelled").
+			Values("queued", "running", "succeeded", "failed", "cancelled", "awaiting_ack").
 			Default("queued").
-			Comment("Lifecycle: queued on insert, running once a worker or runner picks it up, then a terminal succeeded/failed/cancelled"),
+			Comment("Lifecycle: queued on insert (enqueued to the worker), running once a worker or runner picks it up, then a terminal succeeded/failed/cancelled. awaiting_ack is the ack-gated variant (ADR 0016): the run is created directly in awaiting_ack, not enqueued, and only becomes claimable once a human approves the refresh (claimable_at is set)"),
 		field.Enum("trigger").
 			Values("schedule", "manual").
 			Comment("How the run was created: schedule (the ticker) or manual (an admin force-start)"),
@@ -36,6 +36,10 @@ func (JobRun) Fields() []ent.Field {
 			Optional().
 			Nillable().
 			Comment("When execution began; null while still queued"),
+		field.Time("claimable_at").
+			Optional().
+			Nillable().
+			Comment("For an ack-gated run (ADR 0016): when the refresh was approved, making the run claimable by the external finance source. Null while still awaiting_ack; set by /api/finance/sync/ack, then leased (status -> running) by /api/finance/sync/claim. Not a status: a run stays awaiting_ack until it is claimed, this only records that it MAY be claimed"),
 		field.Time("finished_at").
 			Optional().
 			Nillable().

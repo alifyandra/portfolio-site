@@ -56,25 +56,36 @@ type enqueuer interface {
 	Configured() bool
 }
 
+// notifier sends the refresh-handshake notification for an ack-gated run (ADR 0016)
+// after that run is committed in awaiting_ack. *notify.Client satisfies it (and
+// no-ops gracefully when unconfigured); a nil notifier is tolerated (tests, or a
+// worker built without one) — the run still sits awaiting_ack and can be acked
+// directly.
+type notifier interface {
+	NotifyRefresh(ctx context.Context, runID int, jobName string) error
+}
+
 // Scheduler is the ticker that drives ScheduledJob rows. Construct it with
 // NewScheduler and run it in a goroutine with Run.
 type Scheduler struct {
 	ent      *ent.Client
 	queue    enqueuer
+	notify   notifier
 	interval time.Duration
 	log      *slog.Logger
 }
 
 // NewScheduler builds a Scheduler. A non-positive interval falls back to one
-// minute; a nil logger falls back to slog.Default().
-func NewScheduler(client *ent.Client, q enqueuer, interval time.Duration, log *slog.Logger) *Scheduler {
+// minute; a nil logger falls back to slog.Default(). The notifier is used only for
+// ack-gated kinds (ADR 0016) and may be nil.
+func NewScheduler(client *ent.Client, q enqueuer, interval time.Duration, log *slog.Logger, n notifier) *Scheduler {
 	if interval <= 0 {
 		interval = time.Minute
 	}
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Scheduler{ent: client, queue: q, interval: interval, log: log}
+	return &Scheduler{ent: client, queue: q, notify: n, interval: interval, log: log}
 }
 
 // Run drives the ticker until ctx is cancelled. It is meant to run in its own
@@ -187,7 +198,20 @@ func (s *Scheduler) evaluate(ctx context.Context, job *ent.ScheduledJob, now tim
 	// activation, rather than backfilling one run per missed tick.
 	next := schedule.Next(now.In(loc))
 
-	fresh, runID, err := s.fire(ctx, job, scheduledFor, next, now)
+	// An ack-gated kind (ADR 0016) is created directly in awaiting_ack and is NOT
+	// enqueued to the worker; every other kind keeps the ordinary queued fire path
+	// byte-for-byte. A key absent from the catalog (LookupKind ok=false) is treated
+	// as non-ack-gated, so the default stays the queued+enqueue path.
+	ackGated := false
+	if kind, ok := LookupKind(job.Key); ok {
+		ackGated = kind.AckGated
+	}
+	initialStatus := jobrun.StatusQueued
+	if ackGated {
+		initialStatus = jobrun.StatusAwaitingAck
+	}
+
+	fresh, runID, err := s.fire(ctx, job, scheduledFor, next, now, initialStatus)
 	if err != nil {
 		return err
 	}
@@ -197,6 +221,21 @@ func (s *Scheduler) evaluate(ctx context.Context, job *ent.ScheduledJob, now tim
 		// Nothing to enqueue.
 		s.log.Info("scheduler: run already exists for tick; advanced only",
 			"job", job.Key, "scheduled_for", scheduledFor)
+		return nil
+	}
+
+	// Ack-gated fire path (ADR 0016): the run is committed in awaiting_ack and does
+	// NOT go to the queue. Send the refresh-handshake notification AFTER the commit
+	// (it carries the run id, which must exist first). A notification failure is not
+	// fatal: the run already sits awaiting_ack and can be acked directly, so log and
+	// move on rather than crash the ticker.
+	if ackGated {
+		s.log.Info("scheduler: created ack-gated run awaiting approval", "job", job.Key, "run", runID, "scheduled_for", scheduledFor)
+		if s.notify != nil {
+			if err := s.notify.NotifyRefresh(ctx, runID, job.Name); err != nil {
+				s.log.Error("scheduler: refresh notification failed", "job", job.Key, "run", runID, "err", err)
+			}
+		}
 		return nil
 	}
 
@@ -234,9 +273,11 @@ func (s *Scheduler) enqueueRun(ctx context.Context, job *ent.ScheduledJob, runID
 // fire inserts the JobRun for this tick and advances the job's pointer inside one
 // transaction, then commits. It reports whether a fresh run was inserted (fresh)
 // versus a unique-index conflict on (job, scheduled_for) (not fresh), and the new
-// run's id when fresh. The enqueue is deliberately left to the caller, after the
-// commit.
-func (s *Scheduler) fire(ctx context.Context, job *ent.ScheduledJob, scheduledFor, next, now time.Time) (fresh bool, runID int, err error) {
+// run's id when fresh. The enqueue (or, for an ack-gated kind, the notification) is
+// deliberately left to the caller, after the commit. initialStatus is jobrun status
+// the run is created in — queued for the ordinary enqueue path, awaiting_ack for an
+// ack-gated kind (ADR 0016); the dedup insert is otherwise identical either way.
+func (s *Scheduler) fire(ctx context.Context, job *ent.ScheduledJob, scheduledFor, next, now time.Time, initialStatus jobrun.Status) (fresh bool, runID int, err error) {
 	tx, err := s.ent.Tx(ctx)
 	if err != nil {
 		return false, 0, fmt.Errorf("begin tx: %w", err)
@@ -252,7 +293,7 @@ func (s *Scheduler) fire(ctx context.Context, job *ent.ScheduledJob, scheduledFo
 	// that is the "someone already created this tick's run" signal, not a failure.
 	// A fresh insert returns the new id.
 	id, cerr := tx.JobRun.Create().
-		SetStatus(jobrun.StatusQueued).
+		SetStatus(initialStatus).
 		SetTrigger(jobrun.TriggerSchedule).
 		SetScheduledFor(scheduledFor).
 		SetJobID(job.ID).
@@ -327,12 +368,21 @@ func (s *Scheduler) redriveQueued(ctx context.Context, now time.Time) {
 // longer than any real job, so a healthy in-flight run is never reaped.
 func (s *Scheduler) reapRunning(ctx context.Context, now time.Time) {
 	cutoff := now.Add(-runningLease)
-	n, err := s.ent.JobRun.Update().
+	q := s.ent.JobRun.Update().
 		Where(
 			jobrun.StatusEQ(jobrun.StatusRunning),
 			jobrun.TriggerEQ(jobrun.TriggerSchedule),
 			jobrun.StartedAtLT(cutoff),
-		).
+		)
+	// Exempt ack-gated kinds (ADR 0016). Their runs stay `running` from claim to
+	// complete under an externally driven lifecycle (a deep backfill can legitimately
+	// exceed the in-process lease), so the lease does not bound them and reaping one
+	// mid-flight would falsely fail live work. Only the in-process worker path is
+	// bounded by runningLease.
+	if keys := ackGatedKeys(); len(keys) > 0 {
+		q = q.Where(jobrun.HasJobWith(scheduledjob.KeyNotIn(keys...)))
+	}
+	n, err := q.
 		SetStatus(jobrun.StatusFailed).
 		SetError("reaped: exceeded running lease").
 		SetFinishedAt(now).

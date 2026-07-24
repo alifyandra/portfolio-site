@@ -24,6 +24,13 @@ const (
 	// Fargate task submitting a batch in fargate mode), producing the dated Digest.
 	// Scheduler-driven (carries a JobRunID). Dormant until its ScheduledJob is enabled.
 	TypeDigestLlm = "digest.llm"
+	// TypeFinanceSync is the ack-gated finance refresh kind (ADR 0016). It does no
+	// server-side work: the scheduler creates its run in awaiting_ack and never
+	// enqueues it, and an external finance source claims the window over the finance
+	// sync seam once a human approves the refresh. The worker registers a no-op guard
+	// for it purely as defense-in-depth so a stray enqueue cannot errNoHandler-fail a
+	// run; nothing is ever enqueued for this type in normal operation.
+	TypeFinanceSync = "finance.sync"
 )
 
 // ContactNotifyPayload is the body of a TypeContactNotify job.

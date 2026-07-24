@@ -172,6 +172,25 @@ type Config struct {
 	// up. The overlap is harmless: re-scanned rows dedup on their hash. ComputeWindow
 	// applies it; a full backfill (nil watermark) ignores it.
 	FinanceSyncOverlapDays int `env:"FINANCE_SYNC_OVERLAP_DAYS" envDefault:"7"`
+
+	// FinanceBackfillYears bounds how far back a full backfill window reaches: the
+	// claim endpoint sets a nil-watermark account's window start to today minus this
+	// many years (ADR 0016). The finance source clamps it to what it actually offers,
+	// so an over-generous value is safe.
+	FinanceBackfillYears int `env:"FINANCE_BACKFILL_YEARS" envDefault:"8"`
+
+	// ntfy refresh-handshake notification (ADR 0016). The scheduler sends a refresh
+	// approval prompt when it fires the ack-gated finance sync. Following the
+	// SES/Spotify/queue precedent, blank base URL or topic disables notifications
+	// (graceful no-op): the run still enters awaiting_ack and can be acked directly,
+	// so local and dev need no ntfy setup.
+	NtfyBaseURL string `env:"NTFY_BASE_URL"`
+	NtfyTopic   string `env:"NTFY_TOPIC"`
+	// FinanceSyncAckToken gates POST /api/finance/sync/ack (compared in constant
+	// time). It rides in the notification action URL, so it is a shared secret
+	// distinct from the finance.sync runner bearer. Blank in local dev, where the
+	// endpoint can be acked with an empty token.
+	FinanceSyncAckToken string `env:"FINANCE_SYNC_ACK_TOKEN"`
 }
 
 // Load reads and validates configuration from the environment.
