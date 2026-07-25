@@ -40,6 +40,22 @@ function AdminLink() {
   );
 }
 
+// Admin-only Finance dashboard entry, in the admin (citron) family beside the
+// Admin console link. Private data view; the backend re-enforces the gate.
+function FinanceLink() {
+  const { isAdmin } = useAuth();
+  if (!isAdmin) return null;
+  return (
+    <Link
+      href="/finance"
+      className="flex items-center gap-1.5 rounded-md px-2 py-1 text-sm font-medium text-citron no-underline transition hover:brightness-110"
+    >
+      <span aria-hidden className="h-2 w-2 rounded-full bg-citron" />
+      <span className="hidden sm:inline">Finance</span>
+    </Link>
+  );
+}
+
 function AccountControl() {
   const { user, role, displayName, isLoading, isAuthenticated, signIn } =
     useAuth();
@@ -126,6 +142,7 @@ export function Navbar() {
 
         <div className="flex items-center gap-2 sm:gap-3">
           <AdminLink />
+          <FinanceLink />
           <AppMenu />
           <ThemeToggle />
           <AccountControl />
