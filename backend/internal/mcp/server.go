@@ -60,11 +60,27 @@ const (
 	codeInternalError  = -32603
 )
 
-// Deps are the dependencies the MCP server needs. Both may be nil at construction
-// (cmd/spec builds the router with nil clients); they are only used per request.
+// Deps are the dependencies the MCP server needs. Ent/Auth may be nil at
+// construction (cmd/spec builds the router with nil clients); they are only used
+// per request.
 type Deps struct {
 	Ent  *ent.Client
 	Auth *auth.Service
+
+	// OAuthEnabled mirrors FINANCE_MCP_OAUTH_ENABLED (ADR 0018). When true the 401
+	// challenge advertises the RFC 9728 resource-metadata URL (which triggers
+	// claude.ai's OAuth discovery) instead of the legacy realm form, and OAuth
+	// access tokens are accepted in addition to the static finance.read bearer.
+	// When false the behaviour is exactly as before: bearer-only, realm challenge.
+	OAuthEnabled bool
+	// ChallengeResourceMetadataURL is advertised as resource_metadata in the 401
+	// WWW-Authenticate challenge when OAuthEnabled. Empty => legacy realm challenge.
+	ChallengeResourceMetadataURL string
+	// VerifyOAuthToken, when non-nil and OAuthEnabled, is consulted for a bearer that
+	// is not a valid static finance.read ApiToken: it returns true only for a live
+	// OAuth access token bound to this MCP resource (audience) with finance.read
+	// scope. Nil in cmd/spec and whenever the flag is off. It NEVER sees a cookie.
+	VerifyOAuthToken func(ctx context.Context, rawToken string) bool
 }
 
 // server is the http.Handler mounted at /mcp.
@@ -119,11 +135,13 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, ok := s.authorize(r); !ok {
+	if !s.authorize(r) {
 		// A single WWW-Authenticate challenge for every auth failure (missing token,
 		// invalid token, or a token that lacks finance.read): the client cannot tell
-		// which, by design.
-		w.Header().Set("WWW-Authenticate", `Bearer realm="mcp", scope="`+financeReadScope+`"`)
+		// which, by design. When OAuth is enabled the challenge advertises the
+		// resource-metadata URL (RFC 9728), which is what makes claude.ai begin its
+		// OAuth discovery; otherwise it stays the legacy realm form.
+		w.Header().Set("WWW-Authenticate", s.challenge())
 		http.Error(w, "a valid finance.read bearer token is required", http.StatusUnauthorized)
 		return
 	}
@@ -209,27 +227,40 @@ func negotiateVersion(requested string) string {
 	return latestProtocolVersion
 }
 
-// authorize resolves the Authorization: Bearer token and requires the finance.read
-// scope. It returns (identity, true) only for a valid, sufficiently-scoped token; any
-// failure (no Auth service, missing/invalid token, or insufficient scope) is
-// (nil, false), which ServeHTTP renders as a single 401 challenge. It never accepts a
-// session cookie: MCP is token-only.
-func (s *server) authorize(r *http.Request) (*auth.BearerIdentity, bool) {
-	if s.deps.Auth == nil {
-		return nil, false
-	}
+// authorize resolves the Authorization: Bearer token and returns true only for a
+// credential that grants finance.read on this resource. It accepts EITHER a valid
+// static finance.read ApiToken (the existing scope-only bearer, tried first and
+// working in both flag modes) OR — only when OAuth is enabled — a live OAuth access
+// token bound to this MCP resource. Any other outcome (no token, invalid token,
+// insufficient scope, wrong audience) is false, which ServeHTTP renders as a single
+// 401 challenge. It never accepts a session cookie: MCP is token-only.
+func (s *server) authorize(r *http.Request) bool {
 	raw := bearerToken(r.Header.Get("Authorization"))
 	if raw == "" {
-		return nil, false
+		return false
 	}
-	id, err := s.deps.Auth.AuthenticateBearer(r.Context(), raw)
-	if err != nil || id == nil {
-		return nil, false
+	// Static finance.read ApiToken (unchanged path; both flag modes).
+	if s.deps.Auth != nil {
+		if id, err := s.deps.Auth.AuthenticateBearer(r.Context(), raw); err == nil && id != nil && id.Allows(financeReadScope) {
+			return true
+		}
 	}
-	if !id.Allows(financeReadScope) {
-		return nil, false
+	// OAuth 2.1 access token (ADR 0018), only when the flag is on. The verifier
+	// enforces audience==this MCP URL + finance.read scope + not expired/revoked.
+	if s.deps.OAuthEnabled && s.deps.VerifyOAuthToken != nil {
+		return s.deps.VerifyOAuthToken(r.Context(), raw)
 	}
-	return id, true
+	return false
+}
+
+// challenge returns the WWW-Authenticate header value for a 401. With OAuth enabled
+// (and a resource-metadata URL configured) it uses the RFC 9728 resource_metadata
+// form that starts claude.ai's OAuth discovery; otherwise the legacy realm form.
+func (s *server) challenge() string {
+	if s.deps.OAuthEnabled && s.deps.ChallengeResourceMetadataURL != "" {
+		return `Bearer resource_metadata="` + s.deps.ChallengeResourceMetadataURL + `", scope="` + financeReadScope + `"`
+	}
+	return `Bearer realm="mcp", scope="` + financeReadScope + `"`
 }
 
 // bearerToken extracts the token from an "Authorization: Bearer <token>" header, or

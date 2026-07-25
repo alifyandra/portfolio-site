@@ -66,5 +66,10 @@ func (User) Edges() []ent.Edge {
 		// Scheduled-job platform (ADR 0014): scope-only bearer tokens for
 		// external runners. FK lives on api_tokens, no new column on users.
 		edge.To("api_tokens", ApiToken.Type),
+		// Finance MCP OAuth 2.1 authorization server (ADR 0018): the one-time
+		// authorization codes and issued access/refresh tokens the owning admin
+		// granted via the connector consent flow.
+		edge.To("oauth_auth_codes", OAuthAuthCode.Type),
+		edge.To("oauth_tokens", OAuthToken.Type),
 	}
 }

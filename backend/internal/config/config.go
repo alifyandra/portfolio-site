@@ -191,6 +191,17 @@ type Config struct {
 	// distinct from the finance.sync runner bearer. Blank in local dev, where the
 	// endpoint can be acked with an empty token.
 	FinanceSyncAckToken string `env:"FINANCE_SYNC_ACK_TOKEN"`
+
+	// FinanceMCPOAuthEnabled turns on the self-hosted OAuth 2.1 authorization server
+	// (ADR 0018) that lets claude.ai connect the finance MCP server at <base>/mcp.
+	// Default FALSE: the discovery + /oauth/* routes 404 and the /mcp 401 challenge
+	// stays the legacy bearer-only form. When true, the full authorization-code +
+	// PKCE flow is live. The static finance.read bearer token (Claude Code) keeps
+	// working in BOTH modes. Held off until a human live-tests the claude.ai
+	// handshake; never enable it without that verification. The OAuth issuer/base
+	// URL is derived from GoogleRedirectURL (the one config value carrying this
+	// backend's own scheme+host), so no separate public-URL var is needed.
+	FinanceMCPOAuthEnabled bool `env:"FINANCE_MCP_OAUTH_ENABLED" envDefault:"false"`
 }
 
 // Load reads and validates configuration from the environment.

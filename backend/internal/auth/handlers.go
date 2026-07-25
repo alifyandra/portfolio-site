@@ -23,6 +23,16 @@ func (s *Service) LoginHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	stateCookie := s.StateCookie(state)
 	http.SetCookie(w, &stateCookie)
+
+	// Optional return_to: a same-origin path to resume after sign-in (e.g. the OAuth
+	// /oauth/authorize request, ADR 0018). Only a safeInternalPath is honoured, so a
+	// crafted return_to can never turn the callback into an open redirect. Stored in
+	// a host-only cookie because Google returns only state+code, nothing else.
+	if rt := r.URL.Query().Get("return_to"); safeInternalPath(rt) {
+		rtCookie := s.ReturnToCookie(rt)
+		http.SetCookie(w, &rtCookie)
+	}
+
 	http.Redirect(w, r, s.AuthCodeURL(state), http.StatusFound)
 }
 
@@ -40,6 +50,15 @@ func (s *Service) CallbackHandler(w http.ResponseWriter, r *http.Request) {
 	// failed attempt cannot leave a reusable CSRF nonce on the browser.
 	cleared := s.ClearStateCookie()
 	http.SetCookie(w, &cleared)
+
+	// Read and clear any return_to set at login start. It is re-validated as a
+	// safeInternalPath below before use; a tampered value is discarded.
+	returnTo := ""
+	if rt, rerr := r.Cookie(returnToCookieName); rerr == nil {
+		returnTo = rt.Value
+		clearedRT := s.ClearReturnToCookie()
+		http.SetCookie(w, &clearedRT)
+	}
 
 	// CSRF defence: the state in the query must match the state cookie we set.
 	stateCookie, err := r.Cookie(stateCookieName)
@@ -91,5 +110,14 @@ func (s *Service) CallbackHandler(w http.ResponseWriter, r *http.Request) {
 
 	sessionCookie := s.SessionCookie(raw)
 	http.SetCookie(w, &sessionCookie)
-	http.Redirect(w, r, s.frontendURL, http.StatusFound)
+
+	// Resume the return_to path when it is a safe same-origin path, else fall back
+	// to the frontend. The guard is defence-in-depth: only a safeInternalPath was
+	// ever stored, and it is re-checked here so a tampered cookie cannot redirect
+	// off-origin.
+	dest := s.frontendURL
+	if safeInternalPath(returnTo) {
+		dest = returnTo
+	}
+	http.Redirect(w, r, dest, http.StatusFound)
 }

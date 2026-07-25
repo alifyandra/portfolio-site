@@ -36,6 +36,10 @@ const (
 	providerGoogle    = "google"
 	sessionCookieName = "session"
 	stateCookieName   = "oauth_state"
+	// returnToCookieName carries a same-origin path to resume after login, e.g.
+	// the OAuth /oauth/authorize request (ADR 0018). Host-only and short-lived like
+	// the state cookie; only ever set to a safeInternalPath value.
+	returnToCookieName = "oauth_return_to"
 
 	// sessionDuration is the sliding session lifetime.
 	sessionDuration = 30 * 24 * time.Hour
@@ -274,6 +278,17 @@ func (s *Service) StateCookie(state string) http.Cookie {
 
 func (s *Service) ClearStateCookie() http.Cookie {
 	return s.buildCookie(stateCookieName, "", -1, false)
+}
+
+// ReturnToCookie / ClearReturnToCookie build the short-lived, host-only cookie that
+// carries a same-origin path to resume after login (e.g. the OAuth authorize
+// request). Host-only so it is never exposed to sibling subdomains.
+func (s *Service) ReturnToCookie(path string) http.Cookie {
+	return s.buildCookie(returnToCookieName, path, int(stateTTL.Seconds()), false)
+}
+
+func (s *Service) ClearReturnToCookie() http.Cookie {
+	return s.buildCookie(returnToCookieName, "", -1, false)
 }
 
 // --- OAuth flow ---
