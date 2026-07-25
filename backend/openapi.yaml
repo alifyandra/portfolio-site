@@ -193,6 +193,19 @@ components:
         - balance
         - as_of
       type: object
+    BalancePointDTO:
+      additionalProperties: false
+      properties:
+        as_of:
+          description: RFC3339 reading time
+          type: string
+        balance:
+          format: double
+          type: number
+      required:
+        - as_of
+        - balance
+      type: object
     BatchDTO:
       additionalProperties: false
       properties:
@@ -621,6 +634,70 @@ components:
           format: uri
           type: string
       type: object
+    FinanceAccountDTO:
+      additionalProperties: false
+      properties:
+        available:
+          format: double
+          type:
+            - number
+            - "null"
+        balance:
+          description: Latest snapshot balance; null when the account has no snapshot
+          format: double
+          type:
+            - number
+            - "null"
+        balance_as_of:
+          description: RFC3339 reading time of the latest snapshot; null when none
+          type:
+            - string
+            - "null"
+        class:
+          enum:
+            - asset
+            - liability
+          type: string
+        credit_limit:
+          format: double
+          type:
+            - number
+            - "null"
+        currency:
+          type: string
+        id:
+          format: int64
+          type: integer
+        masked_number:
+          type: string
+        name:
+          type: string
+        posted_watermark:
+          description: Date (YYYY-MM-DD) through which posted rows are known complete; null when never synced
+          type:
+            - string
+            - "null"
+        type:
+          enum:
+            - everyday
+            - savings
+            - credit_card
+            - steppay
+            - investment
+          type: string
+      required:
+        - id
+        - name
+        - masked_number
+        - type
+        - class
+        - currency
+        - balance
+        - available
+        - credit_limit
+        - balance_as_of
+        - posted_watermark
+      type: object
     FinanceAckOutputBody:
       additionalProperties: false
       properties:
@@ -636,6 +713,25 @@ components:
           type: boolean
       required:
         - acked
+      type: object
+    FinanceBalanceHistoryOutputBody:
+      additionalProperties: false
+      properties:
+        $schema:
+          description: A URL to the JSON Schema for this object.
+          examples:
+            - https://example.com/schemas/FinanceBalanceHistoryOutputBody.json
+          format: uri
+          readOnly: true
+          type: string
+        points:
+          items:
+            $ref: "#/components/schemas/BalancePointDTO"
+          type:
+            - array
+            - "null"
+      required:
+        - points
       type: object
     FinanceClaimOutputBody:
       additionalProperties: false
@@ -700,6 +796,110 @@ components:
           type: boolean
       required:
         - done
+      type: object
+    FinancePendingDTO:
+      additionalProperties: false
+      properties:
+        account_id:
+          format: int64
+          type: integer
+        account_name:
+          type: string
+        amount:
+          format: double
+          type: number
+        date:
+          description: YYYY-MM-DD
+          type: string
+        description:
+          type: string
+        id:
+          format: int64
+          type: integer
+        merchant:
+          type: string
+      required:
+        - id
+        - account_id
+        - account_name
+        - date
+        - amount
+        - description
+        - merchant
+      type: object
+    FinanceSummaryDTO:
+      additionalProperties: false
+      properties:
+        $schema:
+          description: A URL to the JSON Schema for this object.
+          examples:
+            - https://example.com/schemas/FinanceSummaryDTO.json
+          format: uri
+          readOnly: true
+          type: string
+        account_count:
+          format: int64
+          type: integer
+        as_of:
+          description: RFC3339 timestamp of the freshest balance reading; null when no snapshots exist
+          type:
+            - string
+            - "null"
+        assets:
+          format: double
+          type: number
+        currency:
+          type: string
+        liabilities:
+          format: double
+          type: number
+        net_worth:
+          format: double
+          type: number
+      required:
+        - net_worth
+        - assets
+        - liabilities
+        - currency
+        - account_count
+        - as_of
+      type: object
+    FinanceTxnDTO:
+      additionalProperties: false
+      properties:
+        account_id:
+          format: int64
+          type: integer
+        account_name:
+          type: string
+        amount:
+          description: "Signed: money out negative, money in positive"
+          format: double
+          type: number
+        balance_after:
+          format: double
+          type:
+            - number
+            - "null"
+        description:
+          type: string
+        id:
+          format: int64
+          type: integer
+        merchant:
+          type: string
+        posted_date:
+          description: YYYY-MM-DD
+          type: string
+      required:
+        - id
+        - account_id
+        - account_name
+        - posted_date
+        - amount
+        - description
+        - merchant
+        - balance_after
       type: object
     FinanceWindowDTO:
       additionalProperties: false
@@ -963,6 +1163,68 @@ components:
         - recipient_count
         - created_at
         - updated_at
+      type: object
+    ListFinanceAccountsOutputBody:
+      additionalProperties: false
+      properties:
+        $schema:
+          description: A URL to the JSON Schema for this object.
+          examples:
+            - https://example.com/schemas/ListFinanceAccountsOutputBody.json
+          format: uri
+          readOnly: true
+          type: string
+        accounts:
+          items:
+            $ref: "#/components/schemas/FinanceAccountDTO"
+          type:
+            - array
+            - "null"
+      required:
+        - accounts
+      type: object
+    ListFinancePendingOutputBody:
+      additionalProperties: false
+      properties:
+        $schema:
+          description: A URL to the JSON Schema for this object.
+          examples:
+            - https://example.com/schemas/ListFinancePendingOutputBody.json
+          format: uri
+          readOnly: true
+          type: string
+        pending:
+          items:
+            $ref: "#/components/schemas/FinancePendingDTO"
+          type:
+            - array
+            - "null"
+      required:
+        - pending
+      type: object
+    ListFinanceTxnOutputBody:
+      additionalProperties: false
+      properties:
+        $schema:
+          description: A URL to the JSON Schema for this object.
+          examples:
+            - https://example.com/schemas/ListFinanceTxnOutputBody.json
+          format: uri
+          readOnly: true
+          type: string
+        total:
+          description: Total rows matching the filter, before paging
+          format: int64
+          type: integer
+        transactions:
+          items:
+            $ref: "#/components/schemas/FinanceTxnDTO"
+          type:
+            - array
+            - "null"
+      required:
+        - transactions
+        - total
       type: object
     ListGrantsOutputBody:
       additionalProperties: false
@@ -2720,6 +2982,66 @@ paths:
       summary: Submit a contact message
       tags:
         - contact
+  /api/finance/accounts:
+    get:
+      operationId: list-finance-accounts
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListFinanceAccountsOutputBody"
+          description: OK
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ErrorModel"
+          description: Error
+      security:
+        - cookieAuth: []
+      summary: List finance accounts with their latest balance (admin)
+      tags:
+        - finance
+  /api/finance/accounts/{id}/balances:
+    get:
+      operationId: get-finance-balance-history
+      parameters:
+        - description: Account id
+          in: path
+          name: id
+          required: true
+          schema:
+            description: Account id
+            format: int64
+            type: integer
+        - description: Look-back window in days; 0 returns the full history
+          explode: false
+          in: query
+          name: days
+          schema:
+            default: 90
+            description: Look-back window in days; 0 returns the full history
+            format: int64
+            type: integer
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FinanceBalanceHistoryOutputBody"
+          description: OK
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ErrorModel"
+          description: Error
+      security:
+        - cookieAuth: []
+      summary: Balance history for one account (admin)
+      tags:
+        - finance
   /api/finance/ingest:
     post:
       operationId: ingest-finance
@@ -2745,6 +3067,57 @@ paths:
       security:
         - bearerAuth: []
       summary: Ingest a scraped personal-finance window (external broker runner)
+      tags:
+        - finance
+  /api/finance/pending:
+    get:
+      operationId: list-finance-pending
+      parameters:
+        - description: Filter to one account; 0 (default) spans all
+          explode: false
+          in: query
+          name: account_id
+          schema:
+            description: Filter to one account; 0 (default) spans all
+            format: int64
+            type: integer
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListFinancePendingOutputBody"
+          description: OK
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ErrorModel"
+          description: Error
+      security:
+        - cookieAuth: []
+      summary: List pending (not-yet-settled) transactions (admin)
+      tags:
+        - finance
+  /api/finance/summary:
+    get:
+      operationId: get-finance-summary
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FinanceSummaryDTO"
+          description: OK
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ErrorModel"
+          description: Error
+      security:
+        - cookieAuth: []
+      summary: Net-worth summary across all finance accounts (admin)
       tags:
         - finance
   /api/finance/sync/ack:
@@ -2838,6 +3211,67 @@ paths:
       security:
         - bearerAuth: []
       summary: Close a claimed finance sync run (finance source)
+      tags:
+        - finance
+  /api/finance/transactions:
+    get:
+      operationId: list-finance-transactions
+      parameters:
+        - description: Filter to one account; 0 (default) spans all
+          explode: false
+          in: query
+          name: account_id
+          schema:
+            description: Filter to one account; 0 (default) spans all
+            format: int64
+            type: integer
+        - description: Inclusive lower bound, YYYY-MM-DD
+          explode: false
+          in: query
+          name: from
+          schema:
+            description: Inclusive lower bound, YYYY-MM-DD
+            type: string
+        - description: Inclusive upper bound, YYYY-MM-DD
+          explode: false
+          in: query
+          name: to
+          schema:
+            description: Inclusive upper bound, YYYY-MM-DD
+            type: string
+        - description: Page size (capped at 500)
+          explode: false
+          in: query
+          name: limit
+          schema:
+            default: 50
+            description: Page size (capped at 500)
+            format: int64
+            type: integer
+        - description: Rows to skip for paging
+          explode: false
+          in: query
+          name: offset
+          schema:
+            description: Rows to skip for paging
+            format: int64
+            type: integer
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListFinanceTxnOutputBody"
+          description: OK
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ErrorModel"
+          description: Error
+      security:
+        - cookieAuth: []
+      summary: List posted transactions, filtered and paged (admin)
       tags:
         - finance
   /api/projects:

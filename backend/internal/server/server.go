@@ -20,6 +20,7 @@ import (
 	"github.com/alifyandra/portfolio-site/backend/internal/digest"
 	"github.com/alifyandra/portfolio-site/backend/internal/email"
 	"github.com/alifyandra/portfolio-site/backend/internal/fargate"
+	"github.com/alifyandra/portfolio-site/backend/internal/mcp"
 	"github.com/alifyandra/portfolio-site/backend/internal/notify"
 	"github.com/alifyandra/portfolio-site/backend/internal/queue"
 	"github.com/alifyandra/portfolio-site/backend/internal/spotify"
@@ -160,6 +161,17 @@ func New(deps *Deps) (http.Handler, huma.API) {
 	}
 	h := api.New(apiDeps)
 	h.Register(humaAPI)
+
+	// Remote MCP server (ADR 0017), mounted on the RAW Chi router OUTSIDE Huma: it
+	// speaks JSON-RPC 2.0 over the MCP Streamable HTTP transport (JSON-response mode),
+	// not the OpenAPI contract, and authenticates with a finance.read bearer token
+	// rather than the session cookie, so it is intentionally absent from openapi.yaml.
+	// Constructing the handler dereferences nothing, so cmd/spec (nil Ent/Auth) stays
+	// safe; the clients are touched only per request. Registered on both /mcp and
+	// /mcp/ since clients differ on the trailing slash and Chi does not redirect.
+	mcpHandler := mcp.Handler(mcp.Deps{Ent: deps.Ent, Auth: deps.Auth})
+	r.Handle("/mcp", mcpHandler)
+	r.Handle("/mcp/", mcpHandler)
 
 	// OAuth redirect flows are browser navigations, not JSON operations, so they
 	// are plain Chi routes rather than Huma operations (no generated client hook).
