@@ -48,7 +48,7 @@ func seedTxn(t *testing.T, ctx context.Context, client *ent.Client, acc *ent.Acc
 // day (y,m,d -> UTC midnight) is defined in window_test.go and reused here.
 
 // TestSummary_NetWorthMath covers the three load-bearing rules: assets sum the
-// LATEST asset snapshot, liabilities sum the ABSOLUTE latest liability snapshot, and
+// LATEST asset snapshot, liabilities sum the NEGATED latest liability snapshot, and
 // an account with no snapshot still counts toward account_count without moving the
 // numbers. The latest-snapshot selection is proven by giving the asset account two
 // snapshots (an older 1000 and a newer 1500): only 1500 must count.
@@ -74,7 +74,7 @@ func TestSummary_NetWorthMath(t *testing.T) {
 		t.Errorf("assets = %.2f, want 1500.00 (latest snapshot only)", s.Assets)
 	}
 	if s.Liabilities != 400.00 {
-		t.Errorf("liabilities = %.2f, want 400.00 (abs of latest liability balance)", s.Liabilities)
+		t.Errorf("liabilities = %.2f, want 400.00 (negated latest liability balance: -(-400))", s.Liabilities)
 	}
 	if s.NetWorth != 1100.00 {
 		t.Errorf("net_worth = %.2f, want 1100.00 (1500 - 400)", s.NetWorth)
@@ -88,6 +88,36 @@ func TestSummary_NetWorthMath(t *testing.T) {
 	// AsOf is the freshest reading across latest snapshots: the asset's 2026-07-10.
 	if s.AsOf == nil || !s.AsOf.Equal(time.Date(2026, 7, 10, 9, 0, 0, 0, time.UTC)) {
 		t.Errorf("as_of = %v, want 2026-07-10T09:00:00Z (the freshest reading)", s.AsOf)
+	}
+}
+
+// TestSummary_InCreditLiability locks the sign fix (ADR 0017 review): a liability
+// account carrying a POSITIVE (overpaid, in-credit) balance must ADD to net worth, not
+// subtract. Negating the balance books a +150 credit as -150 liabilities, so an
+// otherwise-400-owed card in credit by 150 nets to 250 owed. abs() would have wrongly
+// reported 550 owed.
+func TestSummary_InCreditLiability(t *testing.T) {
+	client := newFinanceTestClient(t)
+	ctx := context.Background()
+
+	asset := seedAccount(t, ctx, client, "Smart Access", account.ClassAsset, account.TypeEveryday)
+	seedSnapshot(t, ctx, client, asset, 1000.00, time.Date(2026, 7, 10, 9, 0, 0, 0, time.UTC))
+
+	owed := seedAccount(t, ctx, client, "Low Rate CC", account.ClassLiability, account.TypeCreditCard)
+	seedSnapshot(t, ctx, client, owed, -400.00, time.Date(2026, 7, 10, 9, 0, 0, 0, time.UTC)) // owes 400
+
+	credit := seedAccount(t, ctx, client, "StepPay", account.ClassLiability, account.TypeSteppay)
+	seedSnapshot(t, ctx, client, credit, 150.00, time.Date(2026, 7, 10, 9, 0, 0, 0, time.UTC)) // in credit 150
+
+	s, err := NetWorthSummary(ctx, client)
+	if err != nil {
+		t.Fatalf("NetWorthSummary: %v", err)
+	}
+	if s.Liabilities != 250.00 {
+		t.Errorf("liabilities = %.2f, want 250.00 (400 owed minus 150 in credit)", s.Liabilities)
+	}
+	if s.NetWorth != 750.00 {
+		t.Errorf("net_worth = %.2f, want 750.00 (1000 - 250)", s.NetWorth)
 	}
 }
 

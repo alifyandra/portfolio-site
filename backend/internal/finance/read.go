@@ -2,7 +2,6 @@ package finance
 
 import (
 	"context"
-	"math"
 	"strings"
 	"time"
 
@@ -121,10 +120,12 @@ func latestSnapshot(ctx context.Context, client *ent.Client, accountID int) (*en
 }
 
 // NetWorthSummary rolls every account's latest balance into net worth. Assets sum the
-// latest balance of asset-class accounts; liabilities sum the ABSOLUTE latest balance
-// of liability-class accounts (reported as a positive amount owed), so a credit card
-// carried as a negative balance still adds to what is owed. Net worth is
-// assets - liabilities. AsOf is the freshest reading seen, a staleness stamp.
+// latest balance of asset-class accounts; liabilities sum the NEGATED latest balance of
+// liability-class accounts. A debt is stored as a negative balance, so negating it
+// yields a positive amount owed; an overpaid, in-credit liability yields a negative
+// contribution and correctly reduces what is owed (abs() would have wrongly booked it
+// as more debt). Net worth is assets - liabilities. AsOf is the freshest reading seen,
+// a staleness stamp.
 // (Named NetWorthSummary, not Summary, since the ingest tally already owns Summary.)
 func NetWorthSummary(ctx context.Context, client *ent.Client) (SummaryView, error) {
 	accs, err := client.Account.Query().All(ctx)
@@ -145,7 +146,7 @@ func NetWorthSummary(ctx context.Context, client *ent.Client) (SummaryView, erro
 		case account.ClassAsset:
 			view.Assets += snap.Balance
 		case account.ClassLiability:
-			view.Liabilities += math.Abs(snap.Balance)
+			view.Liabilities += -snap.Balance
 		}
 		if maxAsOf == nil || snap.AsOf.After(*maxAsOf) {
 			t := snap.AsOf
