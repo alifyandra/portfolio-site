@@ -3,16 +3,26 @@ package api
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
+	"entgo.io/ent/dialect"
+	entsql "entgo.io/ent/dialect/sql"
+	"github.com/danielgtaylor/huma/v2/humatest"
+	_ "modernc.org/sqlite" // pure-Go sqlite driver (no CGO) for in-memory test DBs
+
 	"github.com/alifyandra/portfolio-site/backend/ent"
+	"github.com/alifyandra/portfolio-site/backend/ent/jobrun"
 	"github.com/alifyandra/portfolio-site/backend/ent/scheduledjob"
 	"github.com/alifyandra/portfolio-site/backend/ent/user"
+	"github.com/alifyandra/portfolio-site/backend/internal/auth"
+	"github.com/alifyandra/portfolio-site/backend/internal/queue"
 )
 
 // sessionCookieFor creates a User at the given role and a live Session for it,
@@ -335,5 +345,182 @@ func TestListJobKinds_ReturnsRegistry(t *testing.T) {
 	member := sessionCookieFor(t, ctx, client, user.RoleMember)
 	if resp := api.Get("/api/admin/job-kinds", member); resp.Code != http.StatusForbidden {
 		t.Errorf("member list kinds = %d, want 403; body=%s", resp.Code, resp.Body.String())
+	}
+}
+
+// --- start-job-run (force "Run now") ---
+
+// stubEnqueuer records enqueues and reports a fixed configured state, so the force-start
+// handler's enqueue side effect is observable without a live SQS.
+type stubEnqueuer struct {
+	configured bool
+	enqueued   []queue.Job
+}
+
+func (s *stubEnqueuer) Configured() bool { return s.configured }
+
+func (s *stubEnqueuer) Enqueue(_ context.Context, j queue.Job) error {
+	s.enqueued = append(s.enqueued, j)
+	return nil
+}
+
+// stubNotifier records the refresh notifications the ack-gated force-start path sends,
+// so the handshake is observable (and can be told to fail, to prove non-fatality).
+type stubNotifier struct {
+	fail  bool
+	calls []int // run ids notified
+}
+
+func (n *stubNotifier) NotifyRefresh(_ context.Context, runID int, _ string) error {
+	n.calls = append(n.calls, runID)
+	if n.fail {
+		return fmt.Errorf("notify boom")
+	}
+	return nil
+}
+
+// newAdminJobsTestAPI wires the admin operations onto a humatest API with the real auth
+// middleware and an in-memory SQLite DB, injecting a stub queue + notifier so the
+// force-start ("Run now") paths are exercisable end to end.
+func newAdminJobsTestAPI(t *testing.T, q enqueuer, n notifier) (humatest.TestAPI, *ent.Client) {
+	t.Helper()
+	dsn := "file:" + strings.ReplaceAll(t.Name(), "/", "_") + "?mode=memory&cache=shared&_pragma=foreign_keys(1)"
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+	client := ent.NewClient(ent.Driver(entsql.OpenDB(dialect.SQLite, db)))
+	t.Cleanup(func() { _ = client.Close() })
+	if err := client.Schema.Create(context.Background()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	svc := auth.New(client, auth.Config{})
+	_, api := humatest.New(t)
+	api.UseMiddleware(svc.Middleware)
+	h := New(Deps{Auth: svc, Ent: client, Queue: q, Notifier: n})
+	h.registerAdmin(api)
+	return api, client
+}
+
+// seedSyncJob inserts the ack-gated finance.sync ScheduledJob for the force-start tests.
+func seedSyncJob(t *testing.T, ctx context.Context, client *ent.Client) *ent.ScheduledJob {
+	t.Helper()
+	return client.ScheduledJob.Create().
+		SetKey("finance.sync").
+		SetName("Finance sync").
+		SetStage(scheduledjob.StageScrape).
+		SetSchedule("0 20 * * *").
+		SetTimezone("UTC").
+		SetRunner(scheduledjob.RunnerLocal).
+		SetEnabled(true).
+		SaveX(ctx)
+}
+
+// TestStartJobRun_AckGatedAwaitsApproval: force-starting an ack-gated job (finance.sync)
+// creates the run directly in awaiting_ack with claimable_at NULL (a human still taps
+// Approve), fires the refresh notification exactly once, and does NOT enqueue to the
+// worker — so "Run now" exercises the same handshake the scheduler cron does.
+func TestStartJobRun_AckGatedAwaitsApproval(t *testing.T) {
+	q := &stubEnqueuer{configured: true}
+	n := &stubNotifier{}
+	api, client := newAdminJobsTestAPI(t, q, n)
+	ctx := context.Background()
+	cookie := sessionCookieFor(t, ctx, client, user.RoleAdmin)
+	job := seedSyncJob(t, ctx, client)
+
+	resp := api.Post(fmt.Sprintf("/api/admin/jobs/%d/runs", job.ID), map[string]any{}, cookie)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("ack-gated start = %d, want 200; body=%s", resp.Code, resp.Body.String())
+	}
+
+	run := client.JobRun.Query().Where(jobrun.HasJobWith(scheduledjob.IDEQ(job.ID))).OnlyX(ctx)
+	if run.Status != jobrun.StatusAwaitingAck {
+		t.Errorf("run status = %q, want awaiting_ack", run.Status)
+	}
+	if run.Trigger != jobrun.TriggerManual {
+		t.Errorf("run trigger = %q, want manual", run.Trigger)
+	}
+	if run.ClaimableAt != nil {
+		t.Errorf("claimable_at = %v, want nil (a human still approves)", run.ClaimableAt)
+	}
+	if len(n.calls) != 1 || n.calls[0] != run.ID {
+		t.Errorf("notifier calls = %v, want exactly [%d]", n.calls, run.ID)
+	}
+	if len(q.enqueued) != 0 {
+		t.Errorf("enqueued = %d, want 0 (an ack-gated run is never enqueued)", len(q.enqueued))
+	}
+}
+
+// TestStartJobRun_AckGatedSecondReturns409: a second "Run now" while a run is already
+// awaiting_ack is a 409 (idempotency), leaving exactly one run and one notification.
+func TestStartJobRun_AckGatedSecondReturns409(t *testing.T) {
+	q := &stubEnqueuer{configured: true}
+	n := &stubNotifier{}
+	api, client := newAdminJobsTestAPI(t, q, n)
+	ctx := context.Background()
+	cookie := sessionCookieFor(t, ctx, client, user.RoleAdmin)
+	job := seedSyncJob(t, ctx, client)
+
+	path := fmt.Sprintf("/api/admin/jobs/%d/runs", job.ID)
+	if resp := api.Post(path, map[string]any{}, cookie); resp.Code != http.StatusOK {
+		t.Fatalf("first start = %d, want 200; body=%s", resp.Code, resp.Body.String())
+	}
+	if resp := api.Post(path, map[string]any{}, cookie); resp.Code != http.StatusConflict {
+		t.Fatalf("second start = %d, want 409 (already awaiting approval); body=%s", resp.Code, resp.Body.String())
+	}
+	if got := client.JobRun.Query().CountX(ctx); got != 1 {
+		t.Errorf("runs = %d, want 1 (the second click must not create another)", got)
+	}
+	if len(n.calls) != 1 {
+		t.Errorf("notifier calls = %d, want 1 (the 409 must not re-notify)", len(n.calls))
+	}
+}
+
+// TestStartJobRun_NonAckGatedEnqueues: a non-ack-gated job (digest.scrape) keeps the
+// unchanged queued+enqueue path — the run is created queued, enqueued once under the
+// job key, and the notifier is never touched.
+func TestStartJobRun_NonAckGatedEnqueues(t *testing.T) {
+	q := &stubEnqueuer{configured: true}
+	n := &stubNotifier{}
+	api, client := newAdminJobsTestAPI(t, q, n)
+	ctx := context.Background()
+	cookie := sessionCookieFor(t, ctx, client, user.RoleAdmin)
+	job := client.ScheduledJob.Create().
+		SetKey("digest.scrape").
+		SetName("Digest scrape").
+		SetStage(scheduledjob.StageScrape).
+		SetSchedule("30 17 * * *").
+		SetTimezone("UTC").
+		SetRunner(scheduledjob.RunnerServer).
+		SetEnabled(true).
+		SaveX(ctx)
+
+	resp := api.Post(fmt.Sprintf("/api/admin/jobs/%d/runs", job.ID), map[string]any{}, cookie)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("non-ack start = %d, want 200; body=%s", resp.Code, resp.Body.String())
+	}
+	var out struct {
+		Started bool `json:"started"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !out.Started {
+		t.Errorf("started = false, want true (a run was enqueued)")
+	}
+
+	run := client.JobRun.Query().Where(jobrun.HasJobWith(scheduledjob.IDEQ(job.ID))).OnlyX(ctx)
+	if run.Status != jobrun.StatusQueued {
+		t.Errorf("run status = %q, want queued", run.Status)
+	}
+	if run.Trigger != jobrun.TriggerManual {
+		t.Errorf("run trigger = %q, want manual", run.Trigger)
+	}
+	if len(q.enqueued) != 1 || q.enqueued[0].Type != "digest.scrape" || q.enqueued[0].JobRunID != run.ID {
+		t.Errorf("enqueued = %+v, want one digest.scrape job carrying run %d", q.enqueued, run.ID)
+	}
+	if len(n.calls) != 0 {
+		t.Errorf("notifier calls = %d, want 0 (a non-ack-gated job never notifies)", len(n.calls))
 	}
 }

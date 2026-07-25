@@ -56,6 +56,26 @@ func New(cfg Config, log *slog.Logger) *Client {
 	}
 }
 
+// AckURL derives the absolute finance-sync ack endpoint from the backend's public
+// base. The base is taken from the OAuth redirect URL (the one config value that
+// already carries this backend's own scheme+host, e.g.
+// https://api.example.dev/api/auth/google/callback -> https://api.example.dev). An
+// empty or unparseable redirect yields an empty ack URL, which NotifyRefresh treats as
+// "send the notification without an action button" (ack by hand). Hoisted here (from
+// cmd/worker) so both the worker's scheduler and the API's admin force-start build the
+// same ack URL. This keeps the ADR 0016 env surface to the ntfy + token vars, with no
+// separate public-URL var.
+func AckURL(oauthRedirect string) string {
+	if oauthRedirect == "" {
+		return ""
+	}
+	u, err := url.Parse(oauthRedirect)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return ""
+	}
+	return u.Scheme + "://" + u.Host + "/api/finance/sync/ack"
+}
+
 // Configured reports whether the client can actually send: an ntfy base URL and a
 // topic are both required. When false, NotifyRefresh is a logged no-op.
 func (c *Client) Configured() bool {
