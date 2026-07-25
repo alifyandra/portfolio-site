@@ -18,8 +18,13 @@ COPY . .
 RUN go generate ./ent
 RUN go mod tidy
 
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build -ldflags="-s -w" -o /out/api    ./cmd/api  \
- && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build -ldflags="-s -w" -o /out/worker ./cmd/worker \
+# The `timetzdata` build tag embeds the IANA tz database in the binary. CGO_ENABLED=0
+# strips the OS tzdata, so without it time.LoadLocation("Australia/Melbourne") fails at
+# runtime (the API 422s creating a non-UTC schedule; the scheduler cannot evaluate a
+# non-UTC cron). api needs it for schedule validation, worker for the scheduler's cron
+# evaluation. seed/digest never load a zone, so they stay lean.
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build -tags timetzdata -ldflags="-s -w" -o /out/api    ./cmd/api  \
+ && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build -tags timetzdata -ldflags="-s -w" -o /out/worker ./cmd/worker \
  && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build -ldflags="-s -w" -o /out/seed   ./cmd/seed \
  && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build -ldflags="-s -w" -o /out/digest ./cmd/digest
 

@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/url"
 	"os"
 	"os/signal"
 	"syscall"
@@ -27,24 +26,6 @@ import (
 	"github.com/alifyandra/portfolio-site/backend/internal/server"
 	"github.com/alifyandra/portfolio-site/backend/internal/storage"
 )
-
-// ackURL derives the absolute finance sync ack endpoint from the backend's public
-// base. The base is taken from the OAuth redirect URL (the one config value that
-// already carries this backend's own scheme+host, e.g.
-// https://api.example.dev/api/auth/google/callback -> https://api.example.dev). An
-// empty or unparseable redirect yields an empty ack URL, which the notifier treats
-// as "send the notification without an action button" (ack by hand). This keeps the
-// ADR 0016 env surface to the ntfy + token vars, with no separate public-URL var.
-func ackURL(oauthRedirect string) string {
-	if oauthRedirect == "" {
-		return ""
-	}
-	u, err := url.Parse(oauthRedirect)
-	if err != nil || u.Scheme == "" || u.Host == "" {
-		return ""
-	}
-	return u.Scheme + "://" + u.Host + "/api/finance/sync/ack"
-}
 
 func main() {
 	if err := run(); err != nil {
@@ -77,7 +58,7 @@ func run() error {
 	notifier := notify.New(notify.Config{
 		BaseURL:  cfg.NtfyBaseURL,
 		Topic:    cfg.NtfyTopic,
-		AckURL:   ackURL(cfg.GoogleRedirectURL),
+		AckURL:   notify.AckURL(cfg.GoogleRedirectURL),
 		AckToken: cfg.FinanceSyncAckToken,
 	}, slog.Default())
 

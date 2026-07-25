@@ -1,6 +1,8 @@
 package api
 
 import (
+	"context"
+
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/redis/go-redis/v9"
 
@@ -12,15 +14,35 @@ import (
 	"github.com/alifyandra/portfolio-site/backend/internal/whatsapp"
 )
 
+// enqueuer is the queue dependency the handlers need: place a job on the queue and
+// report whether a queue is configured. *queue.Client satisfies it. Kept an interface
+// (rather than the concrete *queue.Client) so the admin force-start path is unit
+// testable without a live SQS, mirroring the scheduler's enqueuer seam. Nil-tolerant
+// at the call sites (a nil enqueuer means "no worker").
+type enqueuer interface {
+	Enqueue(ctx context.Context, job queue.Job) error
+	Configured() bool
+}
+
+// notifier sends the finance refresh-handshake notification (ADR 0016) when an
+// ack-gated job is force-started from the admin console. *notify.Client satisfies it
+// (and no-ops gracefully when ntfy is unconfigured); a nil notifier is tolerated — the
+// forced run still sits awaiting_ack and can be acked directly. Mirrors the scheduler's
+// notifier seam, so "Run now" exercises the same handshake the cron does.
+type notifier interface {
+	NotifyRefresh(ctx context.Context, runID int, jobName string) error
+}
+
 // Deps are the dependencies the API handlers need.
 type Deps struct {
-	Ent     *ent.Client
-	Redis   *redis.Client
-	Spotify *spotify.Client
-	Storage *storage.Store
-	Queue   *queue.Client
-	Auth    *auth.Service
-	WA      whatsapp.SidecarProvider
+	Ent      *ent.Client
+	Redis    *redis.Client
+	Spotify  *spotify.Client
+	Storage  *storage.Store
+	Queue    enqueuer
+	Notifier notifier
+	Auth     *auth.Service
+	WA       whatsapp.SidecarProvider
 	// WhatsApp send caps (ADR 11), sourced from config so they can be tuned per
 	// environment. Zero means the default is not wired; server.New always sets them.
 	WaMaxBatchRecipients int

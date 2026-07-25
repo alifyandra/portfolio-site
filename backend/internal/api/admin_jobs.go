@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -496,23 +497,71 @@ func (h *Handler) registerAdminJobs(api huma.API) {
 			return nil, huma.Error500InternalServerError("failed to load job", err)
 		}
 
-		// Refuse a second run while one is in flight: one queued or running run per
-		// job at a time, so a double-click or a race with the scheduler cannot pile up
-		// duplicate work.
+		// An ack-gated kind (ADR 0016, e.g. finance.sync) does no server-side work: a
+		// forced run must go through the SAME awaiting_ack + refresh-handshake path the
+		// scheduler uses, NOT the SQS enqueue path (whose worker handler is a defensive
+		// no-op for these kinds). A key absent from the catalog (ok=false) is treated as
+		// non-ack-gated, so every other job keeps the queued+enqueue path unchanged.
+		ackGated := false
+		if kind, ok := jobs.LookupKind(job.Key); ok {
+			ackGated = kind.AckGated
+		}
+
+		// Refuse a second run while one is in flight: one queued, running, OR
+		// awaiting_ack run per job at a time, so a double-click (or a race with the
+		// scheduler) cannot pile up duplicate work. awaiting_ack is included so a second
+		// "Run now" on an ack-gated job already awaiting approval returns 409; non-ack-
+		// gated jobs never enter awaiting_ack, so this widening is a no-op for them.
 		active, err := h.deps.Ent.JobRun.Query().
 			Where(
 				jobrun.HasJobWith(scheduledjob.IDEQ(job.ID)),
-				jobrun.StatusIn(jobrun.StatusQueued, jobrun.StatusRunning),
+				jobrun.StatusIn(jobrun.StatusQueued, jobrun.StatusRunning, jobrun.StatusAwaitingAck),
 			).
 			Exist(ctx)
 		if err != nil {
 			return nil, huma.Error500InternalServerError("failed to check for an active run", err)
 		}
 		if active {
-			return nil, huma.Error409Conflict("a run for this job is already queued or running")
+			return nil, huma.Error409Conflict("a run for this job is already queued, running or awaiting approval")
 		}
 
 		out := &startJobRunOutput{}
+
+		// Manual runs carry scheduled_for = now so the JobRun.(scheduled_for, job)
+		// unique index still holds; a manual now() never collides with a cron tick.
+		now := time.Now()
+
+		// Ack-gated fire path (ADR 0016): create the run directly in awaiting_ack with
+		// claimable_at NULL (a human still taps Approve to make it claimable — the
+		// scheduler leaves it null too; only ackFinanceSync sets it), do NOT enqueue it,
+		// and do NOT take the no-worker early-return below — becoming claimable needs no
+		// worker. Then send the refresh-handshake notification, which carries the run id
+		// (so it must follow the insert). A nil or failing notifier is non-fatal: the run
+		// already sits awaiting_ack and can be acked directly (mirrors the scheduler).
+		if ackGated {
+			run, err := h.deps.Ent.JobRun.Create().
+				SetStatus(jobrun.StatusAwaitingAck).
+				SetTrigger(jobrun.TriggerManual).
+				SetScheduledFor(now).
+				SetJobID(job.ID).
+				Save(ctx)
+			if ent.IsConstraintError(err) {
+				return nil, huma.Error409Conflict("a run for this tick already exists")
+			}
+			if err != nil {
+				return nil, huma.Error500InternalServerError("failed to create run", err)
+			}
+			if h.deps.Notifier != nil {
+				if nerr := h.deps.Notifier.NotifyRefresh(ctx, run.ID, job.Name); nerr != nil {
+					slog.Error("start-job-run: refresh notification failed", "job", job.Key, "run", run.ID, "err", nerr)
+				}
+			}
+			dto := toJobRunDTO(run)
+			out.Body.Started = true
+			out.Body.Run = &dto
+			out.Body.Message = "awaiting approval — tap the notification to approve the refresh"
+			return out, nil
+		}
 
 		// Degrade gracefully with no queue (local `make up` has no worker): report it
 		// as a clear "no worker" response instead of a 500, and do not create a run
@@ -523,9 +572,6 @@ func (h *Handler) registerAdminJobs(api huma.API) {
 			return out, nil
 		}
 
-		// Manual runs carry scheduled_for = now so the JobRun.(scheduled_for, job)
-		// unique index still holds; a manual now() never collides with a cron tick.
-		now := time.Now()
 		run, err := h.deps.Ent.JobRun.Create().
 			SetStatus(jobrun.StatusQueued).
 			SetTrigger(jobrun.TriggerManual).

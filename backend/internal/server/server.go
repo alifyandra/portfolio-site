@@ -20,6 +20,7 @@ import (
 	"github.com/alifyandra/portfolio-site/backend/internal/digest"
 	"github.com/alifyandra/portfolio-site/backend/internal/email"
 	"github.com/alifyandra/portfolio-site/backend/internal/fargate"
+	"github.com/alifyandra/portfolio-site/backend/internal/notify"
 	"github.com/alifyandra/portfolio-site/backend/internal/queue"
 	"github.com/alifyandra/portfolio-site/backend/internal/spotify"
 	"github.com/alifyandra/portfolio-site/backend/internal/storage"
@@ -121,14 +122,27 @@ func New(deps *Deps) (http.Handler, huma.API) {
 		humaAPI.UseMiddleware(deps.Auth.Middleware)
 	}
 
-	h := api.New(api.Deps{
-		Ent:     deps.Ent,
-		Redis:   deps.Redis,
-		Spotify: deps.Spotify,
-		Storage: deps.Storage,
-		Queue:   deps.Queue,
-		Auth:    deps.Auth,
-		WA:      deps.WA,
+	// Refresh-handshake notifier for ack-gated jobs forced from the admin console
+	// (ADR 0016), so "Run now" on finance.sync fires the same awaiting_ack + ntfy path
+	// the scheduler does. It no-ops gracefully when ntfy is unconfigured (local/dev
+	// needs no setup); the ack endpoint base is derived from the backend's own public
+	// host (the same host Google OAuth redirects to), and a blank host just omits the
+	// action button. Same construction the worker's scheduler uses.
+	notifier := notify.New(notify.Config{
+		BaseURL:  deps.Config.NtfyBaseURL,
+		Topic:    deps.Config.NtfyTopic,
+		AckURL:   notify.AckURL(deps.Config.GoogleRedirectURL),
+		AckToken: deps.Config.FinanceSyncAckToken,
+	}, nil)
+
+	apiDeps := api.Deps{
+		Ent:      deps.Ent,
+		Redis:    deps.Redis,
+		Spotify:  deps.Spotify,
+		Storage:  deps.Storage,
+		Auth:     deps.Auth,
+		WA:       deps.WA,
+		Notifier: notifier,
 
 		WaMaxBatchRecipients: deps.Config.WaMaxBatchRecipients,
 		WaMaxBatchesPerDay:   deps.Config.WaMaxBatchesPerDay,
@@ -136,7 +150,15 @@ func New(deps *Deps) (http.Handler, huma.API) {
 		FinanceSyncAckToken:    deps.Config.FinanceSyncAckToken,
 		FinanceBackfillYears:   deps.Config.FinanceBackfillYears,
 		FinanceSyncOverlapDays: deps.Config.FinanceSyncOverlapDays,
-	})
+	}
+	// deps.Queue is a concrete *queue.Client. Assigning a nil one straight into the
+	// interface field would make it a non-nil (typed-nil) interface and defeat the
+	// `Queue == nil` guards in the handlers, so only set it when non-nil (cmd/spec
+	// passes nil clients purely to emit the spec).
+	if deps.Queue != nil {
+		apiDeps.Queue = deps.Queue
+	}
+	h := api.New(apiDeps)
 	h.Register(humaAPI)
 
 	// OAuth redirect flows are browser navigations, not JSON operations, so they
