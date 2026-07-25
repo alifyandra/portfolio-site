@@ -77,10 +77,11 @@ func LookupKind(key string) (Kind, bool) {
 	return Kind{}, false
 }
 
-// ackGatedKeys returns the keys of every ack-gated kind. The reaper uses it to
-// exempt ack-gated runs (ADR 0016), whose lifecycle is externally driven
-// (claim -> ingest -> complete) and so is not bounded by the in-process running
-// lease.
+// ackGatedKeys returns the keys of every ack-gated kind. The reaper uses it to give
+// ack-gated runs (ADR 0016) their own bounded cleanup rather than the ordinary lease:
+// their lifecycle is externally driven (claim -> ingest -> complete) so the in-process
+// runningLease does not fit, but they are still reaped past a much longer
+// ackGatedRunningLease, and an unapproved awaiting_ack run is expired past awaitingAckTTL.
 func ackGatedKeys() []string {
 	var keys []string
 	for _, k := range kinds {

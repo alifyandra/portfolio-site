@@ -395,41 +395,113 @@ func TestTick_ReapsStuckRunningRun(t *testing.T) {
 	}
 }
 
-// TestTick_ReaperExemptsAckGatedRunning: an ack-gated (finance.sync) run stuck
-// `running` past the lease is NOT reaped — its lifecycle is externally driven
-// (claim -> ingest -> complete) and a deep backfill can legitimately exceed the
-// in-process lease — while a normal (digest.scrape) run past the lease still is.
-func TestTick_ReaperExemptsAckGatedRunning(t *testing.T) {
+// TestTick_ReapsAckGatedRunningPastExtendedLease: an ack-gated (finance.sync) run stuck
+// `running` gets a SEPARATE, much longer lease than a normal kind. Past the ordinary
+// runningLease but younger than ackGatedRunningLease it is NOT reaped (a deep backfill
+// can legitimately run that long); once it crosses ackGatedRunningLease it IS reaped
+// (the runner crashed before /sync/complete). A normal (digest.scrape) run past
+// runningLease is still reaped as before.
+func TestTick_ReapsAckGatedRunningPastExtendedLease(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)
 	normalJob := seedJob(t, client, "digest.scrape", false, nil) // disabled: never fires
 	ackJob := seedJob(t, client, "finance.sync", false, nil)     // ack-gated kind
-	old := time.Now().Add(-runningLease - time.Minute)
+	now := time.Now()
 
-	normalStuck := client.JobRun.Create().
-		SetStatus(jobrun.StatusRunning).
-		SetTrigger(jobrun.TriggerSchedule).
-		SetScheduledFor(time.Now()).
-		SetStartedAt(old).
-		SetJobID(normalJob.ID).
-		SaveX(ctx)
-	ackStuck := client.JobRun.Create().
-		SetStatus(jobrun.StatusRunning).
-		SetTrigger(jobrun.TriggerSchedule).
-		SetScheduledFor(time.Now()).
-		SetStartedAt(old).
-		SetJobID(ackJob.ID).
-		SaveX(ctx)
+	// Distinct scheduled_for per run: the (scheduled_for, job) unique index forbids two
+	// runs of the same job sharing a tick.
+	mkRunning := func(jobID int, trig jobrun.Trigger, scheduledFor, startedAt time.Time) int {
+		return client.JobRun.Create().
+			SetStatus(jobrun.StatusRunning).
+			SetTrigger(trig).
+			SetScheduledFor(scheduledFor).
+			SetStartedAt(startedAt).
+			SetJobID(jobID).
+			SaveX(ctx).ID
+	}
+
+	// Normal run past the ordinary lease: reaped (bucket a, unchanged).
+	normalStuck := mkRunning(normalJob.ID, jobrun.TriggerSchedule, now, now.Add(-runningLease-time.Minute))
+	// Ack-gated run past runningLease but well within the extended lease: NOT reaped.
+	ackYoung := mkRunning(ackJob.ID, jobrun.TriggerSchedule, now.Add(-time.Second), now.Add(-runningLease-time.Hour)) // ~1.5h old < 4h
+	// Ack-gated schedule-fired run past the extended lease: reaped (bucket b).
+	ackOld := mkRunning(ackJob.ID, jobrun.TriggerSchedule, now.Add(-2*time.Second), now.Add(-ackGatedRunningLease-time.Minute))
+	// Ack-gated MANUAL ("Run now") run past the extended lease: also reaped — a crashed
+	// force-started sync must not be exempted by a trigger scope (companion PR #115).
+	ackManualOld := mkRunning(ackJob.ID, jobrun.TriggerManual, now.Add(-3*time.Second), now.Add(-ackGatedRunningLease-time.Minute))
 
 	q := &stubQueue{configured: true}
 	s := NewScheduler(client, q, time.Minute, nil, nil)
-	s.tick(ctx, time.Now())
+	s.tick(ctx, now)
 
-	if got := client.JobRun.GetX(ctx, normalStuck.ID).Status; got != jobrun.StatusFailed {
-		t.Errorf("normal stuck run status = %q, want failed (reaped)", got)
+	if got := client.JobRun.GetX(ctx, normalStuck).Status; got != jobrun.StatusFailed {
+		t.Errorf("normal stuck run status = %q, want failed (reaped at runningLease)", got)
 	}
-	if got := client.JobRun.GetX(ctx, ackStuck.ID).Status; got != jobrun.StatusRunning {
-		t.Errorf("ack-gated stuck run status = %q, want it left running (exempt from reaper)", got)
+	if got := client.JobRun.GetX(ctx, ackYoung).Status; got != jobrun.StatusRunning {
+		t.Errorf("young ack-gated run status = %q, want it left running (within extended lease)", got)
+	}
+	reapedAck := client.JobRun.GetX(ctx, ackOld)
+	if reapedAck.Status != jobrun.StatusFailed {
+		t.Errorf("old ack-gated run status = %q, want failed (reaped past extended lease)", reapedAck.Status)
+	}
+	if reapedAck.Error == "" {
+		t.Error("reaped ack-gated run has no error message")
+	}
+	if reapedAck.FinishedAt == nil {
+		t.Error("reaped ack-gated run has no finished_at")
+	}
+	if got := client.JobRun.GetX(ctx, ackManualOld).Status; got != jobrun.StatusFailed {
+		t.Errorf("old manual ack-gated run status = %q, want failed (reaped regardless of trigger)", got)
+	}
+}
+
+// TestTick_ExpiresStaleAwaitingAck: an ack-gated run left `awaiting_ack` (never approved)
+// past awaitingAckTTL is moved to a terminal cancelled with an error and finished_at, so
+// it stops blocking new runs and does not accumulate. One still inside the TTL is left
+// untouched.
+func TestTick_ExpiresStaleAwaitingAck(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	ackJob := seedJob(t, client, "finance.sync", false, nil) // disabled: never fires
+	now := time.Now()
+
+	// Distinct scheduled_for per run: the (scheduled_for, job) unique index forbids two
+	// runs of the same job sharing a tick.
+	mkAwaiting := func(trig jobrun.Trigger, scheduledFor, createdAt time.Time) int {
+		return client.JobRun.Create().
+			SetStatus(jobrun.StatusAwaitingAck).
+			SetTrigger(trig).
+			SetScheduledFor(scheduledFor).
+			SetCreatedAt(createdAt).
+			SetJobID(ackJob.ID).
+			SaveX(ctx).ID
+	}
+
+	stale := mkAwaiting(jobrun.TriggerSchedule, now, now.Add(-awaitingAckTTL-time.Minute))  // never approved, past TTL
+	fresh := mkAwaiting(jobrun.TriggerSchedule, now.Add(-time.Second), now.Add(-time.Hour)) // approved-window still open
+	// A MANUAL ("Run now") ack-gated run never approved must also expire, else it 409s
+	// every future "Run now" (companion PR #115 added this trigger=manual path).
+	staleManual := mkAwaiting(jobrun.TriggerManual, now.Add(-2*time.Second), now.Add(-awaitingAckTTL-time.Minute))
+
+	q := &stubQueue{configured: true}
+	s := NewScheduler(client, q, time.Minute, nil, nil)
+	s.tick(ctx, now)
+
+	expired := client.JobRun.GetX(ctx, stale)
+	if expired.Status != jobrun.StatusCancelled {
+		t.Errorf("stale awaiting_ack run status = %q, want cancelled (expired past TTL)", expired.Status)
+	}
+	if expired.Error == "" {
+		t.Error("expired awaiting_ack run has no error message")
+	}
+	if expired.FinishedAt == nil {
+		t.Error("expired awaiting_ack run has no finished_at")
+	}
+	if got := client.JobRun.GetX(ctx, fresh).Status; got != jobrun.StatusAwaitingAck {
+		t.Errorf("fresh awaiting_ack run status = %q, want it left awaiting_ack (within TTL)", got)
+	}
+	if got := client.JobRun.GetX(ctx, staleManual).Status; got != jobrun.StatusCancelled {
+		t.Errorf("stale manual awaiting_ack run status = %q, want cancelled (expired regardless of trigger)", got)
 	}
 }
 
