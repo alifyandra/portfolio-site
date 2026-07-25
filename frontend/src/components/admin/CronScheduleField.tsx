@@ -10,6 +10,8 @@
 // rebuilt cron via onChange. It mirrors the field names robfig/cron ParseStandard
 // accepts, so what the picker builds is exactly what the backend validates and runs.
 
+import { useState } from 'react';
+
 import { inputClass, labelClass, selectClass } from './ui';
 
 type Mode = 'daily' | 'weekly' | 'hourly' | 'minutes' | 'custom';
@@ -133,16 +135,26 @@ export function CronScheduleField({
   timezone?: string;
   label?: string;
 }) {
-  const p = parseCron(value);
+  const parsed = parseCron(value);
+
+  // "Custom (cron)" can't be inferred from `value` alone: a hand-written expression that
+  // happens to match a preset shape (e.g. "0 18 * * *") parses straight back to that
+  // preset, so selecting Custom would snap the dropdown shut. We latch an explicit custom
+  // choice instead — a seeded preset value still auto-detects on first render, and picking
+  // any preset clears the latch.
+  const [forceCustom, setForceCustom] = useState(false);
+  const p: Parsed = forceCustom ? { ...parsed, mode: 'custom' } : parsed;
 
   // Switching frequency reuses the current hour/minute where it makes sense, so moving
-  // Daily -> Weekly keeps the time the user already set. Custom emits the raw value
-  // unchanged (the raw input below owns it).
+  // Daily -> Weekly keeps the time the user already set. Custom latches and hands control
+  // to the raw input below (which emits the value unchanged).
   const setMode = (mode: Mode) => {
     if (mode === 'custom') {
+      setForceCustom(true);
       onChange(value); // keep whatever is there; the raw input takes over
       return;
     }
+    setForceCustom(false);
     onChange(build({ ...p, mode }));
   };
 
