@@ -78,5 +78,6 @@ func (h *Handler) Register(api huma.API) {
 	h.registerAdmin(api)
 	h.registerWork(api)
 	h.registerFinance(api)
+	h.registerFinanceRead(api)
 	h.registerFinanceSync(api)
 }
