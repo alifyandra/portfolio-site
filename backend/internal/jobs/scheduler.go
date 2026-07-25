@@ -41,11 +41,29 @@ const (
 	// mid-flight; even if it is, the worker's queued->running guard makes the duplicate
 	// message a no-op.
 	queuedRedriveAfter = 5 * time.Minute
-	// runningLease is how long a JobRun may stay `running` before the reaper fails it.
-	// It recovers a worker that crashed between claim and terminal. Far longer than any
-	// real job (the digest submit is seconds; a Fargate llm run is a couple of minutes)
-	// so a healthy long run is never reaped while genuinely in flight.
+	// runningLease is how long a non-ack-gated JobRun may stay `running` before the
+	// reaper fails it. It recovers a worker that crashed between claim and terminal. Far
+	// longer than any real in-process job (the digest submit is seconds; a Fargate llm
+	// run is a couple of minutes) so a healthy long run is never reaped while genuinely
+	// in flight.
 	runningLease = 30 * time.Minute
+	// ackGatedRunningLease is the SEPARATE, much longer lease for an ack-gated run
+	// (ADR 0016) stuck `running`. Such a run is driven by an external finance runner
+	// (claim -> scrape -> ingest -> complete) and a deep backfill can legitimately take
+	// far longer than the in-process runningLease, so it gets its own generous bound
+	// rather than a full exemption. Set well clear of any real backfill so a healthy
+	// in-flight sync is never killed; it exists only to recover a runner that claimed
+	// the run then crashed / was Ctrl-C'd / lost the network before /sync/complete (a
+	// real one, JobRun 37, had to be cleared by hand).
+	ackGatedRunningLease = 4 * time.Hour
+	// awaitingAckTTL bounds how long an ack-gated run (ADR 0016) may sit `awaiting_ack`
+	// before it is expired unapproved. The scheduler fires such a run and pushes an ntfy
+	// approval prompt; if the human never approves (dismissed / asleep) the run would
+	// otherwise sit forever, blocking the next run (force-start 409s while any
+	// queued/running/awaiting_ack run exists) and accumulating one stale row per daily
+	// tick. 12h is shorter than the daily cadence, so a missed refresh clears itself
+	// before the next fire yet leaves ample time for a same-evening approval.
+	awaitingAckTTL = 12 * time.Hour
 )
 
 // enqueuer is the queue dependency the scheduler needs: it enqueues a message and
@@ -144,12 +162,14 @@ func (s *Scheduler) tick(ctx context.Context, now time.Time) {
 	s.maintenance(ctx, now)
 }
 
-// maintenance runs the three background sweeps once at wall-clock time now: re-drive
-// runs stuck `queued`, reap runs stuck `running`, and expire lapsed artifacts. Shared
-// by every tick and by the one-shot RecoverOnce at worker startup.
+// maintenance runs the background sweeps once at wall-clock time now: re-drive runs
+// stuck `queued`, reap runs stuck `running` (both the ordinary and the ack-gated lease),
+// expire ack-gated runs stuck `awaiting_ack` past their TTL, and expire lapsed
+// artifacts. Shared by every tick and by the one-shot RecoverOnce at worker startup.
 func (s *Scheduler) maintenance(ctx context.Context, now time.Time) {
 	s.redriveQueued(ctx, now)
 	s.reapRunning(ctx, now)
+	s.expireAwaitingAck(ctx, now)
 	s.sweepArtifacts(ctx, now)
 }
 
@@ -360,13 +380,30 @@ func (s *Scheduler) redriveQueued(ctx context.Context, now time.Time) {
 	}
 }
 
-// reapRunning fails scheduler-driven runs stuck `running` past runningLease. That
-// state means a worker claimed the run (queued->running) then died before writing a
-// terminal status. Failing it (rather than re-queuing) matches the scheduled-job retry
-// model: the next scheduled tick is the retry, so a reaped run does not re-run here and
-// risk duplicate side effects. Only trigger=schedule runs are touched. The lease is far
-// longer than any real job, so a healthy in-flight run is never reaped.
+// reapRunning fails runs stuck `running` past their lease. That state means whoever
+// claimed the run (queued->running for the in-process worker path, or awaiting_ack->
+// running for an ack-gated /sync/claim) then died before writing a terminal status.
+// Failing it (rather than re-queuing) matches the scheduled-job retry model: the next
+// scheduled tick is the retry, so a reaped run does not re-run here and risk duplicate
+// side effects. Two buckets, two leases:
+//
+//   - Bucket a — non-ack-gated runs, bounded by runningLease. Scoped to trigger=schedule
+//     only (the pre-existing in-process worker path); left exactly as it was.
+//   - Bucket b — ack-gated kinds (ADR 0016), a SEPARATE, much longer lease
+//     (ackGatedRunningLease) rather than a full exemption. Their externally-driven finance
+//     runner can legitimately run a while (a deep backfill), so runningLease would falsely
+//     fail live work; but an exemption left a crashed/aborted runner stuck `running`
+//     forever with nothing to clean it up (the JobRun 37 incident) — and, since
+//     force-start 409s while any running run exists, that stale row also blocked "Run
+//     now". An ack-gated run reaches `running` from BOTH the scheduler fire path
+//     (trigger=schedule) AND the admin force-start / "Run now" path (trigger=manual, then
+//     leased to running by /sync/claim), so this bucket is deliberately NOT scoped by
+//     trigger — a crashed manual sync must be reaped too. The extended lease is set well
+//     clear of any real backfill, so a healthy in-flight sync is never killed.
 func (s *Scheduler) reapRunning(ctx context.Context, now time.Time) {
+	keys := ackGatedKeys()
+
+	// Bucket a: non-ack-gated runs past the ordinary lease (unchanged behaviour).
 	cutoff := now.Add(-runningLease)
 	q := s.ent.JobRun.Update().
 		Where(
@@ -374,12 +411,7 @@ func (s *Scheduler) reapRunning(ctx context.Context, now time.Time) {
 			jobrun.TriggerEQ(jobrun.TriggerSchedule),
 			jobrun.StartedAtLT(cutoff),
 		)
-	// Exempt ack-gated kinds (ADR 0016). Their runs stay `running` from claim to
-	// complete under an externally driven lifecycle (a deep backfill can legitimately
-	// exceed the in-process lease), so the lease does not bound them and reaping one
-	// mid-flight would falsely fail live work. Only the in-process worker path is
-	// bounded by runningLease.
-	if keys := ackGatedKeys(); len(keys) > 0 {
+	if len(keys) > 0 {
 		q = q.Where(jobrun.HasJobWith(scheduledjob.KeyNotIn(keys...)))
 	}
 	n, err := q.
@@ -389,10 +421,68 @@ func (s *Scheduler) reapRunning(ctx context.Context, now time.Time) {
 		Save(ctx)
 	if err != nil {
 		s.log.Error("scheduler: reap running", "err", err)
+	} else if n > 0 {
+		s.log.Warn("scheduler: reaped stuck running runs", "count", n)
+	}
+
+	// Bucket b: ack-gated runs past the extended lease, regardless of trigger (schedule
+	// fire OR admin "Run now"). Nothing to do when no kind is ack-gated (the KeyIn filter
+	// would match nothing anyway).
+	if len(keys) == 0 {
+		return
+	}
+	ackCutoff := now.Add(-ackGatedRunningLease)
+	an, aerr := s.ent.JobRun.Update().
+		Where(
+			jobrun.StatusEQ(jobrun.StatusRunning),
+			jobrun.StartedAtLT(ackCutoff),
+			jobrun.HasJobWith(scheduledjob.KeyIn(keys...)),
+		).
+		SetStatus(jobrun.StatusFailed).
+		SetError("reaped: ack-gated run exceeded extended running lease").
+		SetFinishedAt(now).
+		Save(ctx)
+	if aerr != nil {
+		s.log.Error("scheduler: reap ack-gated running", "err", aerr)
+	} else if an > 0 {
+		s.log.Warn("scheduler: reaped stuck ack-gated running runs", "count", an)
+	}
+}
+
+// expireAwaitingAck expires ack-gated runs (ADR 0016) left `awaiting_ack` past
+// awaitingAckTTL — ones fired and notified but a human never approved. Left forever such
+// a run blocks the next run (force-start 409s while any queued/running/awaiting_ack run
+// for the job exists) and accumulates one stale row per daily tick. It is moved to a
+// terminal `cancelled` (not `failed`): an unapproved refresh is a deliberate non-approval,
+// not an execution failure. Age is measured from created_at because started_at is null
+// until a run is claimed. An awaiting_ack run arises from BOTH the scheduler fire path
+// (evaluate -> fire with initialStatus=awaiting_ack, trigger=schedule) AND the admin
+// force-start / "Run now" path (trigger=manual), so this is deliberately NOT scoped by
+// trigger — a never-approved manual run must expire too, else it 409s every future "Run
+// now". The status+ack-gated-key filter is precise on its own (only ack-gated kinds ever
+// enter awaiting_ack).
+func (s *Scheduler) expireAwaitingAck(ctx context.Context, now time.Time) {
+	keys := ackGatedKeys()
+	if len(keys) == 0 {
+		return
+	}
+	cutoff := now.Add(-awaitingAckTTL)
+	n, err := s.ent.JobRun.Update().
+		Where(
+			jobrun.StatusEQ(jobrun.StatusAwaitingAck),
+			jobrun.CreatedAtLT(cutoff),
+			jobrun.HasJobWith(scheduledjob.KeyIn(keys...)),
+		).
+		SetStatus(jobrun.StatusCancelled).
+		SetError("expired: awaiting approval past TTL").
+		SetFinishedAt(now).
+		Save(ctx)
+	if err != nil {
+		s.log.Error("scheduler: expire awaiting-ack", "err", err)
 		return
 	}
 	if n > 0 {
-		s.log.Warn("scheduler: reaped stuck running runs", "count", n)
+		s.log.Warn("scheduler: expired unapproved awaiting-ack runs", "count", n)
 	}
 }
 
