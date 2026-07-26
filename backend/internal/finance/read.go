@@ -2,6 +2,7 @@ package finance
 
 import (
 	"context"
+	"log/slog"
 	"regexp"
 	"strings"
 	"time"
@@ -28,14 +29,17 @@ const (
 	defaultTxnLimit = 50
 	maxTxnLimit     = 500
 	reportCurrency  = "AUD"
-	// externalScanCap bounds how many rows the external_only path materializes when no
-	// lower date bound (From) keeps the window finite. The internal-transfer classifier
-	// runs in Go, so external_only cannot LIMIT in SQL without risking a silent undercount
-	// (internal rows eating the page); instead it loads the window and filters in memory.
-	// A From bound already bounds the scan, so the cap only applies to an unbounded query;
-	// it is set well above the whole ledger size, and truncates to the NEWEST rows.
-	externalScanCap = 20000
 )
+
+// externalScanCap bounds how many rows the external_only path materializes when no lower
+// date bound (From) keeps the window finite. The internal-transfer classifier runs in Go,
+// so external_only cannot LIMIT in SQL without risking a silent undercount (internal rows
+// eating the page); instead it loads the window and filters in memory. A From bound already
+// bounds the scan, so the cap only applies to an unbounded query; it is set well above the
+// whole ledger size, and truncates to the NEWEST rows. Hitting it is NOT silent: the caller
+// gets truncated=true and a slog.Warn fires (no-silent-caps principle). It is a var, not a
+// const, so a test can lower it to exercise the cap without seeding tens of thousands of rows.
+var externalScanCap = 20000
 
 // SummaryView is the net-worth roll-up across every account's latest balance.
 type SummaryView struct {
@@ -324,7 +328,11 @@ func BalanceHistory(ctx context.Context, client *ent.Client, accountID int, from
 // for the same filter (before paging) so a caller can render pagination. (Named
 // ListTransactions, not Transactions, since the ingest payload already owns the
 // Transactions type.)
-func ListTransactions(ctx context.Context, client *ent.Client, f TxnFilter) ([]TxnView, int, error) {
+// The bool return is `truncated`: true only on the external_only path when the unbounded
+// safety cap (externalScanCap) was hit and older external rows were dropped; always false
+// on the normal SQL-paged path (which never drops rows). The caller can surface it so an
+// over-cap ledger is not read as a complete answer.
+func ListTransactions(ctx context.Context, client *ent.Client, f TxnFilter) ([]TxnView, int, bool, error) {
 	preds := txnPredicates(f)
 
 	if f.ExternalOnly {
@@ -333,7 +341,7 @@ func ListTransactions(ctx context.Context, client *ent.Client, f TxnFilter) ([]T
 
 	total, err := client.Transaction.Query().Where(preds...).Count(ctx)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, false, err
 	}
 
 	limit := f.Limit
@@ -356,9 +364,9 @@ func ListTransactions(ctx context.Context, client *ent.Client, f TxnFilter) ([]T
 		Offset(offset).
 		All(ctx)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, false, err
 	}
-	return toTxnViews(rows), total, nil
+	return toTxnViews(rows), total, false, nil
 }
 
 // listExternalOnly serves ListTransactions when ExternalOnly is set. The internal-transfer
@@ -370,11 +378,14 @@ func ListTransactions(ctx context.Context, client *ent.Client, f TxnFilter) ([]T
 // bound already bounds the scan; an unbounded query is capped at externalScanCap of the
 // newest rows so a caller can never force the box to load the entire ledger unboundedly.
 // The returned total is the count of EXTERNAL rows in the scanned window (accurate for the
-// filtered set, which is what a "how many real payments" caller wants).
-func listExternalOnly(ctx context.Context, client *ent.Client, f TxnFilter, preds []predicate.Transaction) ([]TxnView, int, error) {
+// filtered set, which is what a "how many real payments" caller wants). The bool return is
+// truncated: when the unbounded cap is hit, older rows are dropped, so it is set true (and a
+// slog.Warn fires) rather than the omission being silent — the caller must not read an
+// over-cap answer as complete.
+func listExternalOnly(ctx context.Context, client *ent.Client, f TxnFilter, preds []predicate.Transaction) ([]TxnView, int, bool, error) {
 	own4, err := loadOwnLast4(ctx, client)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, false, err
 	}
 
 	q := client.Transaction.Query().
@@ -382,12 +393,22 @@ func listExternalOnly(ctx context.Context, client *ent.Client, f TxnFilter, pred
 		WithAccount().
 		Order(ent.Desc(transaction.FieldPostedDate), ent.Desc(transaction.FieldID))
 	if f.From == nil {
-		// No lower date bound to keep the window finite: cap the materialization.
-		q = q.Limit(externalScanCap)
+		// No lower date bound to keep the window finite: cap the materialization. Scan ONE
+		// past the cap so "exactly cap rows, complete" is distinguishable from "cap hit,
+		// older rows dropped" — otherwise the truncation signal would be a guess.
+		q = q.Limit(externalScanCap + 1)
 	}
 	rows, err := q.All(ctx)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, false, err
+	}
+
+	truncated := false
+	if f.From == nil && len(rows) > externalScanCap {
+		truncated = true
+		rows = rows[:externalScanCap]
+		slog.Warn("finance: external_only scan hit the row cap; older external rows omitted from this page and total",
+			"cap", externalScanCap)
 	}
 
 	external := make([]*ent.Transaction, 0, len(rows))
@@ -417,7 +438,7 @@ func listExternalOnly(ctx context.Context, client *ent.Client, f TxnFilter, pred
 	if end > len(external) {
 		end = len(external)
 	}
-	return toTxnViews(external[offset:end]), total, nil
+	return toTxnViews(external[offset:end]), total, truncated, nil
 }
 
 // txnPredicates builds the shared where-clause for a TxnFilter so the count query and

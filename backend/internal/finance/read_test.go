@@ -189,7 +189,7 @@ func TestTransactions_FilterAndPaging(t *testing.T) {
 	seedTxn(t, ctx, client, b, "b1", day(2026, 7, 4), -99, "B txn", "MerchB")
 
 	// Unfiltered: 7 total, newest first.
-	all, total, err := ListTransactions(ctx, client, TxnFilter{})
+	all, total, _, err := ListTransactions(ctx, client, TxnFilter{})
 	if err != nil {
 		t.Fatalf("Transactions: %v", err)
 	}
@@ -202,7 +202,7 @@ func TestTransactions_FilterAndPaging(t *testing.T) {
 	}
 
 	// Account filter: only A's five rows.
-	onlyA, totalA, err := ListTransactions(ctx, client, TxnFilter{AccountID: a.ID})
+	onlyA, totalA, _, err := ListTransactions(ctx, client, TxnFilter{AccountID: a.ID})
 	if err != nil {
 		t.Fatalf("Transactions(A): %v", err)
 	}
@@ -218,7 +218,7 @@ func TestTransactions_FilterAndPaging(t *testing.T) {
 	// Date range [2026-07-02, 2026-07-04] on A: three rows (2,3,4 July).
 	from := day(2026, 7, 2)
 	to := day(2026, 7, 4)
-	ranged, totalR, err := ListTransactions(ctx, client, TxnFilter{AccountID: a.ID, From: &from, To: &to})
+	ranged, totalR, _, err := ListTransactions(ctx, client, TxnFilter{AccountID: a.ID, From: &from, To: &to})
 	if err != nil {
 		t.Fatalf("Transactions(range): %v", err)
 	}
@@ -227,7 +227,7 @@ func TestTransactions_FilterAndPaging(t *testing.T) {
 	}
 
 	// Paging: limit 2, offset 2 over all 7. Total stays 7; page has 2 rows.
-	page, totalP, err := ListTransactions(ctx, client, TxnFilter{Limit: 2, Offset: 2})
+	page, totalP, _, err := ListTransactions(ctx, client, TxnFilter{Limit: 2, Offset: 2})
 	if err != nil {
 		t.Fatalf("Transactions(page): %v", err)
 	}
@@ -251,7 +251,7 @@ func TestTransactions_LimitClamped(t *testing.T) {
 	seedTxn(t, ctx, client, a, "x", day(2026, 7, 1), -1, "d", "m")
 
 	// A huge limit must not error; it is clamped internally. One row present.
-	rows, _, err := ListTransactions(ctx, client, TxnFilter{Limit: 100000})
+	rows, _, _, err := ListTransactions(ctx, client, TxnFilter{Limit: 100000})
 	if err != nil {
 		t.Fatalf("Transactions: %v", err)
 	}
@@ -441,7 +441,7 @@ func TestListTransactions_ExternalOnly(t *testing.T) {
 	seedTxn(t, ctx, client, checking, "salary", day(2026, 7, 1), 2000, "SALARY", "Employer")                 // external
 
 	// Baseline: without the flag all six rows and a total of 6.
-	base, baseTotal, err := ListTransactions(ctx, client, TxnFilter{})
+	base, baseTotal, _, err := ListTransactions(ctx, client, TxnFilter{})
 	if err != nil {
 		t.Fatalf("ListTransactions baseline: %v", err)
 	}
@@ -449,7 +449,7 @@ func TestListTransactions_ExternalOnly(t *testing.T) {
 		t.Fatalf("baseline = %d/%d, want 6/6", len(base), baseTotal)
 	}
 
-	ext, total, err := ListTransactions(ctx, client, TxnFilter{ExternalOnly: true, Limit: 2})
+	ext, total, _, err := ListTransactions(ctx, client, TxnFilter{ExternalOnly: true, Limit: 2})
 	if err != nil {
 		t.Fatalf("ListTransactions external: %v", err)
 	}
@@ -465,7 +465,7 @@ func TestListTransactions_ExternalOnly(t *testing.T) {
 	}
 
 	// Offset continues the external page: COFFEE (07-02) then SALARY (07-01).
-	page2, total2, err := ListTransactions(ctx, client, TxnFilter{ExternalOnly: true, Limit: 2, Offset: 2})
+	page2, total2, _, err := ListTransactions(ctx, client, TxnFilter{ExternalOnly: true, Limit: 2, Offset: 2})
 	if err != nil {
 		t.Fatalf("ListTransactions external offset: %v", err)
 	}
@@ -477,12 +477,66 @@ func TestListTransactions_ExternalOnly(t *testing.T) {
 	}
 
 	// Offset past the end yields an empty page (not a slice panic), total unchanged.
-	empty, totalE, err := ListTransactions(ctx, client, TxnFilter{ExternalOnly: true, Offset: 99})
+	empty, totalE, _, err := ListTransactions(ctx, client, TxnFilter{ExternalOnly: true, Offset: 99})
 	if err != nil {
 		t.Fatalf("ListTransactions external over-offset: %v", err)
 	}
 	if len(empty) != 0 || totalE != 4 {
 		t.Errorf("over-offset = %d rows / total %d, want 0/4", len(empty), totalE)
+	}
+}
+
+// TestListTransactions_ExternalOnlyTruncationSignals locks the no-silent-caps behaviour:
+// when the unbounded external_only scan hits externalScanCap and drops older rows, the
+// truncated flag is set; when the ledger fits under the cap, or a `from` bound makes the
+// scan finite, truncated stays false. externalScanCap is lowered here so the cap is exercised
+// without seeding tens of thousands of rows.
+func TestListTransactions_ExternalOnlyTruncationSignals(t *testing.T) {
+	orig := externalScanCap
+	externalScanCap = 3
+	t.Cleanup(func() { externalScanCap = orig })
+
+	client := newFinanceTestClient(t)
+	ctx := context.Background()
+	checking, _, _ := seedOwnerAccounts(t, ctx, client)
+
+	// Four external rows against a cap of 3: an unbounded scan must report truncation.
+	for i := 0; i < 4; i++ {
+		seedTxn(t, ctx, client, checking, fmt.Sprintf("e%d", i), day(2026, 7, 1+i), float64(-(i + 1)), fmt.Sprintf("SHOP %d", i), "Shop")
+	}
+
+	_, total, truncated, err := ListTransactions(ctx, client, TxnFilter{ExternalOnly: true})
+	if err != nil {
+		t.Fatalf("ListTransactions external unbounded: %v", err)
+	}
+	if !truncated {
+		t.Errorf("truncated = false, want true (4 rows > cap 3, no from bound)")
+	}
+	if total != 3 {
+		t.Errorf("total = %d, want 3 (the scanned-window external count under the cap)", total)
+	}
+
+	// A `from` bound makes the scan finite, so the cap does not apply and nothing is dropped.
+	from := day(2026, 7, 1)
+	_, totalBounded, truncatedBounded, err := ListTransactions(ctx, client, TxnFilter{ExternalOnly: true, From: &from})
+	if err != nil {
+		t.Fatalf("ListTransactions external bounded: %v", err)
+	}
+	if truncatedBounded {
+		t.Errorf("truncated = true with a from bound, want false (bounded scan is not capped)")
+	}
+	if totalBounded != 4 {
+		t.Errorf("bounded total = %d, want 4 (all rows, no cap)", totalBounded)
+	}
+
+	// Ledger under the cap: no truncation.
+	externalScanCap = 10
+	_, _, notTrunc, err := ListTransactions(ctx, client, TxnFilter{ExternalOnly: true})
+	if err != nil {
+		t.Fatalf("ListTransactions under cap: %v", err)
+	}
+	if notTrunc {
+		t.Errorf("truncated = true under cap, want false (4 rows < cap 10)")
 	}
 }
 

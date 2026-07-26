@@ -183,7 +183,7 @@ func (s *server) callTool(ctx context.Context, name string, rawArgs json.RawMess
 		if err != nil {
 			return nil, err
 		}
-		txns, total, err := finance.ListTransactions(ctx, s.deps.Ent, finance.TxnFilter{
+		txns, total, truncated, err := finance.ListTransactions(ctx, s.deps.Ent, finance.TxnFilter{
 			AccountID:    a.AccountID,
 			From:         from,
 			To:           to,
@@ -193,7 +193,13 @@ func (s *server) callTool(ctx context.Context, name string, rawArgs json.RawMess
 		if err != nil {
 			return nil, err
 		}
-		return map[string]any{"transactions": toTxnResults(txns), "total": total}, nil
+		res := map[string]any{"transactions": toTxnResults(txns), "total": total}
+		if truncated {
+			// Only present when the external_only safety cap actually dropped older rows, so
+			// its absence means a complete answer (no-silent-caps signal).
+			res["truncated"] = true
+		}
+		return res, nil
 
 	case "search_merchant":
 		var a searchArgs
@@ -277,7 +283,7 @@ func toolDefinitions() []map[string]any {
 		},
 		{
 			"name":        "list_transactions",
-			"description": "List posted (settled) transactions, newest first. Optionally filter by account_id and an inclusive from/to date range (YYYY-MM-DD). Set external_only=true to exclude internal money moves (transfers between the owner's own accounts, credit-card payments and StepPay repayments, identified from the description) so only payments that actually leave the bank remain; the returned total then counts external rows only. Returns up to `limit` rows (default 50, max 500) plus the total matching count.",
+			"description": "List posted (settled) transactions, newest first. Optionally filter by account_id and an inclusive from/to date range (YYYY-MM-DD). Set external_only=true to exclude internal money moves (transfers between the owner's own accounts, credit-card payments and StepPay repayments, identified from the description) so only payments that actually leave the bank remain; the returned total then counts external rows only. Returns up to `limit` rows (default 50, max 500) plus the total matching count. In external_only mode, if you omit `from` and the ledger is larger than an internal safety cap, the response carries \"truncated\": true and total/rows cover only the newest scanned rows; pass a `from` date to guarantee a complete answer.",
 			"inputSchema": objectSchema(map[string]any{
 				"account_id":    intProp("Restrict to one account id; omit or 0 for all accounts."),
 				"from":          strProp("Inclusive lower bound date, YYYY-MM-DD."),

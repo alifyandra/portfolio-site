@@ -275,7 +275,8 @@ func (h *Handler) listFinanceTransactions(ctx context.Context, in *listFinanceTx
 	if err != nil {
 		return nil, err
 	}
-	txns, total, err := finance.ListTransactions(ctx, h.deps.Ent, finance.TxnFilter{
+	// The dashboard endpoint never sets ExternalOnly, so truncated is always false here.
+	txns, total, _, err := finance.ListTransactions(ctx, h.deps.Ent, finance.TxnFilter{
 		AccountID: in.AccountID,
 		From:      from,
 		To:        to,
