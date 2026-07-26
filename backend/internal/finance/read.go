@@ -28,6 +28,13 @@ const (
 	defaultTxnLimit = 50
 	maxTxnLimit     = 500
 	reportCurrency  = "AUD"
+	// externalScanCap bounds how many rows the external_only path materializes when no
+	// lower date bound (From) keeps the window finite. The internal-transfer classifier
+	// runs in Go, so external_only cannot LIMIT in SQL without risking a silent undercount
+	// (internal rows eating the page); instead it loads the window and filters in memory.
+	// A From bound already bounds the scan, so the cap only applies to an unbounded query;
+	// it is set well above the whole ledger size, and truncates to the NEWEST rows.
+	externalScanCap = 20000
 )
 
 // SummaryView is the net-worth roll-up across every account's latest balance.
@@ -89,12 +96,16 @@ type PendingView struct {
 
 // TxnFilter narrows a posted-transaction query. A zero AccountID means "all
 // accounts"; nil From/To leave that bound open; Limit/Offset page the result.
+// ExternalOnly drops internal money moves (see isInternalTransfer) from the result;
+// because that classifier runs in Go over descriptions rather than as a SQL predicate,
+// the external path materializes the window before paging (see listExternalOnly).
 type TxnFilter struct {
-	AccountID int
-	From      *time.Time
-	To        *time.Time
-	Limit     int
-	Offset    int
+	AccountID    int
+	From         *time.Time
+	To           *time.Time
+	Limit        int
+	Offset       int
+	ExternalOnly bool
 }
 
 // MonthBucket is one calendar month's income/spend roll-up. Income and Spend count only
@@ -153,6 +164,47 @@ func isInternalTransfer(desc string, own4 map[string]bool) bool {
 		return own4[m[1]]
 	}
 	return false
+}
+
+// loadOwnLast4 loads the owner's account last-4 set for the internal-transfer classifier.
+// The set spans every account regardless of any per-account query filter, so an internal
+// transfer is still recognised when the query is scoped to one side of the move.
+func loadOwnLast4(ctx context.Context, client *ent.Client) (map[string]bool, error) {
+	accs, err := client.Account.Query().All(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return ownAccountLast4(accs), nil
+}
+
+// spendTally accumulates external income/spend and the excluded internal-transfer volume
+// over a set of posted transactions. It is the single source of the internal-transfer
+// exclusion for both MonthlySummary (one tally per calendar month) and SpendingSummary
+// (one tally over an arbitrary window), so the two never fork the #120 classifier logic.
+type spendTally struct {
+	Income    float64
+	Spend     float64
+	Transfers float64 // excluded internal-transfer volume (outbound legs only)
+	Count     int     // every posted row folded in, internal transfers included
+}
+
+// add folds one posted transaction into the tally, applying the internal-transfer
+// exclusion (see isInternalTransfer): an internal leg counts toward Transfers on its
+// outbound leg only and is kept out of income/spend; an external positive is income; an
+// external negative is spend as a positive magnitude.
+func (s *spendTally) add(amount float64, desc string, own4 map[string]bool) {
+	s.Count++
+	if isInternalTransfer(desc, own4) {
+		if amount < 0 {
+			s.Transfers += -amount // count each transfer once, on its outbound leg
+		}
+		return
+	}
+	if amount >= 0 {
+		s.Income += amount
+	} else {
+		s.Spend += -amount
+	}
 }
 
 // latestSnapshot returns an account's most recent balance snapshot by as_of (ties
@@ -275,6 +327,10 @@ func BalanceHistory(ctx context.Context, client *ent.Client, accountID int, from
 func ListTransactions(ctx context.Context, client *ent.Client, f TxnFilter) ([]TxnView, int, error) {
 	preds := txnPredicates(f)
 
+	if f.ExternalOnly {
+		return listExternalOnly(ctx, client, f, preds)
+	}
+
 	total, err := client.Transaction.Query().Where(preds...).Count(ctx)
 	if err != nil {
 		return nil, 0, err
@@ -303,6 +359,65 @@ func ListTransactions(ctx context.Context, client *ent.Client, f TxnFilter) ([]T
 		return nil, 0, err
 	}
 	return toTxnViews(rows), total, nil
+}
+
+// listExternalOnly serves ListTransactions when ExternalOnly is set. The internal-transfer
+// classifier is a Go function over the description, not a SQL predicate, so applying the
+// LIMIT in SQL and filtering afterwards could return fewer than `limit` real external rows
+// while more exist just past the page edge — a silent undercount that would corrupt spend
+// analysis. Instead it materializes the whole matching window (following MonthlySummary's
+// load-the-window pattern), drops internal transfers in Go, and only then pages. A From
+// bound already bounds the scan; an unbounded query is capped at externalScanCap of the
+// newest rows so a caller can never force the box to load the entire ledger unboundedly.
+// The returned total is the count of EXTERNAL rows in the scanned window (accurate for the
+// filtered set, which is what a "how many real payments" caller wants).
+func listExternalOnly(ctx context.Context, client *ent.Client, f TxnFilter, preds []predicate.Transaction) ([]TxnView, int, error) {
+	own4, err := loadOwnLast4(ctx, client)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	q := client.Transaction.Query().
+		Where(preds...).
+		WithAccount().
+		Order(ent.Desc(transaction.FieldPostedDate), ent.Desc(transaction.FieldID))
+	if f.From == nil {
+		// No lower date bound to keep the window finite: cap the materialization.
+		q = q.Limit(externalScanCap)
+	}
+	rows, err := q.All(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	external := make([]*ent.Transaction, 0, len(rows))
+	for _, t := range rows {
+		if isInternalTransfer(t.Description, own4) {
+			continue
+		}
+		external = append(external, t)
+	}
+	total := len(external)
+
+	limit := f.Limit
+	if limit <= 0 {
+		limit = defaultTxnLimit
+	}
+	if limit > maxTxnLimit {
+		limit = maxTxnLimit
+	}
+	offset := f.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > len(external) {
+		offset = len(external)
+	}
+	end := offset + limit
+	if end > len(external) {
+		end = len(external)
+	}
+	return toTxnViews(external[offset:end]), total, nil
 }
 
 // txnPredicates builds the shared where-clause for a TxnFilter so the count query and
@@ -353,8 +468,9 @@ func Pending(ctx context.Context, client *ent.Client, accountID int) ([]PendingV
 }
 
 // SearchMerchant finds posted transactions whose merchant OR description contains the
-// query (case-insensitive substring), newest first. An empty query returns nothing.
-func SearchMerchant(ctx context.Context, client *ent.Client, query string, limit int) ([]TxnView, error) {
+// query (case-insensitive substring), newest first, optionally within an inclusive
+// from/to posted-date range (nil bounds are open). An empty query returns nothing.
+func SearchMerchant(ctx context.Context, client *ent.Client, query string, limit int, from, to *time.Time) ([]TxnView, error) {
 	query = strings.TrimSpace(query)
 	if query == "" {
 		return []TxnView{}, nil
@@ -365,11 +481,20 @@ func SearchMerchant(ctx context.Context, client *ent.Client, query string, limit
 	if limit > maxTxnLimit {
 		limit = maxTxnLimit
 	}
-	rows, err := client.Transaction.Query().
-		Where(transaction.Or(
+	preds := []predicate.Transaction{
+		transaction.Or(
 			transaction.MerchantContainsFold(query),
 			transaction.DescriptionContainsFold(query),
-		)).
+		),
+	}
+	if from != nil {
+		preds = append(preds, transaction.PostedDateGTE(*from))
+	}
+	if to != nil {
+		preds = append(preds, transaction.PostedDateLTE(*to))
+	}
+	rows, err := client.Transaction.Query().
+		Where(preds...).
 		WithAccount().
 		Order(ent.Desc(transaction.FieldPostedDate), ent.Desc(transaction.FieldID)).
 		Limit(limit).
@@ -401,11 +526,10 @@ func MonthlySummary(ctx context.Context, client *ent.Client, accountID int, mont
 
 	// The owner's own account numbers distinguish an internal transfer from a payment to
 	// someone else, so load them regardless of the accountID filter.
-	accs, err := client.Account.Query().All(ctx)
+	own4, err := loadOwnLast4(ctx, client)
 	if err != nil {
 		return nil, err
 	}
-	own4 := ownAccountLast4(accs)
 
 	preds := []predicate.Transaction{transaction.PostedDateGTE(start)}
 	if accountID != 0 {
@@ -417,37 +541,86 @@ func MonthlySummary(ctx context.Context, client *ent.Client, accountID int, mont
 	}
 
 	order := make([]string, 0, months)
-	idx := make(map[string]*MonthBucket, months)
+	idx := make(map[string]*spendTally, months)
 	for i := 0; i < months; i++ {
 		key := start.AddDate(0, i, 0).Format("2006-01")
-		b := &MonthBucket{Month: key}
-		idx[key] = b
+		idx[key] = &spendTally{}
 		order = append(order, key)
 	}
 	for _, t := range rows {
-		b, ok := idx[t.PostedDate.UTC().Format("2006-01")]
+		tally, ok := idx[t.PostedDate.UTC().Format("2006-01")]
 		if !ok {
 			continue
 		}
-		if isInternalTransfer(t.Description, own4) {
-			if t.Amount < 0 {
-				b.Transfers += -t.Amount // count each transfer once, on its outbound leg
-			}
-			continue
-		}
-		if t.Amount >= 0 {
-			b.Income += t.Amount
-		} else {
-			b.Spend += -t.Amount
-		}
+		tally.add(t.Amount, t.Description, own4)
 	}
 	out := make([]MonthBucket, 0, months)
 	for _, key := range order {
-		b := idx[key]
-		b.Net = b.Income - b.Spend
-		out = append(out, *b)
+		tl := idx[key]
+		out = append(out, MonthBucket{
+			Month:     key,
+			Income:    tl.Income,
+			Spend:     tl.Spend,
+			Net:       tl.Income - tl.Spend,
+			Transfers: tl.Transfers,
+		})
 	}
 	return out, nil
+}
+
+// SpendBucket is the external-spending roll-up over one arbitrary window (SpendingSummary).
+// Income and Spend count only EXTERNAL money: internal transfers between the owner's own
+// accounts, credit-card payments and StepPay repayments are excluded from both (their
+// outbound volume is reported as Transfers, the same rule MonthlySummary applies). Spend is
+// a positive magnitude; Net = Income - Spend. TxnCount is every posted row in the window,
+// internal transfers included.
+type SpendBucket struct {
+	From      time.Time
+	To        time.Time
+	Income    float64
+	Spend     float64
+	Net       float64
+	Transfers float64
+	TxnCount  int
+}
+
+// SpendingSummary rolls posted transactions in the inclusive [from, to] window into a
+// single external income/spend bucket, applying the exact internal-transfer exclusion of
+// MonthlySummary (shared via spendTally) so "how much did I really spend last week/month"
+// is one call instead of the model summing a row list. from/to are UTC dates; accountID 0
+// spans every account. It loads the whole window (bounded by the date range) and folds it
+// in Go, mirroring MonthlySummary.
+func SpendingSummary(ctx context.Context, client *ent.Client, accountID int, from, to time.Time) (SpendBucket, error) {
+	own4, err := loadOwnLast4(ctx, client)
+	if err != nil {
+		return SpendBucket{}, err
+	}
+
+	preds := []predicate.Transaction{
+		transaction.PostedDateGTE(from),
+		transaction.PostedDateLTE(to),
+	}
+	if accountID != 0 {
+		preds = append(preds, transaction.HasAccountWith(account.IDEQ(accountID)))
+	}
+	rows, err := client.Transaction.Query().Where(preds...).All(ctx)
+	if err != nil {
+		return SpendBucket{}, err
+	}
+
+	var tally spendTally
+	for _, t := range rows {
+		tally.add(t.Amount, t.Description, own4)
+	}
+	return SpendBucket{
+		From:      from,
+		To:        to,
+		Income:    tally.Income,
+		Spend:     tally.Spend,
+		Net:       tally.Income - tally.Spend,
+		Transfers: tally.Transfers,
+		TxnCount:  tally.Count,
+	}, nil
 }
 
 // toTxnViews maps posted transaction rows (with their account edge eager-loaded) to

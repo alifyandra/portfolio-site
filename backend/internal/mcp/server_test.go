@@ -166,14 +166,14 @@ func TestMCP_FullTranscript(t *testing.T) {
 		t.Errorf("notification body = %q, want empty", nrr.Body.String())
 	}
 
-	// 3) tools/list: all six read tools present, each with a schema.
+	// 3) tools/list: all seven read tools present, each with a schema.
 	rr, out = rpc(t, h, raw, map[string]any{"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
 	if rr.Code != http.StatusOK {
 		t.Fatalf("tools/list = %d, want 200; body=%s", rr.Code, rr.Body.String())
 	}
 	tools, _ := out["result"].(map[string]any)["tools"].([]any)
-	if len(tools) != 6 {
-		t.Fatalf("tools = %d, want 6", len(tools))
+	if len(tools) != 7 {
+		t.Fatalf("tools = %d, want 7", len(tools))
 	}
 	names := map[string]bool{}
 	for _, tv := range tools {
@@ -183,7 +183,7 @@ func TestMCP_FullTranscript(t *testing.T) {
 			t.Errorf("tool %v missing inputSchema", tm["name"])
 		}
 	}
-	for _, want := range []string{"get_net_worth", "list_accounts", "list_transactions", "search_merchant", "monthly_summary", "list_pending"} {
+	for _, want := range []string{"get_net_worth", "list_accounts", "list_transactions", "search_merchant", "monthly_summary", "spending_summary", "list_pending"} {
 		if !names[want] {
 			t.Errorf("tools/list missing %q", want)
 		}
@@ -273,5 +273,89 @@ func TestMCP_SearchMissingQueryIsToolError(t *testing.T) {
 	}
 	if isErr, _ := res["isError"].(bool); !isErr {
 		t.Errorf("isError = false, want true for a missing query")
+	}
+}
+
+// decodeToolText pulls the single JSON text block out of a successful tools/call result and
+// unmarshals it into v, failing the test if the call reported isError or the shape is off.
+func decodeToolText(t *testing.T, out map[string]any, v any) {
+	t.Helper()
+	res, _ := out["result"].(map[string]any)
+	if res == nil {
+		t.Fatalf("no tool result: %v", out)
+	}
+	if isErr, _ := res["isError"].(bool); isErr {
+		t.Fatalf("tool returned isError: %v", res)
+	}
+	content, _ := res["content"].([]any)
+	if len(content) != 1 {
+		t.Fatalf("content blocks = %d, want 1", len(content))
+	}
+	block := content[0].(map[string]any)
+	if err := json.Unmarshal([]byte(block["text"].(string)), v); err != nil {
+		t.Fatalf("decode tool text: %v; text=%s", err, block["text"])
+	}
+}
+
+// TestMCP_SpendingSummaryAndExternalOnly drives the two new capabilities over the JSON-RPC
+// surface: list_transactions{external_only:true} drops an internal StepPay repayment, and
+// spending_summary (defaulting to the last 30 days) reports external income/spend with the
+// internal move excluded and surfaced as internal_transfers_excluded.
+func TestMCP_SpendingSummaryAndExternalOnly(t *testing.T) {
+	h, svc, client := newMCPTestServer(t)
+	ctx := context.Background()
+	raw := mintToken(t, ctx, svc, client, []string{"finance.read"})
+
+	acc := client.Account.Query().OnlyX(ctx) // the seeded "Smart Access"
+	now := time.Now().UTC()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	mk := func(tag string, amt float64, desc string) {
+		client.Transaction.Create().SetDedupHash("mcp-" + tag).SetPostedDate(today).
+			SetAmount(amt).SetDescription(desc).SetAccountID(acc.ID).SaveX(ctx)
+	}
+	mk("salary", 3000, "SALARY")             // external in
+	mk("rent", -2000, "RENT DIRECT DEBIT")   // external out
+	mk("steppay", -500, "StepPay Repayment") // internal, excluded regardless of own accounts
+
+	// list_transactions{external_only:true}: the StepPay repayment is dropped; total is 2.
+	_, out := rpc(t, h, raw, map[string]any{
+		"jsonrpc": "2.0", "id": 20, "method": "tools/call",
+		"params": map[string]any{"name": "list_transactions", "arguments": map[string]any{"external_only": true}},
+	})
+	var lt struct {
+		Transactions []struct {
+			Description string `json:"description"`
+		} `json:"transactions"`
+		Total int `json:"total"`
+	}
+	decodeToolText(t, out, &lt)
+	if lt.Total != 2 || len(lt.Transactions) != 2 {
+		t.Fatalf("external_only = %d rows / total %d, want 2/2", len(lt.Transactions), lt.Total)
+	}
+	for _, r := range lt.Transactions {
+		if strings.Contains(strings.ToLower(r.Description), "steppay") {
+			t.Errorf("external_only leaked the StepPay repayment: %q", r.Description)
+		}
+	}
+
+	// spending_summary with no args (default window includes today): external figures with
+	// the internal move excluded.
+	_, out = rpc(t, h, raw, map[string]any{
+		"jsonrpc": "2.0", "id": 21, "method": "tools/call",
+		"params": map[string]any{"name": "spending_summary", "arguments": map[string]any{}},
+	})
+	var ss struct {
+		ExternalSpend float64 `json:"external_spend"`
+		Income        float64 `json:"income"`
+		Net           float64 `json:"net"`
+		Transfers     float64 `json:"internal_transfers_excluded"`
+		TxnCount      int     `json:"txn_count"`
+	}
+	decodeToolText(t, out, &ss)
+	if ss.Income != 3000 || ss.ExternalSpend != 2000 || ss.Net != 1000 {
+		t.Errorf("spending_summary figures = %+v, want income 3000 / external_spend 2000 / net 1000", ss)
+	}
+	if ss.Transfers != 500 || ss.TxnCount != 3 {
+		t.Errorf("spending_summary excl = %+v, want transfers 500 / txn_count 3", ss)
 	}
 }

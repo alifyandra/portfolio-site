@@ -270,7 +270,7 @@ func TestSearchMerchant_CaseInsensitive(t *testing.T) {
 	seedTxn(t, ctx, client, a, "3", day(2026, 7, 3), -30, "SALARY", "Employer")
 
 	// Case-insensitive merchant hit.
-	hits, err := SearchMerchant(ctx, client, "woolworths", 50)
+	hits, err := SearchMerchant(ctx, client, "woolworths", 50, nil, nil)
 	if err != nil {
 		t.Fatalf("SearchMerchant: %v", err)
 	}
@@ -279,7 +279,7 @@ func TestSearchMerchant_CaseInsensitive(t *testing.T) {
 	}
 
 	// Description hit ("coffee" is only in the description casing here).
-	descHits, err := SearchMerchant(ctx, client, "COFFEE", 50)
+	descHits, err := SearchMerchant(ctx, client, "COFFEE", 50, nil, nil)
 	if err != nil {
 		t.Fatalf("SearchMerchant desc: %v", err)
 	}
@@ -288,7 +288,7 @@ func TestSearchMerchant_CaseInsensitive(t *testing.T) {
 	}
 
 	// Empty query returns nothing (not everything).
-	none, err := SearchMerchant(ctx, client, "   ", 50)
+	none, err := SearchMerchant(ctx, client, "   ", 50, nil, nil)
 	if err != nil {
 		t.Fatalf("SearchMerchant empty: %v", err)
 	}
@@ -405,5 +405,169 @@ func TestBalanceHistory_OrderedAndFiltered(t *testing.T) {
 	}
 	if len(filtered) != 2 || filtered[0].Balance != 200 {
 		t.Fatalf("filtered = %+v, want 200,300", filtered)
+	}
+}
+
+// seedOwnerAccounts creates the three CommBank accounts the internal-transfer classifier
+// keys off (checking xx1775, saver xx2158, StepPay xx2218), returned in that order.
+func seedOwnerAccounts(t *testing.T, ctx context.Context, client *ent.Client) (checking, saver, steppay *ent.Account) {
+	t.Helper()
+	checking = client.Account.Create().SetSource("commbank").SetName("Smart Access").
+		SetMaskedNumber("xxxx 1775").SetType(account.TypeEveryday).SetClass(account.ClassAsset).SaveX(ctx)
+	saver = client.Account.Create().SetSource("commbank").SetName("NetBank Saver").
+		SetMaskedNumber("xxxx 2158").SetType(account.TypeSavings).SetClass(account.ClassAsset).SaveX(ctx)
+	steppay = client.Account.Create().SetSource("commbank").SetName("StepPay").
+		SetMaskedNumber("xxxx 2218").SetType(account.TypeSteppay).SetClass(account.ClassLiability).SaveX(ctx)
+	return checking, saver, steppay
+}
+
+// TestListTransactions_ExternalOnly locks the undercount fix: the internal-transfer
+// classifier runs in Go, not SQL, so the two NEWEST rows here are internal transfers. A
+// naive "SQL LIMIT then filter in Go" with limit=2 would page those two internal rows and
+// return ZERO external rows while four real external ones exist. external_only must instead
+// materialize the window, drop internal rows, and only THEN apply the limit — returning the
+// two newest EXTERNAL rows and an accurate total of 4.
+func TestListTransactions_ExternalOnly(t *testing.T) {
+	client := newFinanceTestClient(t)
+	ctx := context.Background()
+	checking, _, _ := seedOwnerAccounts(t, ctx, client)
+
+	// Newest first: the two internal legs sit at the top of the page.
+	seedTxn(t, ctx, client, checking, "xfer", day(2026, 7, 6), -5000, "Transfer to xx2158 CommBank App", "") // internal
+	seedTxn(t, ctx, client, checking, "sp", day(2026, 7, 5), -300, "StepPay Repayment", "")                  // internal
+	seedTxn(t, ctx, client, checking, "rent", day(2026, 7, 4), -2000, "RENT DIRECT DEBIT", "Landlord")       // external
+	seedTxn(t, ctx, client, checking, "peter", day(2026, 7, 3), -300, "Transfer to Peter CommBank App", "")  // external (not own account)
+	seedTxn(t, ctx, client, checking, "coffee", day(2026, 7, 2), -50, "COFFEE", "Cafe")                      // external
+	seedTxn(t, ctx, client, checking, "salary", day(2026, 7, 1), 2000, "SALARY", "Employer")                 // external
+
+	// Baseline: without the flag all six rows and a total of 6.
+	base, baseTotal, err := ListTransactions(ctx, client, TxnFilter{})
+	if err != nil {
+		t.Fatalf("ListTransactions baseline: %v", err)
+	}
+	if baseTotal != 6 || len(base) != 6 {
+		t.Fatalf("baseline = %d/%d, want 6/6", len(base), baseTotal)
+	}
+
+	ext, total, err := ListTransactions(ctx, client, TxnFilter{ExternalOnly: true, Limit: 2})
+	if err != nil {
+		t.Fatalf("ListTransactions external: %v", err)
+	}
+	if total != 4 {
+		t.Errorf("external total = %d, want 4 (rent, peter, coffee, salary; 2 internal excluded)", total)
+	}
+	if len(ext) != 2 {
+		t.Fatalf("external page = %d, want 2 (limit honored with REAL external rows, not undercounted)", len(ext))
+	}
+	// Newest external first: RENT (07-04) then Transfer-to-Peter (07-03).
+	if !ext[0].PostedDate.Equal(day(2026, 7, 4)) || !ext[1].PostedDate.Equal(day(2026, 7, 3)) {
+		t.Errorf("external rows = [%v,%v], want 07-04,07-03", ext[0].PostedDate, ext[1].PostedDate)
+	}
+
+	// Offset continues the external page: COFFEE (07-02) then SALARY (07-01).
+	page2, total2, err := ListTransactions(ctx, client, TxnFilter{ExternalOnly: true, Limit: 2, Offset: 2})
+	if err != nil {
+		t.Fatalf("ListTransactions external offset: %v", err)
+	}
+	if total2 != 4 || len(page2) != 2 {
+		t.Fatalf("external offset page = %d/%d, want 2/4", len(page2), total2)
+	}
+	if !page2[0].PostedDate.Equal(day(2026, 7, 2)) || !page2[1].PostedDate.Equal(day(2026, 7, 1)) {
+		t.Errorf("external offset rows = [%v,%v], want 07-02,07-01", page2[0].PostedDate, page2[1].PostedDate)
+	}
+
+	// Offset past the end yields an empty page (not a slice panic), total unchanged.
+	empty, totalE, err := ListTransactions(ctx, client, TxnFilter{ExternalOnly: true, Offset: 99})
+	if err != nil {
+		t.Fatalf("ListTransactions external over-offset: %v", err)
+	}
+	if len(empty) != 0 || totalE != 4 {
+		t.Errorf("over-offset = %d rows / total %d, want 0/4", len(empty), totalE)
+	}
+}
+
+// TestSearchMerchant_DateRange: the optional from/to bounds a merchant search inclusively.
+func TestSearchMerchant_DateRange(t *testing.T) {
+	client := newFinanceTestClient(t)
+	ctx := context.Background()
+	a := seedAccount(t, ctx, client, "A", account.ClassAsset, account.TypeEveryday)
+	seedTxn(t, ctx, client, a, "1", day(2026, 7, 1), -10, "EFTPOS WOOLWORTHS", "Woolworths")
+	seedTxn(t, ctx, client, a, "2", day(2026, 7, 5), -20, "WOOLWORTHS METRO", "Woolworths")
+	seedTxn(t, ctx, client, a, "3", day(2026, 7, 9), -30, "WOOLWORTHS ONLINE", "Woolworths")
+
+	from := day(2026, 7, 3)
+	to := day(2026, 7, 7)
+	ranged, err := SearchMerchant(ctx, client, "woolworths", 50, &from, &to)
+	if err != nil {
+		t.Fatalf("SearchMerchant(range): %v", err)
+	}
+	if len(ranged) != 1 || !ranged[0].PostedDate.Equal(day(2026, 7, 5)) {
+		t.Fatalf("ranged = %+v, want only the 07-05 row", ranged)
+	}
+
+	// Open upper bound (from only): the 07-05 and 07-09 rows, newest first.
+	fromOnly, err := SearchMerchant(ctx, client, "woolworths", 50, &from, nil)
+	if err != nil {
+		t.Fatalf("SearchMerchant(from only): %v", err)
+	}
+	if len(fromOnly) != 2 || !fromOnly[0].PostedDate.Equal(day(2026, 7, 9)) {
+		t.Fatalf("fromOnly = %+v, want 07-09 then 07-05", fromOnly)
+	}
+}
+
+// TestSpendingSummary_ExternalWindow mirrors the monthly exclusion rule over an arbitrary
+// window: internal account moves and a StepPay repayment drop out of income/spend (surfaced
+// as Transfers), a transfer to another person stays as spend, and a row outside [from,to]
+// is ignored. txn_count counts every posted row in the window (internal included).
+func TestSpendingSummary_ExternalWindow(t *testing.T) {
+	client := newFinanceTestClient(t)
+	ctx := context.Background()
+	checking, saver, steppay := seedOwnerAccounts(t, ctx, client)
+
+	seedTxn(t, ctx, client, checking, "salary", day(2026, 7, 10), 7200, "Salary Foundit Tech", "Foundit") // external in
+	seedTxn(t, ctx, client, checking, "rent", day(2026, 7, 11), -2000, "RENT DIRECT DEBIT", "Landlord")   // external out
+	seedTxn(t, ctx, client, checking, "peter", day(2026, 7, 12), -300, "Transfer to Peter CommBank App", "")
+	seedTxn(t, ctx, client, checking, "xfer-out", day(2026, 7, 13), -5000, "Transfer to xx2158 CommBank App", "") // internal
+	seedTxn(t, ctx, client, saver, "xfer-in", day(2026, 7, 13), 5000, "Transfer from xx1775 CommBank App", "")    // internal
+	seedTxn(t, ctx, client, checking, "sp", day(2026, 7, 14), -120, "StepPay Repayment", "")                      // internal
+	seedTxn(t, ctx, client, steppay, "sp-in", day(2026, 7, 14), 120, "STEPPAY PYMT-THANK YOU", "")                // internal
+	// Outside the window (before from): must not count anywhere.
+	seedTxn(t, ctx, client, checking, "old", day(2026, 7, 1), -999, "OLD COFFEE", "Cafe")
+
+	from := day(2026, 7, 10)
+	to := day(2026, 7, 14)
+	b, err := SpendingSummary(ctx, client, 0, from, to)
+	if err != nil {
+		t.Fatalf("SpendingSummary: %v", err)
+	}
+	if !b.From.Equal(from) || !b.To.Equal(to) {
+		t.Errorf("window = [%v,%v], want [%v,%v]", b.From, b.To, from, to)
+	}
+	if b.Income != 7200 {
+		t.Errorf("income = %.2f, want 7200 (salary only)", b.Income)
+	}
+	if b.Spend != 2300 {
+		t.Errorf("external_spend = %.2f, want 2300 (rent 2000 + Peter 300)", b.Spend)
+	}
+	if b.Net != 4900 {
+		t.Errorf("net = %.2f, want 4900 (7200 - 2300)", b.Net)
+	}
+	if b.Transfers != 5120 {
+		t.Errorf("internal_transfers_excluded = %.2f, want 5120 (5000 move + 120 StepPay, outbound legs)", b.Transfers)
+	}
+	if b.TxnCount != 7 {
+		t.Errorf("txn_count = %d, want 7 (all in-window rows; the 07-01 row excluded)", b.TxnCount)
+	}
+
+	// Scoped to the checking account: the saver's internal in-leg drops out of the count.
+	scoped, err := SpendingSummary(ctx, client, checking.ID, from, to)
+	if err != nil {
+		t.Fatalf("SpendingSummary(scoped): %v", err)
+	}
+	if scoped.Income != 7200 || scoped.Spend != 2300 || scoped.Transfers != 5120 {
+		t.Errorf("scoped figures = %+v, want income 7200 / spend 2300 / transfers 5120", scoped)
+	}
+	if scoped.TxnCount != 5 {
+		t.Errorf("scoped txn_count = %d, want 5 (checking's in-window rows only; saver + StepPay legs excluded)", scoped.TxnCount)
 	}
 }
