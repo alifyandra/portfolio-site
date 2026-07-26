@@ -332,6 +332,55 @@ func TestMonthlySummary_Buckets(t *testing.T) {
 	}
 }
 
+// TestMonthlySummary_ExcludesInternalTransfers: a "Transfer to/from" whose counterparty is
+// one of the owner's OWN accounts (matched by last-4) is internal and drops out of both
+// income and spend (surfaced as Transfers), as does a StepPay repayment. Salary, rent, and
+// crucially a "Transfer to <another person>" are external and survive. Net is unchanged by
+// the exclusion; only the inflated gross columns are corrected.
+func TestMonthlySummary_ExcludesInternalTransfers(t *testing.T) {
+	client := newFinanceTestClient(t)
+	ctx := context.Background()
+	checking := client.Account.Create().SetSource("commbank").SetName("Smart Access").
+		SetMaskedNumber("xxxx 1775").SetType(account.TypeEveryday).SetClass(account.ClassAsset).SaveX(ctx)
+	saver := client.Account.Create().SetSource("commbank").SetName("NetBank Saver").
+		SetMaskedNumber("xxxx 2158").SetType(account.TypeSavings).SetClass(account.ClassAsset).SaveX(ctx)
+	steppay := client.Account.Create().SetSource("commbank").SetName("StepPay").
+		SetMaskedNumber("xxxx 2218").SetType(account.TypeSteppay).SetClass(account.ClassLiability).SaveX(ctx)
+
+	now := time.Now().UTC()
+	d := time.Date(now.Year(), now.Month(), 15, 0, 0, 0, 0, time.UTC)
+
+	seedTxn(t, ctx, client, checking, "salary", d, 7200, "Salary Foundit Tech", "Foundit") // external in
+	seedTxn(t, ctx, client, checking, "rent", d, -2000, "RENT DIRECT DEBIT", "Landlord")   // external out
+	// Payment to another person is external and must stay as spend (the case pure
+	// amount-matching would get wrong).
+	seedTxn(t, ctx, client, checking, "friend", d, -300, "Transfer to Peter CommBank App", "")
+	// Internal transfer checking -> saver, matched by the owner's own last-4.
+	seedTxn(t, ctx, client, checking, "xfer-out", d, -5000, "Transfer to xx2158 CommBank App", "")
+	seedTxn(t, ctx, client, saver, "xfer-in", d, 5000, "Transfer from xx1775 CommBank App", "")
+	// StepPay repayment: funded from checking, lands on StepPay. Both legs internal.
+	seedTxn(t, ctx, client, checking, "sp-out", d, -120, "StepPay Repayment", "")
+	seedTxn(t, ctx, client, steppay, "sp-in", d, 120, "STEPPAY PYMT-THANK YOU", "")
+
+	buckets, err := MonthlySummary(ctx, client, 0, 1)
+	if err != nil {
+		t.Fatalf("MonthlySummary: %v", err)
+	}
+	b := buckets[len(buckets)-1]
+	if b.Income != 7200 {
+		t.Errorf("income = %.2f, want 7200 (salary only; internal transfer-in and StepPay credit excluded)", b.Income)
+	}
+	if b.Spend != 2300 {
+		t.Errorf("spend = %.2f, want 2300 (rent 2000 + payment to Peter 300; internal legs excluded)", b.Spend)
+	}
+	if b.Transfers != 5120 {
+		t.Errorf("transfers = %.2f, want 5120 (5000 account move + 120 StepPay repayment, outbound legs)", b.Transfers)
+	}
+	if b.Net != 4900 {
+		t.Errorf("net = %.2f, want 4900 (7200 - 2300)", b.Net)
+	}
+}
+
 // TestBalanceHistory_OrderedAndFiltered: ascending by as_of, with an optional from.
 func TestBalanceHistory_OrderedAndFiltered(t *testing.T) {
 	client := newFinanceTestClient(t)
