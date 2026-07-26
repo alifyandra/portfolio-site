@@ -2,6 +2,7 @@ package finance
 
 import (
 	"context"
+	"regexp"
 	"strings"
 	"time"
 
@@ -96,13 +97,62 @@ type TxnFilter struct {
 	Offset    int
 }
 
-// MonthBucket is one calendar month's income/spend roll-up. Spend is reported as a
-// positive figure (the sum of the outgoing amounts' magnitudes); Net = Income - Spend.
+// MonthBucket is one calendar month's income/spend roll-up. Income and Spend count only
+// EXTERNAL money movement: internal transfers between the owner's own accounts (identified
+// from the transaction description, see isInternalTransfer) are excluded from both, so
+// shuffling money around does not inflate the figures. Spend is a positive magnitude;
+// Net = Income - Spend. Transfers is the excluded internal-transfer volume (outbound legs)
+// for the month, reported for transparency.
 type MonthBucket struct {
-	Month  string // "YYYY-MM"
-	Income float64
-	Spend  float64
-	Net    float64
+	Month     string // "YYYY-MM"
+	Income    float64
+	Spend     float64
+	Net       float64
+	Transfers float64
+}
+
+// internalTransferRe matches a CommBank "Transfer to/from xxNNNN" leg, capturing the last
+// four digits of the counterparty account. The caller checks those against the owner's own
+// accounts, so a transfer to someone else ("Transfer to Peter") is left as real spend.
+var internalTransferRe = regexp.MustCompile(`(?i)\btransfer (?:to|from) x+(\d{4})\b`)
+
+// steppayRepaymentRe matches either leg of a StepPay repayment ("StepPay Repayment" and
+// "STEPPAY PYMT-THANK YOU"), which move the owner's money onto the StepPay balance.
+var steppayRepaymentRe = regexp.MustCompile(`(?i)steppay (?:pymt|repayment)`)
+
+// trailingDigitsRe pulls the last run of four digits from a masked account number such as
+// "xxxx 1775".
+var trailingDigitsRe = regexp.MustCompile(`(\d{4})\D*$`)
+
+// ownAccountLast4 is the set of last-four-digit strings across the owner's accounts, used
+// to tell an internal transfer from a payment to someone else.
+func ownAccountLast4(accs []*ent.Account) map[string]bool {
+	set := make(map[string]bool, len(accs))
+	for _, a := range accs {
+		if m := trailingDigitsRe.FindStringSubmatch(a.MaskedNumber); m != nil {
+			set[m[1]] = true
+		}
+	}
+	return set
+}
+
+// isInternalTransfer reports whether a transaction is one leg of a movement between the
+// owner's own accounts rather than external income or spend. It keys off CommBank's
+// descriptions: an own-account "Transfer to/from xxNNNN", a credit-card "PAYMENT RECEIVED",
+// or a StepPay repayment. own4 holds the last four digits of every account the owner holds.
+// A transfer whose counterparty is not one of the owner's accounts (a payment to another
+// person) is deliberately not internal, so real outbound payments still count as spend.
+func isInternalTransfer(desc string, own4 map[string]bool) bool {
+	if strings.Contains(strings.ToLower(desc), "payment received") {
+		return true
+	}
+	if steppayRepaymentRe.MatchString(desc) {
+		return true
+	}
+	if m := internalTransferRe.FindStringSubmatch(desc); m != nil {
+		return own4[m[1]]
+	}
+	return false
 }
 
 // latestSnapshot returns an account's most recent balance snapshot by as_of (ties
@@ -331,10 +381,13 @@ func SearchMerchant(ctx context.Context, client *ent.Client, query string, limit
 }
 
 // MonthlySummary buckets posted transactions into the last N calendar months (UTC),
-// summing income (positive amounts) and spend (magnitude of negative amounts) per
-// month with Net = Income - Spend. It always returns exactly N buckets oldest-first,
-// zero-filled for quiet months, so a caller can render a fixed axis. accountID 0
-// spans every account.
+// summing income (positive amounts) and spend (magnitude of negative amounts) per month
+// with Net = Income - Spend. Internal transfers between the owner's own accounts are
+// excluded from income and spend first (see isInternalTransfer) so account-to-account
+// movements, credit-card payments and StepPay repayments do not inflate either column;
+// their outbound volume is reported separately as Transfers. It always returns exactly N
+// buckets oldest-first, zero-filled for quiet months, so a caller can render a fixed axis.
+// accountID 0 spans every account.
 func MonthlySummary(ctx context.Context, client *ent.Client, accountID int, months int) ([]MonthBucket, error) {
 	if months <= 0 {
 		months = 6
@@ -345,6 +398,14 @@ func MonthlySummary(ctx context.Context, client *ent.Client, accountID int, mont
 	now := time.Now().UTC()
 	curMonthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
 	start := curMonthStart.AddDate(0, -(months - 1), 0)
+
+	// The owner's own account numbers distinguish an internal transfer from a payment to
+	// someone else, so load them regardless of the accountID filter.
+	accs, err := client.Account.Query().All(ctx)
+	if err != nil {
+		return nil, err
+	}
+	own4 := ownAccountLast4(accs)
 
 	preds := []predicate.Transaction{transaction.PostedDateGTE(start)}
 	if accountID != 0 {
@@ -366,6 +427,12 @@ func MonthlySummary(ctx context.Context, client *ent.Client, accountID int, mont
 	for _, t := range rows {
 		b, ok := idx[t.PostedDate.UTC().Format("2006-01")]
 		if !ok {
+			continue
+		}
+		if isInternalTransfer(t.Description, own4) {
+			if t.Amount < 0 {
+				b.Transfers += -t.Amount // count each transfer once, on its outbound leg
+			}
 			continue
 		}
 		if t.Amount >= 0 {
