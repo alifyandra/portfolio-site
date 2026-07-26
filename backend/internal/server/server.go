@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"entgo.io/ent/dialect"
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humachi"
 	"github.com/go-chi/chi/v5"
@@ -22,6 +23,7 @@ import (
 	"github.com/alifyandra/portfolio-site/backend/internal/fargate"
 	"github.com/alifyandra/portfolio-site/backend/internal/mcp"
 	"github.com/alifyandra/portfolio-site/backend/internal/notify"
+	"github.com/alifyandra/portfolio-site/backend/internal/oauth"
 	"github.com/alifyandra/portfolio-site/backend/internal/queue"
 	"github.com/alifyandra/portfolio-site/backend/internal/spotify"
 	"github.com/alifyandra/portfolio-site/backend/internal/storage"
@@ -162,6 +164,23 @@ func New(deps *Deps) (http.Handler, huma.API) {
 	h := api.New(apiDeps)
 	h.Register(humaAPI)
 
+	// Self-hosted OAuth 2.1 authorization + resource server for the finance MCP
+	// connector (ADR 0018), mounted on the RAW Chi router. Behind the
+	// FINANCE_MCP_OAUTH_ENABLED flag: when off, every /.well-known/* and /oauth/*
+	// route 404s and the /mcp challenge below stays bearer-only. The issuer/base URL
+	// is derived from GoogleRedirectURL (the one config value carrying this backend's
+	// own scheme+host), falling back to the prod origin. Construction dereferences
+	// nothing (nil Ent/Auth in cmd/spec); handlers guard on the flag and nil clients.
+	oauthBase := oauth.BaseURLFromRedirect(deps.Config.GoogleRedirectURL, "https://api.aliflabs.dev")
+	oauthSvc := oauth.New(deps.Ent, deps.Auth, oauth.Config{
+		Enabled: deps.Config.FinanceMCPOAuthEnabled,
+		BaseURL: oauthBase,
+		// Production runs on Postgres (see bootstrap.go), which supports the
+		// SELECT ... FOR UPDATE family lock rotateRefresh takes on refresh-token reuse.
+		Dialect: dialect.Postgres,
+	})
+	oauthSvc.Register(r)
+
 	// Remote MCP server (ADR 0017), mounted on the RAW Chi router OUTSIDE Huma: it
 	// speaks JSON-RPC 2.0 over the MCP Streamable HTTP transport (JSON-response mode),
 	// not the OpenAPI contract, and authenticates with a finance.read bearer token
@@ -169,7 +188,16 @@ func New(deps *Deps) (http.Handler, huma.API) {
 	// Constructing the handler dereferences nothing, so cmd/spec (nil Ent/Auth) stays
 	// safe; the clients are touched only per request. Registered on both /mcp and
 	// /mcp/ since clients differ on the trailing slash and Chi does not redirect.
-	mcpHandler := mcp.Handler(mcp.Deps{Ent: deps.Ent, Auth: deps.Auth})
+	// When the OAuth flag is on it also accepts OAuth access tokens (audience-bound)
+	// and advertises the resource-metadata challenge; the static finance.read bearer
+	// keeps working regardless.
+	mcpHandler := mcp.Handler(mcp.Deps{
+		Ent:                          deps.Ent,
+		Auth:                         deps.Auth,
+		OAuthEnabled:                 deps.Config.FinanceMCPOAuthEnabled,
+		ChallengeResourceMetadataURL: oauthSvc.ResourceMetadataURL(),
+		VerifyOAuthToken:             oauthSvc.VerifyMCPAccess,
+	})
 	r.Handle("/mcp", mcpHandler)
 	r.Handle("/mcp/", mcpHandler)
 
