@@ -99,10 +99,11 @@ type pendingResult struct {
 }
 
 type monthResult struct {
-	Month  string  `json:"month"`
-	Income float64 `json:"income"`
-	Spend  float64 `json:"spend"`
-	Net    float64 `json:"net"`
+	Month     string  `json:"month"`
+	Income    float64 `json:"income"`
+	Spend     float64 `json:"spend"`
+	Net       float64 `json:"net"`
+	Transfers float64 `json:"internal_transfers_excluded"`
 }
 
 // handleToolsCall executes a tools/call and wraps the result. A structural failure
@@ -246,7 +247,7 @@ func toolDefinitions() []map[string]any {
 		},
 		{
 			"name":        "monthly_summary",
-			"description": "Per-calendar-month income (sum of money in), spend (sum of money out as a positive figure) and net, for the last N months (default 6). Optionally scope to one account_id.",
+			"description": "Per-calendar-month income, spend (positive figure) and net for the last N months (default 6). Income and spend count only EXTERNAL money: internal transfers between the owner's own accounts, credit-card payments and StepPay repayments are excluded from both (identified from the transaction description), and the excluded volume is reported as internal_transfers_excluded. A transfer to someone else still counts as spend. Optionally scope to one account_id.",
 			"inputSchema": objectSchema(map[string]any{
 				"account_id": intProp("Restrict to one account id; omit or 0 for all accounts."),
 				"months":     intProp("Number of trailing calendar months to bucket (default 6)."),
@@ -329,7 +330,7 @@ func toPendingResults(pend []finance.PendingView) []pendingResult {
 func toMonthResults(buckets []finance.MonthBucket) []monthResult {
 	out := make([]monthResult, 0, len(buckets))
 	for _, b := range buckets {
-		out = append(out, monthResult{Month: b.Month, Income: b.Income, Spend: b.Spend, Net: b.Net})
+		out = append(out, monthResult{Month: b.Month, Income: b.Income, Spend: b.Spend, Net: b.Net, Transfers: b.Transfers})
 	}
 	return out
 }
