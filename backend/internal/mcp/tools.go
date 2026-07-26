@@ -36,20 +36,29 @@ type toolCallParams struct {
 // --- tool argument shapes ---
 
 type listTxnArgs struct {
-	AccountID int    `json:"account_id"`
-	From      string `json:"from"`
-	To        string `json:"to"`
-	Limit     int    `json:"limit"`
+	AccountID    int    `json:"account_id"`
+	From         string `json:"from"`
+	To           string `json:"to"`
+	Limit        int    `json:"limit"`
+	ExternalOnly bool   `json:"external_only"`
 }
 
 type searchArgs struct {
 	Query string `json:"query"`
 	Limit int    `json:"limit"`
+	From  string `json:"from"`
+	To    string `json:"to"`
 }
 
 type monthlyArgs struct {
 	AccountID int `json:"account_id"`
 	Months    int `json:"months"`
+}
+
+type spendingArgs struct {
+	From      string `json:"from"`
+	To        string `json:"to"`
+	AccountID int    `json:"account_id"`
 }
 
 // --- tool result shapes (dates rendered as strings for a readable payload) ---
@@ -104,6 +113,16 @@ type monthResult struct {
 	Spend     float64 `json:"spend"`
 	Net       float64 `json:"net"`
 	Transfers float64 `json:"internal_transfers_excluded"`
+}
+
+type spendingResult struct {
+	From          string  `json:"from"`
+	To            string  `json:"to"`
+	ExternalSpend float64 `json:"external_spend"`
+	Income        float64 `json:"income"`
+	Net           float64 `json:"net"`
+	Transfers     float64 `json:"internal_transfers_excluded"`
+	TxnCount      int     `json:"txn_count"`
 }
 
 // handleToolsCall executes a tools/call and wraps the result. A structural failure
@@ -164,16 +183,23 @@ func (s *server) callTool(ctx context.Context, name string, rawArgs json.RawMess
 		if err != nil {
 			return nil, err
 		}
-		txns, total, err := finance.ListTransactions(ctx, s.deps.Ent, finance.TxnFilter{
-			AccountID: a.AccountID,
-			From:      from,
-			To:        to,
-			Limit:     a.Limit,
+		txns, total, truncated, err := finance.ListTransactions(ctx, s.deps.Ent, finance.TxnFilter{
+			AccountID:    a.AccountID,
+			From:         from,
+			To:           to,
+			Limit:        a.Limit,
+			ExternalOnly: a.ExternalOnly,
 		})
 		if err != nil {
 			return nil, err
 		}
-		return map[string]any{"transactions": toTxnResults(txns), "total": total}, nil
+		res := map[string]any{"transactions": toTxnResults(txns), "total": total}
+		if truncated {
+			// Only present when the external_only safety cap actually dropped older rows, so
+			// its absence means a complete answer (no-silent-caps signal).
+			res["truncated"] = true
+		}
+		return res, nil
 
 	case "search_merchant":
 		var a searchArgs
@@ -183,11 +209,39 @@ func (s *server) callTool(ctx context.Context, name string, rawArgs json.RawMess
 		if strings.TrimSpace(a.Query) == "" {
 			return nil, errors.New("query is required and must be a non-empty string")
 		}
-		txns, err := finance.SearchMerchant(ctx, s.deps.Ent, a.Query, a.Limit)
+		from, err := parseToolDate(a.From)
+		if err != nil {
+			return nil, err
+		}
+		to, err := parseToolDate(a.To)
+		if err != nil {
+			return nil, err
+		}
+		txns, err := finance.SearchMerchant(ctx, s.deps.Ent, a.Query, a.Limit, from, to)
 		if err != nil {
 			return nil, err
 		}
 		return map[string]any{"transactions": toTxnResults(txns)}, nil
+
+	case "spending_summary":
+		var a spendingArgs
+		if err := decodeArgs(rawArgs, &a); err != nil {
+			return nil, err
+		}
+		from, err := parseToolDate(a.From)
+		if err != nil {
+			return nil, err
+		}
+		to, err := parseToolDate(a.To)
+		if err != nil {
+			return nil, err
+		}
+		fromT, toT := spendingWindow(from, to)
+		bucket, err := finance.SpendingSummary(ctx, s.deps.Ent, a.AccountID, fromT, toT)
+		if err != nil {
+			return nil, err
+		}
+		return toSpendingResult(bucket), nil
 
 	case "monthly_summary":
 		var a monthlyArgs
@@ -229,20 +283,23 @@ func toolDefinitions() []map[string]any {
 		},
 		{
 			"name":        "list_transactions",
-			"description": "List posted (settled) transactions, newest first. Optionally filter by account_id and an inclusive from/to date range (YYYY-MM-DD). Returns up to `limit` rows (default 50, max 500) plus the total matching count.",
+			"description": "List posted (settled) transactions, newest first. Optionally filter by account_id and an inclusive from/to date range (YYYY-MM-DD). Set external_only=true to exclude internal money moves (transfers between the owner's own accounts, credit-card payments and StepPay repayments, identified from the description) so only payments that actually leave the bank remain; the returned total then counts external rows only. Returns up to `limit` rows (default 50, max 500) plus the total matching count. In external_only mode, if you omit `from` and the ledger is larger than an internal safety cap, the response carries \"truncated\": true and total/rows cover only the newest scanned rows; pass a `from` date to guarantee a complete answer.",
 			"inputSchema": objectSchema(map[string]any{
-				"account_id": intProp("Restrict to one account id; omit or 0 for all accounts."),
-				"from":       strProp("Inclusive lower bound date, YYYY-MM-DD."),
-				"to":         strProp("Inclusive upper bound date, YYYY-MM-DD."),
-				"limit":      intProp("Maximum rows to return (default 50, capped at 500)."),
+				"account_id":    intProp("Restrict to one account id; omit or 0 for all accounts."),
+				"from":          strProp("Inclusive lower bound date, YYYY-MM-DD."),
+				"to":            strProp("Inclusive upper bound date, YYYY-MM-DD."),
+				"limit":         intProp("Maximum rows to return (default 50, capped at 500)."),
+				"external_only": boolProp("When true, drop internal transfers, card payments and StepPay repayments, leaving only real external spend/income. Default false."),
 			}, nil),
 		},
 		{
 			"name":        "search_merchant",
-			"description": "Find posted transactions whose merchant OR description contains the query (case-insensitive substring), newest first.",
+			"description": "Find posted transactions whose merchant OR description contains the query (case-insensitive substring), newest first. Optionally restrict to an inclusive from/to date range (YYYY-MM-DD).",
 			"inputSchema": objectSchema(map[string]any{
 				"query": strProp("Substring to match against merchant or description (required)."),
 				"limit": intProp("Maximum rows to return (default 50, capped at 500)."),
+				"from":  strProp("Inclusive lower bound date, YYYY-MM-DD."),
+				"to":    strProp("Inclusive upper bound date, YYYY-MM-DD."),
 			}, []string{"query"}),
 		},
 		{
@@ -251,6 +308,15 @@ func toolDefinitions() []map[string]any {
 			"inputSchema": objectSchema(map[string]any{
 				"account_id": intProp("Restrict to one account id; omit or 0 for all accounts."),
 				"months":     intProp("Number of trailing calendar months to bucket (default 6)."),
+			}, nil),
+		},
+		{
+			"name":        "spending_summary",
+			"description": "External income, spend and net over one arbitrary date window in a single figure, so \"how much did I spend last week/month\" is one call instead of summing a row list. Income and external_spend count only money that actually leaves or enters the bank: internal transfers between the owner's own accounts, credit-card payments and StepPay repayments are excluded from both (their volume is reported as internal_transfers_excluded); a transfer to another person still counts as spend. external_spend is a positive figure; net = income - external_spend; txn_count is every posted row in the window. Defaults to the last 30 days when `from` is omitted, and to today when `to` is omitted. Optionally scope to one account_id.",
+			"inputSchema": objectSchema(map[string]any{
+				"from":       strProp("Inclusive window start, YYYY-MM-DD. Defaults to 30 days before `to`."),
+				"to":         strProp("Inclusive window end, YYYY-MM-DD. Defaults to today (UTC)."),
+				"account_id": intProp("Restrict to one account id; omit or 0 for all accounts."),
 			}, nil),
 		},
 		{
@@ -335,6 +401,18 @@ func toMonthResults(buckets []finance.MonthBucket) []monthResult {
 	return out
 }
 
+func toSpendingResult(b finance.SpendBucket) spendingResult {
+	return spendingResult{
+		From:          b.From.UTC().Format(dateLayout),
+		To:            b.To.UTC().Format(dateLayout),
+		ExternalSpend: b.Spend,
+		Income:        b.Income,
+		Net:           b.Net,
+		Transfers:     b.Transfers,
+		TxnCount:      b.TxnCount,
+	}
+}
+
 // --- small helpers ---
 
 // decodeArgs unmarshals tool arguments into v. Absent arguments (a no-arg tool call)
@@ -362,6 +440,22 @@ func parseToolDate(s string) (*time.Time, error) {
 	}
 	t = t.UTC()
 	return &t, nil
+}
+
+// spendingWindow resolves the spending_summary window from optional parsed bounds: `to`
+// defaults to today (UTC midnight), and `from` to 30 days before the effective `to`, so a
+// bare call means "the last 30 days". Both bounds are inclusive UTC dates.
+func spendingWindow(from, to *time.Time) (time.Time, time.Time) {
+	now := time.Now().UTC()
+	toT := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	if to != nil {
+		toT = *to
+	}
+	fromT := toT.AddDate(0, 0, -30)
+	if from != nil {
+		fromT = *from
+	}
+	return fromT, toT
 }
 
 func fmtRFC3339Ptr(t *time.Time) *string {
@@ -419,4 +513,7 @@ func intProp(desc string) map[string]any {
 }
 func strProp(desc string) map[string]any {
 	return map[string]any{"type": "string", "description": desc}
+}
+func boolProp(desc string) map[string]any {
+	return map[string]any{"type": "boolean", "description": desc}
 }
