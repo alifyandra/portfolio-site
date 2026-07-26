@@ -26,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"entgo.io/ent/dialect"
 	"github.com/go-chi/chi/v5"
 
 	"github.com/alifyandra/portfolio-site/backend/ent"
@@ -70,6 +71,13 @@ type Config struct {
 	// e.g. https://api.aliflabs.dev. It is the OAuth issuer and the base for the
 	// authorization/token endpoints and the MCP resource URL.
 	BaseURL string
+	// Dialect is the ent database dialect (e.g. dialect.Postgres, dialect.SQLite).
+	// It selects whether rotateRefresh may take a SELECT ... FOR UPDATE family lock:
+	// Postgres supports it, SQLite does not (and the single-connection test DB
+	// serializes transactions anyway). Empty is treated as lock-capable so a
+	// production misconfiguration fails closed (keeps the lock) rather than silently
+	// dropping the reuse-race protection.
+	Dialect string
 }
 
 // Service is the OAuth authorization + resource server. It is safe to construct
@@ -81,6 +89,7 @@ type Service struct {
 	baseURL  string // scheme+host, no trailing slash
 	resource string // baseURL + "/mcp"; the audience every token is stamped with
 	secure   bool   // set Secure on cookies (true when the base URL is https)
+	rowLock  bool   // take a FOR UPDATE family lock in rotateRefresh (off on SQLite)
 	now      func() time.Time
 }
 
@@ -98,6 +107,7 @@ func New(entClient *ent.Client, authSvc *auth.Service, cfg Config) *Service {
 		baseURL:  base,
 		resource: base + "/mcp",
 		secure:   strings.HasPrefix(base, "https://"),
+		rowLock:  cfg.Dialect != dialect.SQLite,
 		now:      time.Now,
 	}
 }

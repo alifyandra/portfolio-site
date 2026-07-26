@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"entgo.io/ent/dialect"
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humachi"
 	"github.com/go-chi/chi/v5"
@@ -174,6 +175,9 @@ func New(deps *Deps) (http.Handler, huma.API) {
 	oauthSvc := oauth.New(deps.Ent, deps.Auth, oauth.Config{
 		Enabled: deps.Config.FinanceMCPOAuthEnabled,
 		BaseURL: oauthBase,
+		// Production runs on Postgres (see bootstrap.go), which supports the
+		// SELECT ... FOR UPDATE family lock rotateRefresh takes on refresh-token reuse.
+		Dialect: dialect.Postgres,
 	})
 	oauthSvc.Register(r)
 

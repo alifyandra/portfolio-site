@@ -149,7 +149,7 @@ func (s *Service) redeemAuthCode(ctx context.Context, rawCode, verifier, redirec
 	if err != nil {
 		return tokenPair{}, err
 	}
-	return s.issueTokens(ctx, code.Edges.Owner.ID, clientID, code.Resource, code.Scope, familyID)
+	return s.issueTokens(ctx, s.ent.OAuthToken, code.Edges.Owner.ID, clientID, code.Resource, code.Scope, familyID)
 }
 
 // issueTokens mints an OAuthToken row (access + optional refresh) for a user. A
@@ -157,14 +157,17 @@ func (s *Service) redeemAuthCode(ctx context.Context, rawCode, verifier, redirec
 // The audience is the resource string, so VerifyMCPAccess can bind on it. familyID
 // is the rotation-lineage id: it is freshly minted at the authorization_code grant
 // and carried unchanged through every rotation, so a whole lineage can be revoked
-// at once when a refresh token is replayed (RFC 9700 §4.14.2).
-func (s *Service) issueTokens(ctx context.Context, userID int, clientID, resource, scope, familyID string) (tokenPair, error) {
+// at once when a refresh token is replayed (RFC 9700 §4.14.2). tokens is the client
+// to create the row on: the request-scoped s.ent.OAuthToken for the code grant, or a
+// transaction's tx.OAuthToken for a rotation (so the successor is inserted inside the
+// same locked transaction as the row it descends from).
+func (s *Service) issueTokens(ctx context.Context, tokens *ent.OAuthTokenClient, userID int, clientID, resource, scope, familyID string) (tokenPair, error) {
 	access, err := randomToken()
 	if err != nil {
 		return tokenPair{}, err
 	}
 	now := s.now()
-	create := s.ent.OAuthToken.Create().
+	create := tokens.Create().
 		SetAccessTokenHash(hashToken(access)).
 		SetFamilyID(familyID).
 		SetClientID(clientID).
@@ -193,13 +196,30 @@ func (s *Service) issueTokens(ctx context.Context, userID int, clientID, resourc
 
 // rotateRefresh validates a raw refresh token and rotates it: the presented token's
 // row is marked rotated (its refresh is now dead) and a brand-new token row (new
-// access + new refresh) is issued with the same owner/scope/resource. A rotated,
-// revoked, expired or unknown refresh token returns errBadGrant. The rotation is
-// atomic on rotated_at IS NULL, so a replayed refresh token cannot mint twice.
+// access + new refresh) is issued with the same owner/scope/resource/family. A
+// rotated, revoked, expired or unknown refresh token returns errBadGrant.
+//
+// The whole detect -> (sweep | rotate) sequence runs in ONE transaction that first
+// takes a SELECT ... FOR UPDATE lock over the entire token FAMILY. That lock is the
+// serialization point (RFC 9700 §4.14.2): a concurrent rotation of a DIFFERENT but
+// same-lineage refresh token must acquire the same family lock, so it cannot slip a
+// fresh successor past the reuse sweep. Locking only the presented row would not
+// serialize this, because the replay and the live sibling present different tokens.
+// Both interleavings are closed: if the sweep commits first, the sibling re-reads its
+// token as revoked and is refused; if the sibling commits its successor first, the
+// later sweep sees that successor (it carries the family_id) and revokes it. On SQLite
+// (tests) the lock is skipped — it is unsupported there, and the single-connection
+// test DB already serializes transactions.
 func (s *Service) rotateRefresh(ctx context.Context, rawRefresh, clientID string) (tokenPair, error) {
-	row, err := s.ent.OAuthToken.Query().
+	tx, err := s.ent.Tx(ctx)
+	if err != nil {
+		return tokenPair{}, err
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op after Commit
+
+	// Locate the presented refresh token to learn its family_id (the lock key).
+	presented, err := tx.OAuthToken.Query().
 		Where(oauthtoken.RefreshTokenHash(hashToken(rawRefresh))).
-		WithOwner().
 		Only(ctx)
 	if err != nil {
 		if ent.IsNotFound(err) {
@@ -207,19 +227,50 @@ func (s *Service) rotateRefresh(ctx context.Context, rawRefresh, clientID string
 		}
 		return tokenPair{}, err
 	}
-	// Refresh-token reuse detection (RFC 9700 §4.14.2): an ALREADY-rotated row means
-	// this refresh token was superseded by a legitimate rotation and is now being
-	// replayed — the signature of a captured/leaked token. Revoke the ENTIRE family
-	// (this row and its live successor chain) before refusing, so the attacker's and
-	// the victim's tokens all die and the victim must re-authorize. This is scoped to
-	// the already-rotated signal ONLY: an ordinary invalid/expired/wrong-client
-	// refusal below must never nuke a healthy family.
+
+	// Lock the whole family and read it back. This serializes concurrent same-family
+	// rotations. WithOwner eager-loads the owner for the issue path below.
+	famQuery := tx.OAuthToken.Query().
+		Where(oauthtoken.FamilyIDEQ(presented.FamilyID)).
+		WithOwner()
+	if s.rowLock {
+		famQuery = famQuery.ForUpdate()
+	}
+	family, err := famQuery.All(ctx)
+	if err != nil {
+		return tokenPair{}, err
+	}
+	// Re-validate the presented token from the LOCKED snapshot: never trust the
+	// pre-lock read, since a concurrent sweep may have revoked it in between.
+	var row *ent.OAuthToken
+	for _, t := range family {
+		if t.ID == presented.ID {
+			row = t
+			break
+		}
+	}
+	if row == nil { // vanished under the lock; refuse
+		return tokenPair{}, errBadGrant
+	}
+
+	// Reuse detection: an ALREADY-rotated presented token was superseded by a
+	// legitimate rotation and is now being replayed — the signature of a
+	// captured/leaked token. Revoke the ENTIRE family (this row and its live successor
+	// chain) before refusing, so attacker and victim tokens all die and the victim
+	// must re-authorize. Scoped to the already-rotated signal ONLY: the ordinary
+	// invalid/expired/wrong-client refusals below never touch a healthy family. The
+	// revoke error is propagated so a transient DB failure aborts the tx (rolled back
+	// by the defer) rather than silently skipping revocation while still refusing.
 	if row.RotatedAt != nil {
-		now := s.now()
-		_ = s.ent.OAuthToken.Update().
+		if err := tx.OAuthToken.Update().
 			Where(oauthtoken.FamilyIDEQ(row.FamilyID), oauthtoken.RevokedAtIsNil()).
-			SetRevokedAt(now).
-			Exec(ctx)
+			SetRevokedAt(s.now()).
+			Exec(ctx); err != nil {
+			return tokenPair{}, err
+		}
+		if err := tx.Commit(); err != nil {
+			return tokenPair{}, err
+		}
 		return tokenPair{}, errBadGrant
 	}
 	if row.RevokedAt != nil ||
@@ -231,23 +282,22 @@ func (s *Service) rotateRefresh(ctx context.Context, rawRefresh, clientID string
 		return tokenPair{}, errBadGrant
 	}
 
-	// Atomically retire the presented refresh token. Losing this race (row already
-	// rotated) means the same token was double-submitted concurrently; exactly one
-	// caller advances the chain and the loser is refused (no family revocation — the
-	// winner's successor is the healthy live chain).
-	n, err := s.ent.OAuthToken.Update().
-		Where(oauthtoken.ID(row.ID), oauthtoken.RotatedAtIsNil()).
-		SetRotatedAt(s.now()).
-		Save(ctx)
+	// Retire the presented refresh token and mint the successor, both inside the
+	// locked transaction. The family lock (or, on SQLite, the serialized transaction)
+	// guarantees no concurrent same-lineage rotation raced us, so a plain update is
+	// safe here.
+	if err := tx.OAuthToken.UpdateOne(row).SetRotatedAt(s.now()).Exec(ctx); err != nil {
+		return tokenPair{}, err
+	}
+	// Carry the same family_id into the successor so the whole lineage stays revocable.
+	pair, err := s.issueTokens(ctx, tx.OAuthToken, row.Edges.Owner.ID, clientID, row.Resource, row.Scope, row.FamilyID)
 	if err != nil {
 		return tokenPair{}, err
 	}
-	if n != 1 {
-		return tokenPair{}, errBadGrant
+	if err := tx.Commit(); err != nil {
+		return tokenPair{}, err
 	}
-
-	// Carry the same family_id into the successor so the whole lineage stays revocable.
-	return s.issueTokens(ctx, row.Edges.Owner.ID, clientID, row.Resource, row.Scope, row.FamilyID)
+	return pair, nil
 }
 
 // VerifyMCPAccess is the resource-server check the /mcp handler calls for an OAuth
