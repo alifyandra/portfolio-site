@@ -6,6 +6,7 @@ import (
 	"entgo.io/ent"
 	"entgo.io/ent/schema/edge"
 	"entgo.io/ent/schema/field"
+	"entgo.io/ent/schema/index"
 )
 
 // OAuthToken is an issued OAuth 2.1 access token (and optional refresh token) from
@@ -33,6 +34,10 @@ func (OAuthToken) Fields() []ent.Field {
 			Unique().
 			Sensitive().
 			Comment("SHA-256 of the opaque refresh token; null when offline_access was not granted. Rotated on every refresh grant"),
+		field.String("family_id").
+			NotEmpty().
+			Immutable().
+			Comment("Rotation-lineage id shared by every token descended from one authorization grant. On detected refresh-token reuse the whole family is revoked (RFC 9700 §4.14.2)"),
 		field.String("client_id").
 			NotEmpty().
 			Comment("The public client the token was issued to"),
@@ -69,5 +74,13 @@ func (OAuthToken) Edges() []ent.Edge {
 			Ref("oauth_tokens").
 			Unique().
 			Required(),
+	}
+}
+
+// Indexes of the OAuthToken. family_id is looked up (non-unique: a family has
+// many tokens) to revoke a whole rotation lineage on detected refresh reuse.
+func (OAuthToken) Indexes() []ent.Index {
+	return []ent.Index{
+		index.Fields("family_id"),
 	}
 }

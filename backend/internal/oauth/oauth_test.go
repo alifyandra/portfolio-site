@@ -21,6 +21,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/alifyandra/portfolio-site/backend/ent"
+	"github.com/alifyandra/portfolio-site/backend/ent/oauthtoken"
 	entuser "github.com/alifyandra/portfolio-site/backend/ent/user"
 	"github.com/alifyandra/portfolio-site/backend/internal/auth"
 	"github.com/alifyandra/portfolio-site/backend/internal/mcp"
@@ -517,15 +518,10 @@ func TestToken_RefreshRotation(t *testing.T) {
 		t.Fatalf("rotation did not issue a new refresh token (r1=%q r2=%q)", refresh1, refresh2)
 	}
 
-	// Old refresh token is now dead.
-	deadRec := h.tokenRequest(url.Values{
-		"grant_type":    {"refresh_token"},
-		"refresh_token": {refresh1},
-		"client_id":     {publicClientID},
-	})
-	assertTokenError(t, deadRec, "invalid_grant")
-
-	// New refresh token still works.
+	// New refresh token works. (Checked BEFORE the replay below: replaying the old,
+	// already-rotated token trips reuse detection, which revokes the whole family —
+	// see TestToken_RefreshReuseRevokesFamily. So the healthy-successor assertion must
+	// come first.)
 	liveRec := h.tokenRequest(url.Values{
 		"grant_type":    {"refresh_token"},
 		"refresh_token": {refresh2},
@@ -533,6 +529,76 @@ func TestToken_RefreshRotation(t *testing.T) {
 	})
 	if liveRec.Code != http.StatusOK {
 		t.Fatalf("rotated refresh token rejected: got %d", liveRec.Code)
+	}
+
+	// Old refresh token is dead: a replay is refused.
+	deadRec := h.tokenRequest(url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {refresh1},
+		"client_id":     {publicClientID},
+	})
+	assertTokenError(t, deadRec, "invalid_grant")
+}
+
+// TestToken_RefreshReuseRevokesFamily: replaying an already-rotated refresh token
+// is not merely refused — it revokes the WHOLE token family (RFC 9700 §4.14.2). So
+// the legitimate successor (token B) minted by the honest rotation is killed too,
+// forcing a re-authorization. Proves BOTH the reject AND the successor revocation.
+func TestToken_RefreshReuseRevokesFamily(t *testing.T) {
+	h := newHarness(t, true)
+	verifier, challenge := pkce()
+	code := h.mintCode(authzQuery(challenge), h.adminCookie)
+	first := h.tokenRequest(url.Values{
+		"grant_type":    {"authorization_code"},
+		"code":          {code},
+		"code_verifier": {verifier},
+		"redirect_uri":  {claudeRedirectURI},
+		"resource":      {testResource},
+		"client_id":     {publicClientID},
+	})
+	var t1 map[string]any
+	_ = json.Unmarshal(first.Body.Bytes(), &t1)
+	refresh1, _ := t1["refresh_token"].(string)
+	if refresh1 == "" {
+		t.Fatal("no refresh token from initial grant")
+	}
+
+	// Honest rotation: refresh1 -> token B (refresh2). refresh2 is the live successor.
+	rotate := h.tokenRequest(url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {refresh1},
+		"client_id":     {publicClientID},
+	})
+	if rotate.Code != http.StatusOK {
+		t.Fatalf("honest rotation: got %d, want 200; body=%s", rotate.Code, rotate.Body.String())
+	}
+	var t2 map[string]any
+	_ = json.Unmarshal(rotate.Body.Bytes(), &t2)
+	refresh2, _ := t2["refresh_token"].(string)
+	if refresh2 == "" {
+		t.Fatal("no refresh token from rotation")
+	}
+
+	// (a) Replay the OLD, already-rotated refresh token: rejected.
+	replay := h.tokenRequest(url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {refresh1},
+		"client_id":     {publicClientID},
+	})
+	assertTokenError(t, replay, "invalid_grant")
+
+	// (b) The legitimate successor (token B) is now revoked by the family sweep: its
+	// refresh no longer rotates.
+	successor := h.tokenRequest(url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {refresh2},
+		"client_id":     {publicClientID},
+	})
+	assertTokenError(t, successor, "invalid_grant")
+
+	// Every token in the family carries a revoked_at after the reuse sweep.
+	if live := h.client.OAuthToken.Query().Where(oauthtoken.RevokedAtIsNil()).CountX(h.ctx); live != 0 {
+		t.Errorf("after reuse, %d family tokens remain live, want 0", live)
 	}
 }
 
@@ -742,7 +808,7 @@ func TestMCP_AudienceMismatchRejected(t *testing.T) {
 	hnd := h.mcpHandler(true)
 
 	// Mint a token bound to the WRONG resource (audience) directly via the store.
-	pair, err := h.svc.issueTokens(h.ctx, h.admin.ID, publicClientID, "https://evil.example/mcp", "finance.read")
+	pair, err := h.svc.issueTokens(h.ctx, h.admin.ID, publicClientID, "https://evil.example/mcp", "finance.read", "fam-audience-test")
 	if err != nil {
 		t.Fatalf("issue tokens: %v", err)
 	}

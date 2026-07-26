@@ -143,13 +143,22 @@ func (s *Service) redeemAuthCode(ctx context.Context, rawCode, verifier, redirec
 		return tokenPair{}, errBadGrant
 	}
 
-	return s.issueTokens(ctx, code.Edges.Owner.ID, clientID, code.Resource, code.Scope)
+	// A brand-new rotation lineage starts here: every token descended from this
+	// grant shares this family_id, so a later refresh-reuse can revoke them all.
+	familyID, err := randomToken()
+	if err != nil {
+		return tokenPair{}, err
+	}
+	return s.issueTokens(ctx, code.Edges.Owner.ID, clientID, code.Resource, code.Scope, familyID)
 }
 
 // issueTokens mints an OAuthToken row (access + optional refresh) for a user. A
 // refresh token is only issued when offline_access is among the granted scopes.
-// The audience is the resource string, so VerifyMCPAccess can bind on it.
-func (s *Service) issueTokens(ctx context.Context, userID int, clientID, resource, scope string) (tokenPair, error) {
+// The audience is the resource string, so VerifyMCPAccess can bind on it. familyID
+// is the rotation-lineage id: it is freshly minted at the authorization_code grant
+// and carried unchanged through every rotation, so a whole lineage can be revoked
+// at once when a refresh token is replayed (RFC 9700 §4.14.2).
+func (s *Service) issueTokens(ctx context.Context, userID int, clientID, resource, scope, familyID string) (tokenPair, error) {
 	access, err := randomToken()
 	if err != nil {
 		return tokenPair{}, err
@@ -157,6 +166,7 @@ func (s *Service) issueTokens(ctx context.Context, userID int, clientID, resourc
 	now := s.now()
 	create := s.ent.OAuthToken.Create().
 		SetAccessTokenHash(hashToken(access)).
+		SetFamilyID(familyID).
 		SetClientID(clientID).
 		SetResource(resource).
 		SetScope(scope).
@@ -197,7 +207,22 @@ func (s *Service) rotateRefresh(ctx context.Context, rawRefresh, clientID string
 		}
 		return tokenPair{}, err
 	}
-	if row.RotatedAt != nil || row.RevokedAt != nil ||
+	// Refresh-token reuse detection (RFC 9700 §4.14.2): an ALREADY-rotated row means
+	// this refresh token was superseded by a legitimate rotation and is now being
+	// replayed — the signature of a captured/leaked token. Revoke the ENTIRE family
+	// (this row and its live successor chain) before refusing, so the attacker's and
+	// the victim's tokens all die and the victim must re-authorize. This is scoped to
+	// the already-rotated signal ONLY: an ordinary invalid/expired/wrong-client
+	// refusal below must never nuke a healthy family.
+	if row.RotatedAt != nil {
+		now := s.now()
+		_ = s.ent.OAuthToken.Update().
+			Where(oauthtoken.FamilyIDEQ(row.FamilyID), oauthtoken.RevokedAtIsNil()).
+			SetRevokedAt(now).
+			Exec(ctx)
+		return tokenPair{}, errBadGrant
+	}
+	if row.RevokedAt != nil ||
 		row.RefreshExpiresAt == nil || !row.RefreshExpiresAt.After(s.now()) ||
 		row.ClientID != clientID {
 		return tokenPair{}, errBadGrant
@@ -207,7 +232,9 @@ func (s *Service) rotateRefresh(ctx context.Context, rawRefresh, clientID string
 	}
 
 	// Atomically retire the presented refresh token. Losing this race (row already
-	// rotated) means the token was just replayed: refuse.
+	// rotated) means the same token was double-submitted concurrently; exactly one
+	// caller advances the chain and the loser is refused (no family revocation — the
+	// winner's successor is the healthy live chain).
 	n, err := s.ent.OAuthToken.Update().
 		Where(oauthtoken.ID(row.ID), oauthtoken.RotatedAtIsNil()).
 		SetRotatedAt(s.now()).
@@ -219,7 +246,8 @@ func (s *Service) rotateRefresh(ctx context.Context, rawRefresh, clientID string
 		return tokenPair{}, errBadGrant
 	}
 
-	return s.issueTokens(ctx, row.Edges.Owner.ID, clientID, row.Resource, row.Scope)
+	// Carry the same family_id into the successor so the whole lineage stays revocable.
+	return s.issueTokens(ctx, row.Edges.Owner.ID, clientID, row.Resource, row.Scope, row.FamilyID)
 }
 
 // VerifyMCPAccess is the resource-server check the /mcp handler calls for an OAuth
