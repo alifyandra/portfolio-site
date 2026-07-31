@@ -120,6 +120,11 @@ portfolio-site#123). Structural failures (unknown tool, bad
 params) are JSON-RPC errors; a domain/validation failure (bad date, missing query) is a
 tool-error result (`isError: true`) so the model sees the message, per MCP convention.
 
+Added later: `list_recurring_bills` (`status?`, `within_days?`, `account_id?`), the
+committed-money read over declared repeating commitments, with `committed_total` and
+`monthly_equivalent` so affordability can be answered against what is already spoken for
+rather than the raw balance (portfolio-site#125).
+
 ## Consequences
 
 - One query path serves the dashboard and the LLM, so they cannot drift.

@@ -56,12 +56,15 @@ func (Account) Fields() []ent.Field {
 }
 
 // Edges of the Account. The FKs live on the child rows (transactions, pending,
-// snapshots), so an account owns three fan-out edges.
+// snapshots, recurring bills), so an account owns four fan-out edges. The
+// recurring_bills back-reference is optional on the bill side (a bill may be paid from
+// whichever card is to hand), so it adds no column here.
 func (Account) Edges() []ent.Edge {
 	return []ent.Edge{
 		edge.To("transactions", Transaction.Type),
 		edge.To("pending_transactions", PendingTransaction.Type),
 		edge.To("balance_snapshots", BalanceSnapshot.Type),
+		edge.To("recurring_bills", RecurringBill.Type),
 	}
 }
 

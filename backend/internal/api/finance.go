@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -71,6 +72,29 @@ func (h *Handler) ingestFinance(ctx context.Context, in *ingestInput) (*ingestOu
 		}
 		return nil, huma.Error500InternalServerError("failed to ingest finance data", err)
 	}
+	// The ingest transaction has committed by now, so the bill matcher runs over rows that
+	// are already in the ledger (portfolio-site#125). Deliberately outside the ingest: a
+	// matcher bug must never reject a good window, and a fixed matcher must be re-runnable
+	// without a re-ingest. Best-effort, so a matcher failure is logged and the ingest still
+	// reports success; the admin reconcile endpoint re-runs it.
+	//
+	// The pass is bounded to the window this payload actually carried. This runs INLINE on
+	// a synchronous request on a t4g.micro, so an unbounded pass would grow a cycle per
+	// week forever and eventually time the daily sync out; scoped this way the cost tracks
+	// the ingested range, not the age of the oldest bill.
+	if !sum.DryRun {
+		var opts finance.ReconcileOptions
+		if from, to, ok := finance.PostedDateRange(&in.Body); ok {
+			opts.From, opts.To = &from, &to
+		}
+		if rec, rErr := finance.ReconcileBills(ctx, h.deps.Ent, opts); rErr != nil {
+			slog.Warn("finance: post-ingest bill reconciliation failed", "error", rErr)
+		} else if rec.PaymentsLinked > 0 {
+			slog.Info("finance: linked bill payments after ingest",
+				"linked", rec.PaymentsLinked, "cycles", rec.CyclesChecked, "compared", rec.CandidatesCompared)
+		}
+	}
+
 	out := &ingestOutput{}
 	out.Body = *sum
 	return out, nil

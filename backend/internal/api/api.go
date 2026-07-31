@@ -80,4 +80,9 @@ func (h *Handler) Register(api huma.API) {
 	h.registerFinance(api)
 	h.registerFinanceRead(api)
 	h.registerFinanceSync(api)
+	// Recurring-bill writes are admin-gated like the Admin Console groups, but they
+	// register here beside their finance siblings rather than inside registerAdmin: the
+	// feature is a finance concern (its UI lives on /finance, not /admin) and its read
+	// half is registered by registerFinanceRead.
+	h.registerAdminFinanceBills(api)
 }

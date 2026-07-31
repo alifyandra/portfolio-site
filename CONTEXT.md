@@ -293,10 +293,28 @@ as free) and an optional soft deadline. It is not a [Posted Transaction] and is 
 reconciled against one: a Wishlist Item records an intention, not money that moved.
 Resolved items are kept, not deleted, because "that was already bought" and "that was
 already decided against" are the context worth having. Recurring obligations are a
-different entity with a different lifecycle (a bill never reaches "done") and live in
-the sibling issue filed alongside portfolio-site#123. The read side feeds the admin
-dashboard and the `list_wishlist` MCP tool, so a model can weigh a new purchase against
-what is already queued. See ADR 17.
+different entity with a different lifecycle (a bill never reaches "done"): those are a
+[Recurring Bill]. The read side feeds the admin dashboard and the `list_wishlist` MCP
+tool, so a model can weigh a new purchase against what is already queued. See ADR 17.
+
+### Recurring Bill
+A repeating commitment the owner declares (rent, insurance, a subscription, a utility):
+a cadence plus one anchor date, an expected amount, and an optional [Financial Account]
+it is paid from. It is a declaration, not a ledger row, so it holds what the ledger
+cannot infer: what is already spoken for and when the next charge falls due. Every
+occurrence is derived from (cadence, anchor date), so the next due date is computed on
+read and never stored. Contrast with a [Posted Transaction], which records what already
+happened, and with a wishlist item, which is a one-off want with a terminal state: a
+Recurring Bill never completes, it recurs. _Avoid_: subscription, direct debit.
+
+### Bill Payment
+The link between one cycle of a [Recurring Bill] and the [Posted Transaction] that paid
+it, identified by the cycle's derived due date rather than the posted date. It carries no
+amount: the expectation lives on the bill and the actual figure lives on the transaction,
+so the two can never drift apart, and the pair differing is how a repriced bill is
+spotted. Created either by the matching pass (from the bill's owner-typed match pattern,
+amount tolerance and date window) or by hand, and a hand-made link is never overwritten
+by the pass. A cycle with no Bill Payment past its window is a missed bill.
 
 ## Naming conventions
 
