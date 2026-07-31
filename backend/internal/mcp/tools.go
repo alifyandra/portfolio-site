@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
@@ -535,7 +536,7 @@ func toolDefinitions() []map[string]any {
 		},
 		{
 			"name":        "balance_history",
-			"description": "Balance trend over time for one account or every account: the balance as the bank reported it, bucketed into day, week or month steps. Each point is the LAST reading in its bucket (close-of-period), because a balance is a level rather than a sum: points are never averaged or added together. Buckets align to Australia/Melbourne local boundaries, so a month bucket starts on the local 1st and a week bucket on the local Monday. A bucket with no reading repeats the previous close and is marked \"carried\": true, so a missed sync does not read as a balance change; buckets before a series' start are omitted rather than back-filled. Each series also carries first, last, change and change_pct, so \"is this going up or down\" needs no arithmetic over the points. step defaults to \"month\" and the window to the last 12 months, which keeps a year of history cheap to read; ask for \"day\" only over a short window. Omit account_id to get every account as a separate series. Set basis=\"ledger\" to derive the same series from posted transactions instead, which adds per-bucket open, close, in, out, net, external_in, external_out and txns, and reaches back as far as the ledger does rather than as far as the balance readings do (the readings only started accumulating recently, so basis=\"ledger\" is where the depth is). Under basis=\"ledger\" every point carries \"source\": \"balance_after\" means the bank's own running balance at that bucket's last row and cannot drift, \"accumulated\" means arithmetic walked from the newest balance reading and is exact only if the ledger in between is complete, \"carried\" means a repeat of the previous close. Ledger flows use the SAME internal-transfer rule as spending_summary and monthly_summary: in/out are gross over every posted row, external_in/external_out exclude transfers between the owner's own accounts, card payments and StepPay repayments, out and external_out are positive figures, and txns counts every row including internal legs. Each series reports ledger_from (the oldest posted row, so a flat line is distinguishable from a ledger that does not reach that far back), start_unverified when the earliest bucket's opening had to be synthesized, per-bucket drift where a balance reading falls in the same bucket (nonzero means a dropped or duplicated transaction), flow_mismatch when close - open does not equal net, and drift_max for the series. investment accounts are excluded from basis=\"ledger\" because their balance moves with the market with no transaction behind it. If a request would exceed the point budget the response carries \"truncated\": true, in which case coarsen step or narrow the window. To ask how much was spent or earned in a period use spending_summary or monthly_summary; this tool answers where the balance stood.",
+			"description": "Balance trend over time for one account or every account: the balance as the bank reported it, bucketed into day, week or month steps. Each point is the LAST reading in its bucket (close-of-period), because a balance is a level rather than a sum: points are never averaged or added together. Buckets align to Australia/Melbourne local boundaries, so a month bucket starts on the local 1st and a week bucket on the local Monday, and each point's as_of is the bucket START rendered in that local zone (e.g. 2026-08-01T00:00:00+10:00), so read the date off it directly rather than converting to UTC first. A bucket with no reading repeats the previous close and is marked \"carried\": true, so a missed sync does not read as a balance change; buckets before a series' start are omitted rather than back-filled. Each series also carries first, last, change and change_pct, so \"is this going up or down\" needs no arithmetic over the points. step defaults to \"month\" and the window to the last 12 months, which keeps a year of history cheap to read; ask for \"day\" only over a short window. Omit account_id to get every account as a separate series. Set basis=\"ledger\" to derive the same series from posted transactions instead, which adds per-bucket open, close, in, out, net, external_in, external_out and txns, and reaches back as far as the ledger does rather than as far as the balance readings do (the readings only started accumulating recently, so basis=\"ledger\" is where the depth is). Under basis=\"ledger\" every point carries \"source\": \"balance_after\" means the bank's own running balance at that bucket's last row and cannot drift, \"accumulated\" means arithmetic walked from the newest balance reading and is exact only if the ledger in between is complete, \"carried\" means a repeat of the previous close. Ledger flows use the SAME internal-transfer rule as spending_summary and monthly_summary: in/out are gross over every posted row, external_in/external_out exclude transfers between the owner's own accounts, card payments and StepPay repayments, out and external_out are positive figures, and txns counts every row including internal legs. Each series reports ledger_from (the oldest posted row, so a flat line is distinguishable from a ledger that does not reach that far back), start_unverified when the earliest bucket's opening had to be synthesized, per-bucket drift where a balance reading falls in the same bucket (nonzero means a dropped or duplicated transaction), flow_mismatch when either reconciliation check fails for that bucket (close - open not equalling net, meaning a row is missing from the bucket, OR two consecutive rows whose running balances differ by something other than the intervening amount, which catches offsetting errors that leave the bucket total intact; the offending row ids are logged), and drift_max for the series. investment accounts are excluded from basis=\"ledger\" because their balance moves with the market with no transaction behind it. If a request would exceed the point budget the response carries \"truncated\": true, in which case coarsen step or narrow the window. To ask how much was spent or earned in a period use spending_summary or monthly_summary; this tool answers where the balance stood.",
 			"inputSchema": objectSchema(map[string]any{
 				"account_id": intProp("Restrict to one account id; omit or 0 for every account as its own series."),
 				"step":       strProp("Bucket width: day, week or month. Defaults to month."),
@@ -712,34 +713,75 @@ var (
 	balanceLedgerPointBudget   = 150
 )
 
+// allotPoints shares the point budget across the series, water-filling from the shallowest
+// so a series is never trimmed below what it would have fitted on its own.
+//
+// An even budget/n split looks fair and is not: two series of 149 and 5 points against a
+// budget of 150 would drop 74 points to save 4, and report a truncation for a request only 3%
+// over. Filling the small ones first hands the whole remainder to the deep one, which drops
+// the 4 points actually over budget and nothing else.
+func allotPoints(series []finance.BalanceSeriesView, budget int) []int {
+	allot := make([]int, len(series))
+	total := 0
+	for i, s := range series {
+		allot[i] = len(s.Points)
+		total += len(s.Points)
+	}
+	if total <= budget || len(series) == 0 {
+		return allot
+	}
+
+	// Ascending by size, so each pass gives a series either all it wants or an equal share of
+	// what is left.
+	idx := make([]int, len(series))
+	for i := range idx {
+		idx[i] = i
+	}
+	sort.SliceStable(idx, func(a, b int) bool {
+		return len(series[idx[a]].Points) < len(series[idx[b]].Points)
+	})
+
+	remaining := budget
+	left := len(idx)
+	for _, i := range idx {
+		share := remaining / left
+		if share < 1 {
+			share = 1 // never starve a series out of the answer entirely
+		}
+		if n := len(series[i].Points); n < share {
+			share = n
+		}
+		allot[i] = share
+		remaining -= share
+		if remaining < 0 {
+			remaining = 0
+		}
+		left--
+	}
+	return allot
+}
+
 // toBalanceSeriesResults maps the read-service series to the tool payload, applying the
-// point budget. The budget is shared evenly across the series present so one deep account
-// cannot starve the rest, and each series keeps its NEWEST buckets. The bool return is
-// truncated: it is set only when a series was actually trimmed, so its absence means a
-// complete answer.
+// point budget (see allotPoints). Each series keeps its NEWEST buckets, mirroring how
+// externalScanCap truncates. The bool return is truncated: it is set only when a series was
+// actually trimmed, so its absence means a complete answer.
 func toBalanceSeriesResults(series []finance.BalanceSeriesView, basis finance.BalanceBasis) ([]balanceSeriesResult, bool) {
 	budget := balanceSnapshotPointBudget
 	if basis == finance.BasisLedger {
 		budget = balanceLedgerPointBudget
 	}
-	total := 0
+	allot := allotPoints(series, budget)
+	computed := 0
 	for _, s := range series {
-		total += len(s.Points)
-	}
-	perSeries := 0
-	if total > budget && len(series) > 0 {
-		perSeries = budget / len(series)
-		if perSeries < 1 {
-			perSeries = 1
-		}
+		computed += len(s.Points)
 	}
 
 	truncated := false
 	out := make([]balanceSeriesResult, 0, len(series))
-	for _, s := range series {
+	for i, s := range series {
 		pts := s.Points
-		if perSeries > 0 && len(pts) > perSeries {
-			pts = pts[len(pts)-perSeries:]
+		if len(pts) > allot[i] {
+			pts = pts[len(pts)-allot[i]:]
 			truncated = true
 		}
 		r := balanceSeriesResult{
@@ -775,14 +817,18 @@ func toBalanceSeriesResults(series []finance.BalanceSeriesView, basis finance.Ba
 	}
 	if truncated {
 		slog.Warn("finance: balance_history hit the point budget; the oldest buckets were dropped from at least one series",
-			"budget", budget, "basis", string(basis), "series", len(series), "points", total)
+			"budget", budget, "basis", string(basis), "series", len(series), "points", computed)
 	}
 	return out, truncated
 }
 
+// toBalancePointResult maps one bucket to the tool payload. Every point the tool emits is a
+// bucket START (the tool has no raw mode), so as_of is rendered in the bucket zone: the UTC
+// form of a local midnight names the period BEFORE the bucket it labels, which would make a
+// model attribute every close and every in/out total to the wrong month or day.
 func toBalancePointResult(p finance.BalancePoint) balancePointResult {
 	r := balancePointResult{
-		AsOf:        p.AsOf.UTC().Format(time.RFC3339),
+		AsOf:        p.AsOf.In(finance.BucketZone()).Format(time.RFC3339),
 		Balance:     p.Balance,
 		Open:        p.Open,
 		Close:       p.Close,

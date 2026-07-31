@@ -21,6 +21,7 @@ import (
 	"github.com/alifyandra/portfolio-site/backend/ent/user"
 	"github.com/alifyandra/portfolio-site/backend/ent/wishlistitem"
 	"github.com/alifyandra/portfolio-site/backend/internal/auth"
+	"github.com/alifyandra/portfolio-site/backend/internal/finance"
 )
 
 // newFinanceReadTestAPI wires the finance read endpoints with the real auth
@@ -443,6 +444,73 @@ func TestFinanceBalanceHistory_LedgerBasisDTO(t *testing.T) {
 	}
 	if p.FlowMismatch != nil {
 		t.Errorf("flow_mismatch = %v, want absent on a consistent bucket", p.FlowMismatch)
+	}
+}
+
+// TestFinanceBalanceHistory_BucketStartsRenderInLocalZone: a bucket start is a local
+// midnight, so rendering it in UTC names the calendar period BEFORE the bucket it labels
+// (the August month bucket becomes 2026-07-31T14:00:00Z, which reads as July). Bucketed
+// points must therefore carry the local offset. Raw points are reading instants, not bucket
+// labels, so they keep UTC.
+func TestFinanceBalanceHistory_BucketStartsRenderInLocalZone(t *testing.T) {
+	api, client := newFinanceReadTestAPI(t)
+	ctx := context.Background()
+	admin := sessionCookieFor(t, ctx, client, user.RoleAdmin)
+	acc := client.Account.Create().SetSource("commbank").SetName("A").
+		SetType(account.TypeEveryday).SetClass(account.ClassAsset).SetCurrency("AUD").SaveX(ctx)
+
+	mel := finance.BucketZone()
+	// 9am Melbourne on the local 1st of August is 23:00 UTC on 31 July, the exact case a
+	// UTC-rendered bucket start misattributes. The December reading covers daylight saving.
+	aug := time.Date(2026, 8, 1, 9, 0, 0, 0, mel).UTC()
+	dec := time.Date(2026, 12, 1, 9, 0, 0, 0, mel).UTC()
+	client.BalanceSnapshot.Create().SetBalance(100).SetAsOf(aug).SetAccountID(acc.ID).SaveX(ctx)
+	client.BalanceSnapshot.Create().SetBalance(200).SetAsOf(dec).SetAccountID(acc.ID).SaveX(ctx)
+
+	base := "/api/finance/accounts/" + strconv.Itoa(acc.ID) + "/balances"
+
+	// days=0 is the full history, so the window does not depend on the clock.
+	resp := api.Get(base+"?step=month&days=0", admin)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("step=month = %d, want 200; body=%s", resp.Code, resp.Body.String())
+	}
+	var body struct {
+		Points []BalancePointDTO `json:"points"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Points) != 5 {
+		t.Fatalf("points = %d, want 5 (Aug..Dec)", len(body.Points))
+	}
+	if got, want := body.Points[0].AsOf, "2026-08-01T00:00:00+10:00"; got != want {
+		t.Errorf("first bucket as_of = %q, want %q (a UTC rendering would name July)", got, want)
+	}
+	if got, want := body.Points[4].AsOf, "2026-12-01T00:00:00+11:00"; got != want {
+		t.Errorf("last bucket as_of = %q, want %q (+11 under daylight saving)", got, want)
+	}
+	// Every bucketed point must parse back to a local midnight on the local 1st.
+	for i, p := range body.Points {
+		ts, err := time.Parse(time.RFC3339, p.AsOf)
+		if err != nil {
+			t.Fatalf("point %d as_of %q is not RFC3339: %v", i, p.AsOf, err)
+		}
+		lt := ts.In(mel)
+		if lt.Day() != 1 || lt.Hour() != 0 {
+			t.Errorf("point %d as_of = %q, want a local-midnight 1st", i, p.AsOf)
+		}
+	}
+
+	// The raw series is unchanged: reading instants in UTC.
+	resp = api.Get(base+"?days=0", admin)
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode raw: %v", err)
+	}
+	if len(body.Points) != 2 {
+		t.Fatalf("raw points = %d, want 2", len(body.Points))
+	}
+	if got, want := body.Points[0].AsOf, "2026-07-31T23:00:00Z"; got != want {
+		t.Errorf("raw as_of = %q, want %q (a reading instant, still UTC)", got, want)
 	}
 }
 

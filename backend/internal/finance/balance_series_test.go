@@ -689,13 +689,20 @@ func TestLedgerSeries_CarriedBucketHasZeroFlows(t *testing.T) {
 func TestLedgerSeries_FlowsMatchSpendingSummary(t *testing.T) {
 	client := newFinanceTestClient(t)
 	ctx := context.Background()
-	checking, _, _ := seedOwnerAccounts(t, ctx, client)
+	// Two invented masked numbers, so the internal-transfer classifier has an own-account
+	// counterparty to recognise without reusing any value seeded elsewhere.
+	checking := client.Account.Create().SetSource("commbank").SetName("A spending").
+		SetMaskedNumber("xxxx 4242").SetType(account.TypeEveryday).SetClass(account.ClassAsset).
+		SetCurrency("AUD").SaveX(ctx)
+	client.Account.Create().SetSource("commbank").SetName("B saving").
+		SetMaskedNumber("xxxx 4343").SetType(account.TypeSavings).SetClass(account.ClassAsset).
+		SetCurrency("AUD").SaveX(ctx)
 
 	day := utcDay(2026, 7, 15)
-	// External in, external out, and an internal transfer to the owner's own saver.
+	// External in, external out, and an internal transfer to the owner's own second account.
 	seedTxnAfter(t, ctx, client, checking, "ts1", day, 3000, 4000, "SALARY")
 	seedTxnAfter(t, ctx, client, checking, "ts2", day, -500, 3500, "RENT DIRECT DEBIT")
-	seedTxnAfter(t, ctx, client, checking, "ts3", day, -1000, 2500, "Transfer to xx5353")
+	seedTxnAfter(t, ctx, client, checking, "ts3", day, -1000, 2500, "Transfer to xx4343")
 
 	series, err := BalanceSeries(ctx, client, BalanceSeriesFilter{AccountID: checking.ID, Step: StepDay, Basis: BasisLedger})
 	if err != nil {
@@ -887,6 +894,281 @@ func TestLedgerSeries_RowToRowCheckFlagsTheBucket(t *testing.T) {
 	s := onlySeries(t, series)
 	if !s.Points[1].FlowMismatch {
 		t.Error("flow_mismatch = false on the bucket whose running balance does not tie to its amount")
+	}
+}
+
+// TestLedgerSeries_WindowedPathANeverFabricatesZero is the regression for the worst output
+// this code could produce. The window opens AFTER the newest snapshot and the bucket
+// immediately before it holds no running-balance row, which is common at step=day. Reading a
+// previous close straight out of the preceding bucket returned 0 there, so every emitted
+// point came back as a confident zero balance.
+func TestLedgerSeries_WindowedPathANeverFabricatesZero(t *testing.T) {
+	client := newFinanceTestClient(t)
+	ctx := context.Background()
+	a := seedAccount(t, ctx, client, "A", account.ClassAsset, account.TypeEveryday)
+
+	seedTxnAfter(t, ctx, client, a, "z1", utcDay(2026, 6, 1), -10, 990, "MERCHANT")
+	seedTxnAfter(t, ctx, client, a, "z2", utcDay(2026, 6, 3), -20, 970, "MERCHANT")
+	// The newest reading is on Jun 1, well before the window.
+	seedSnapshot(t, ctx, client, a, 990, mel(2026, 6, 1, 18).UTC())
+
+	from := utcDay(2026, 6, 5)
+	to := utcDay(2026, 6, 6)
+	series, err := BalanceSeries(ctx, client, BalanceSeriesFilter{
+		AccountID: a.ID, Step: StepDay, Basis: BasisLedger, From: &from, To: &to,
+	})
+	if err != nil {
+		t.Fatalf("BalanceSeries: %v", err)
+	}
+	s := onlySeries(t, series)
+	if len(s.Points) != 2 {
+		t.Fatalf("points = %d, want 2 (Jun 5 and Jun 6)", len(s.Points))
+	}
+	for i, p := range s.Points {
+		if p.Balance == 0 {
+			t.Fatalf("point %d balance = 0: a level was fabricated out of an unassigned bucket", i)
+		}
+		if !near(p.Balance, 970) {
+			t.Errorf("point %d balance = %.2f, want the last known close 970", i, p.Balance)
+		}
+		if got := f64(t, p.Open, "open"); !near(got, 970) {
+			t.Errorf("point %d open = %.2f, want 970", i, got)
+		}
+		if !p.Carried || p.Source != SourceCarried {
+			t.Errorf("point %d = carried %v / source %q, want a carried repeat", i, p.Carried, p.Source)
+		}
+		if p.FlowMismatch {
+			t.Errorf("point %d flagged flow_mismatch on a quiet carried bucket", i)
+		}
+	}
+	// The level was established before the window, so its opening is a real previous close.
+	if s.StartUnverified {
+		t.Error("start_unverified = true, but the level came from a bucket before the window")
+	}
+}
+
+// TestLedgerSeries_NoFabricatedZeroAcrossAnyWindow sweeps every single-day and multi-day
+// window over a sparse fixture on BOTH derivation paths and asserts no emitted point is a
+// level nobody ever measured. The structural guarantee is that a point is only emitted once a
+// level has been established, either by the anchor reading or by a bucket carrying the bank's
+// own running balance, so a zero cannot be reached; this is the empirical half of that.
+func TestLedgerSeries_NoFabricatedZeroAcrossAnyWindow(t *testing.T) {
+	client := newFinanceTestClient(t)
+	ctx := context.Background()
+
+	covered := seedAccount(t, ctx, client, "A covered", account.ClassAsset, account.TypeEveryday)
+	walked := seedAccount(t, ctx, client, "B walked", account.ClassLiability, account.TypeCreditCard)
+
+	// Sparse on purpose: long quiet stretches either side of the rows, so most windows open on
+	// a bucket with nothing in it.
+	seedTxnAfter(t, ctx, client, covered, "s1", utcDay(2026, 6, 5), -10, 990, "MERCHANT")
+	seedTxnAfter(t, ctx, client, covered, "s2", utcDay(2026, 6, 12), -20, 970, "MERCHANT")
+	seedSnapshot(t, ctx, client, covered, 990, mel(2026, 6, 5, 18).UTC())
+
+	seedTxnNoAfter(t, ctx, client, walked, "w1", utcDay(2026, 6, 5), -10, "MERCHANT")
+	seedTxnNoAfter(t, ctx, client, walked, "w2", utcDay(2026, 6, 12), -20, "MERCHANT")
+	seedSnapshot(t, ctx, client, walked, -500, mel(2026, 6, 12, 18).UTC())
+
+	for _, accID := range []int{covered.ID, walked.ID} {
+		for _, step := range []BalanceStep{StepDay, StepWeek, StepMonth} {
+			for startDay := 1; startDay <= 25; startDay++ {
+				for _, length := range []int{0, 3, 10} {
+					from := utcDay(2026, 6, startDay)
+					to := utcDay(2026, 6, startDay+length)
+					series, err := BalanceSeries(ctx, client, BalanceSeriesFilter{
+						AccountID: accID, Step: step, Basis: BasisLedger, From: &from, To: &to,
+					})
+					if err != nil {
+						t.Fatalf("BalanceSeries: %v", err)
+					}
+					s := onlySeries(t, series)
+					for i, p := range s.Points {
+						if p.Balance == 0 {
+							t.Fatalf("acct %d step %s window Jun %d+%d: point %d has a fabricated zero balance",
+								accID, step, startDay, length, i)
+						}
+						// Every point must also carry an open, and a carried point must repeat
+						// the level rather than reset it.
+						if p.Open == nil || p.Close == nil {
+							t.Fatalf("acct %d step %s window Jun %d+%d: point %d missing open/close",
+								accID, step, startDay, length, i)
+						}
+						if p.Carried && !near(*p.Open, *p.Close) {
+							t.Fatalf("acct %d step %s window Jun %d+%d: carried point %d moved the level",
+								accID, step, startDay, length, i)
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// TestLedgerSeries_NoLevelBeforeWindowEmitsNothing: with no running-balance row anywhere at
+// or before the requested buckets, there is nothing to carry in, so leading buckets are
+// omitted rather than filled with a zero.
+func TestLedgerSeries_NoLevelBeforeWindowEmitsNothing(t *testing.T) {
+	client := newFinanceTestClient(t)
+	ctx := context.Background()
+	a := seedAccount(t, ctx, client, "A", account.ClassAsset, account.TypeEveryday)
+	// The only covered row is AFTER the window, so within the window nothing is known.
+	seedTxnAfter(t, ctx, client, a, "nl1", utcDay(2026, 6, 10), -10, 990, "MERCHANT")
+
+	from := utcDay(2026, 6, 10)
+	to := utcDay(2026, 6, 11)
+	series, err := BalanceSeries(ctx, client, BalanceSeriesFilter{
+		AccountID: a.ID, Step: StepDay, Basis: BasisLedger, From: &from, To: &to,
+	})
+	if err != nil {
+		t.Fatalf("BalanceSeries: %v", err)
+	}
+	s := onlySeries(t, series)
+	// Jun 10 establishes the level, Jun 11 carries it. Neither is a zero.
+	if len(s.Points) != 2 {
+		t.Fatalf("points = %d, want 2", len(s.Points))
+	}
+	if !near(s.Points[0].Balance, 990) || !near(s.Points[1].Balance, 990) {
+		t.Errorf("balances = %.2f/%.2f, want 990/990", s.Points[0].Balance, s.Points[1].Balance)
+	}
+	if !s.StartUnverified {
+		t.Error("start_unverified = false, but the first emitted bucket's opening was synthesized")
+	}
+}
+
+// TestLedgerSeries_MixedBucketClosesOnTheAccumulatedLevel: when a bucket's LAST row carries
+// no running balance, the close must be accumulated the remaining distance rather than
+// stopping at a stale mid-bucket figure, and the provenance must not claim to be the bank's.
+func TestLedgerSeries_MixedBucketClosesOnTheAccumulatedLevel(t *testing.T) {
+	client := newFinanceTestClient(t)
+	ctx := context.Background()
+	a := seedAccount(t, ctx, client, "A", account.ClassAsset, account.TypeEveryday)
+
+	seedTxnAfter(t, ctx, client, a, "mb1", utcDay(2026, 6, 1), -10, 990, "MERCHANT")
+	seedTxnAfter(t, ctx, client, a, "mb2", utcDay(2026, 6, 2), -20, 970, "MERCHANT")
+	// Trailing row with no running balance: the true close is 970 - 5 = 965.
+	seedTxnNoAfter(t, ctx, client, a, "mb3", utcDay(2026, 6, 3), -5, "MERCHANT")
+
+	series, err := BalanceSeries(ctx, client, BalanceSeriesFilter{AccountID: a.ID, Step: StepMonth, Basis: BasisLedger})
+	if err != nil {
+		t.Fatalf("BalanceSeries: %v", err)
+	}
+	s := onlySeries(t, series)
+	if len(s.Points) != 1 {
+		t.Fatalf("points = %d, want 1 month bucket", len(s.Points))
+	}
+	p := s.Points[0]
+	if got := f64(t, p.Close, "close"); !near(got, 965) {
+		t.Errorf("close = %.2f, want 965 (970 accumulated over the trailing uncovered row)", got)
+	}
+	if p.Source != SourceAccumulated {
+		t.Errorf("source = %q, want %q: the close is not the bank's own figure", p.Source, SourceAccumulated)
+	}
+	// Opening the month is 1000, and close - open must still equal net.
+	if got := f64(t, p.Open, "open"); !near(got, 1000) {
+		t.Errorf("open = %.2f, want 1000", got)
+	}
+	if p.FlowMismatch {
+		t.Error("flow_mismatch set on a bucket that now ties out")
+	}
+}
+
+// TestLedgerSeries_BothPathsAgreeOnQuietBuckets: an empty bucket must report carried with
+// zero flows on the walked path exactly as it does on the running-balance path. Before the
+// fix the walk assigned every bucket a close, so a walked series never produced a carried
+// point at all, which killed the chart's dashed rendering for the accounts that need it most.
+func TestLedgerSeries_BothPathsAgreeOnQuietBuckets(t *testing.T) {
+	client := newFinanceTestClient(t)
+	ctx := context.Background()
+
+	// Same amounts, same days, on two accounts: one carrying running balances, one not.
+	covered := seedAccount(t, ctx, client, "A covered", account.ClassAsset, account.TypeEveryday)
+	walked := seedAccount(t, ctx, client, "B walked", account.ClassAsset, account.TypeSavings)
+
+	// Jun 2 is deliberately quiet on both.
+	seedTxnAfter(t, ctx, client, covered, "bp1", utcDay(2026, 6, 1), -100, 900, "MERCHANT")
+	seedTxnAfter(t, ctx, client, covered, "bp2", utcDay(2026, 6, 3), -200, 700, "MERCHANT")
+	seedTxnAfter(t, ctx, client, covered, "bp3", utcDay(2026, 6, 4), -50, 650, "MERCHANT")
+
+	seedTxnNoAfter(t, ctx, client, walked, "bw1", utcDay(2026, 6, 1), -100, "MERCHANT")
+	seedTxnNoAfter(t, ctx, client, walked, "bw2", utcDay(2026, 6, 3), -200, "MERCHANT")
+	seedTxnNoAfter(t, ctx, client, walked, "bw3", utcDay(2026, 6, 4), -50, "MERCHANT")
+	// Anchor the walk on the newest bucket at the same level the covered account closes at.
+	seedSnapshot(t, ctx, client, walked, 650, mel(2026, 6, 4, 18).UTC())
+
+	get := func(id int) BalanceSeriesView {
+		series, err := BalanceSeries(ctx, client, BalanceSeriesFilter{AccountID: id, Step: StepDay, Basis: BasisLedger})
+		if err != nil {
+			t.Fatalf("BalanceSeries: %v", err)
+		}
+		return onlySeries(t, series)
+	}
+	c := get(covered.ID)
+	w := get(walked.ID)
+
+	if len(c.Points) != 4 || len(w.Points) != 4 {
+		t.Fatalf("points = %d covered / %d walked, want 4 each", len(c.Points), len(w.Points))
+	}
+	// The quiet Jun 2 bucket, index 1, must look the same on both paths.
+	for name, s := range map[string]BalanceSeriesView{"covered": c, "walked": w} {
+		q := s.Points[1]
+		if !q.Carried {
+			t.Errorf("%s: quiet bucket carried = false, want true", name)
+		}
+		if q.Source != SourceCarried {
+			t.Errorf("%s: quiet bucket source = %q, want %q", name, q.Source, SourceCarried)
+		}
+		if f64(t, q.In, "in") != 0 || f64(t, q.Out, "out") != 0 || f64(t, q.Net, "net") != 0 {
+			t.Errorf("%s: quiet bucket has nonzero flows", name)
+		}
+		if q.Txns == nil || *q.Txns != 0 {
+			t.Errorf("%s: quiet bucket txns = %v, want 0", name, q.Txns)
+		}
+		if q.FlowMismatch {
+			t.Errorf("%s: quiet bucket flagged flow_mismatch", name)
+		}
+	}
+	// And the two paths must agree on every close and open, since the data is identical.
+	for i := range c.Points {
+		if !near(c.Points[i].Balance, w.Points[i].Balance) {
+			t.Errorf("point %d: covered close %.2f != walked close %.2f", i, c.Points[i].Balance, w.Points[i].Balance)
+		}
+		if !near(f64(t, c.Points[i].Open, "open"), f64(t, w.Points[i].Open, "open")) {
+			t.Errorf("point %d: opens disagree between the two paths", i)
+		}
+	}
+}
+
+// TestLedgerSeries_OffsettingRowErrorsStillFlag: two row-level errors that cancel leave the
+// bucket total intact, so the close - open == net check stays silent. The consecutive
+// running-balance check is what catches them.
+func TestLedgerSeries_OffsettingRowErrorsStillFlag(t *testing.T) {
+	client := newFinanceTestClient(t)
+	ctx := context.Background()
+	a := seedAccount(t, ctx, client, "A", account.ClassAsset, account.TypeEveryday)
+
+	// 900 -> 750 is -150 against a stated -100; 750 -> 700 is -50 against a stated -100. The
+	// two errors offset, so over the month close - open == net exactly.
+	seedTxnAfter(t, ctx, client, a, "of1", utcDay(2026, 6, 1), -100, 900, "MERCHANT")
+	seedTxnAfter(t, ctx, client, a, "of2", utcDay(2026, 6, 2), -100, 750, "MERCHANT")
+	seedTxnAfter(t, ctx, client, a, "of3", utcDay(2026, 6, 3), -100, 700, "MERCHANT")
+
+	series, err := BalanceSeries(ctx, client, BalanceSeriesFilter{AccountID: a.ID, Step: StepMonth, Basis: BasisLedger})
+	if err != nil {
+		t.Fatalf("BalanceSeries: %v", err)
+	}
+	s := onlySeries(t, series)
+	if len(s.Points) != 1 {
+		t.Fatalf("points = %d, want 1", len(s.Points))
+	}
+	p := s.Points[0]
+	open := f64(t, p.Open, "open")
+	close := f64(t, p.Close, "close")
+	net := f64(t, p.Net, "net")
+	if !near(close-open, net) {
+		t.Fatalf("fixture is wrong: close - open = %.2f already differs from net %.2f, so the bucket check would catch it", close-open, net)
+	}
+	if !p.FlowMismatch {
+		t.Error("flow_mismatch = false: offsetting row-level errors escaped both checks")
 	}
 }
 

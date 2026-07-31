@@ -222,6 +222,17 @@ func seriesAccounts(ctx context.Context, client *ent.Client, accountID int) ([]*
 	return q.All(ctx)
 }
 
+// BucketZone is the zone bucket starts are expressed in. An adapter MUST render a bucket
+// start in this zone rather than in UTC: a bucket start is a local midnight, so the UTC form
+// of the August month bucket is 2026-07-31T14:00:00Z, which names JULY. Anything reading
+// that payload (an LLB especially) would attribute the bucket's close and its whole in/out
+// total to the wrong month or day. Rendered in this zone the same instant is
+// 2026-08-01T00:00:00+10:00, which is still RFC3339 and cannot be misread.
+//
+// Raw per-reading points are NOT bucket starts (they are the bank's intra-day reading
+// instants), so those keep their UTC rendering, where there is nothing to misattribute.
+func BucketZone() *time.Location { return bucketLoc }
+
 // LocalToday is today's date in the bucket zone, normalised to UTC midnight the way every
 // stored finance date is, so it keys straight into today's bucket. Callers that need a
 // default "to" bound use it rather than time.Now().UTC(), which is the previous local day
@@ -416,7 +427,17 @@ type ledgerBucket struct {
 	txns  int
 	tally spendTally
 
-	lastAfter *float64 // the bank's running balance at the bucket's last row that carries one
+	// lastAfter is the bank's running balance at the LAST row in the bucket that carries one,
+	// and netAfterLast is the sum of the amounts of the rows following it. When the bucket's
+	// final row carries a running balance netAfterLast is 0 and the close is the bank's own
+	// figure; when it does not, the close has to be accumulated the remaining distance, or a
+	// mixed bucket would close on a stale mid-bucket level while claiming to be the bank's
+	// figure.
+	lastAfter    *float64
+	netAfterLast float64
+	lastCovered  bool     // the bucket's FINAL row carries a running balance
+	firstAfter   *float64 // the running balance at the FIRST row in the bucket that carries one
+	netThruFirst float64  // sum of amounts from the bucket's start through that first row
 
 	close    float64
 	hasClose bool
@@ -521,6 +542,27 @@ func ledgerSeries(ctx context.Context, client *ent.Client, acc *ent.Account, f B
 			derivHi = ab
 		}
 	}
+	// It also has to reach back to the newest row carrying the bank's running balance BEFORE
+	// the window, which is what primes a windowed series on the balance_after path the way
+	// the snapshot path primes from the newest reading before its window. Without it a window
+	// opening on a quiet stretch has no level to carry in, and the leading buckets would have
+	// to be dropped even though the bank told us the level a few rows earlier. On an account
+	// with no running balances at all this query finds nothing and the range is untouched, so
+	// it self-limits to the path that needs it.
+	priorCovered, err := client.Transaction.Query().
+		Where(hasAcc,
+			transaction.PostedDateLT(queryBound(derivLo)),
+			transaction.BalanceAfterNotNil()).
+		Order(ent.Desc(transaction.FieldPostedDate), ent.Desc(transaction.FieldID)).
+		First(ctx)
+	if err != nil && !ent.IsNotFound(err) {
+		return v, err
+	}
+	if priorCovered != nil {
+		if pb := bucketStart(priorCovered.PostedDate, f.Step); pb.Before(derivLo) {
+			derivLo = pb
+		}
+	}
 	if lfb := bucketStart(ledgerFrom, f.Step); derivLo.Before(lfb) {
 		derivLo = lfb
 	}
@@ -583,17 +625,38 @@ func ledgerSeries(ctx context.Context, client *ent.Client, acc *ent.Account, f B
 		// out to those tools over the same window. An internal transfer counts once, on its
 		// outbound leg, which is that shared behaviour and not a bug to fix here.
 		lb.tally.add(t.Amount, t.Description, own4)
+		if lb.firstAfter == nil {
+			// Accumulates only up to and including the first covered row, so
+			// (firstAfter - netThruFirst) is the level at the bucket's opening edge.
+			lb.netThruFirst += t.Amount
+		}
 		if t.BalanceAfter != nil {
 			lb.lastAfter = t.BalanceAfter
+			lb.netAfterLast = 0
+			lb.lastCovered = true
+			if lb.firstAfter == nil {
+				lb.firstAfter = t.BalanceAfter
+			}
+		} else {
+			lb.lastCovered = false
+			lb.netAfterLast += t.Amount
 		}
 	}
 
 	if pathBalanceAfter {
 		for _, lb := range order {
-			if lb.lastAfter != nil {
-				lb.close = *lb.lastAfter
-				lb.hasClose = true
+			if lb.lastAfter == nil {
+				continue
+			}
+			lb.close = *lb.lastAfter + lb.netAfterLast
+			lb.hasClose = true
+			// The provenance must not overstate confidence: only a bucket whose LAST row
+			// carries the bank's running balance closes on the bank's own figure. A mixed
+			// bucket had to be accumulated the rest of the way, so it says accumulated.
+			if lb.lastCovered {
 				lb.source = SourceBalanceAfter
+			} else {
+				lb.source = SourceAccumulated
 			}
 		}
 		checkRunningBalance(acc.ID, rows, idx, f.Step)
@@ -624,39 +687,75 @@ func ledgerSeries(ctx context.Context, client *ent.Client, acc *ent.Account, f B
 		return v, nil
 	}
 
-	// open(n) = close(n-1), taken from the running series and never stored or separately
-	// derived. The earliest emitted bucket has no previous, so its opening is synthesized;
-	// that is the one number in the series whose meaning depends on the ledger genuinely
-	// starting where it appears to, hence start_unverified.
-	var prev float64
-	if startIdx > 0 {
-		prev = order[startIdx-1].close
-	} else {
-		prev = seedOpening(order[startIdx], rows, pathBalanceAfter)
-		v.StartUnverified = true
+	// The running series is assembled over the WHOLE derivation range and only sliced to the
+	// emitted window at the end. Reading a previous close straight out of order[startIdx-1]
+	// instead would read whatever that field happens to hold, and on the balance_after path
+	// only buckets containing a covered row are ever assigned one: a quiet bucket immediately
+	// before the window would have handed back a zero and every emitted point would then
+	// report a fabricated zero balance. A level now only ever comes from a bucket this loop
+	// has actually closed.
+	//
+	// haveLevel is what makes that unreachable by construction. On the walked path the anchor
+	// reading establishes a level across the entire range up front. On the balance_after path
+	// nothing is known until the first bucket carrying the bank's own figure, and buckets
+	// before it are omitted rather than back-filled, exactly as the snapshot path does.
+	prev := 0.0
+	haveLevel := false
+	levelIdx := -1
+	if !pathBalanceAfter {
+		// The walk covers every bucket, so the opening of the oldest is the recurrence
+		// extended one step: close - net.
+		prev = order[0].close - order[0].net
+		haveLevel = true
+		levelIdx = 0
 	}
 
-	for i := startIdx; i <= endIdx; i++ {
+	for i := 0; i <= endIdx; i++ {
 		lb := order[i]
+
+		if !haveLevel {
+			if !lb.hasClose {
+				// No level known yet and this bucket carries none. Emit nothing: carrying
+				// backwards would invent pre-history, and a zero would be a lie.
+				continue
+			}
+			// This bucket establishes the level. Its opening is synthesized from the bank's
+			// own figure at the first covered row, walked back over the rows up to it.
+			haveLevel = true
+			levelIdx = i
+			prev = bucketOpening(lb)
+		}
+
 		open := prev
 		var close float64
 		source := lb.source
 		carried := false
 
 		switch {
-		case lb.hasClose:
-			close = lb.close
 		case lb.txns == 0:
-			// Quiet bucket: repeat the previous close, flag it, zero flows.
+			// Quiet bucket: repeat the previous close, flag it, zero flows. This comes FIRST
+			// so both paths agree on identical data. The walk assigns every bucket a close,
+			// including empty ones, and for an empty bucket that close necessarily equals the
+			// neighbouring one (its net is zero in both directions of the recurrence), so
+			// reporting it as carried changes no number and keeps "a missed sync does not read
+			// as a balance change" true on a walked account too.
 			close = open
 			carried = true
 			source = SourceCarried
+		case lb.hasClose:
+			close = lb.close
 		default:
 			// Rows but no running balance on any of them, on an account the probe found
 			// covered: mixed coverage, which prod does not show. Accumulate forward from
 			// the previous close rather than inventing a level, and say so via source.
 			close = open + lb.net
 			source = SourceAccumulated
+		}
+
+		prev = close
+		if i < startIdx {
+			// Derived only to carry the level into the window; not part of the answer.
+			continue
 		}
 
 		p := BalancePoint{
@@ -695,8 +794,13 @@ func ledgerSeries(ctx context.Context, client *ent.Client, acc *ent.Account, f B
 		}
 
 		v.Points = append(v.Points, p)
-		prev = close
 	}
+
+	// start_unverified marks a series whose FIRST emitted bucket is also the bucket that
+	// established the level, meaning its opening was synthesized rather than taken from a
+	// previous derived close. Where the level was established before the window the opening
+	// is a real previous close and the flag stays off.
+	v.StartUnverified = len(v.Points) > 0 && levelIdx >= startIdx
 	return v, nil
 }
 
@@ -754,25 +858,19 @@ func walkFromAnchor(order []*ledgerBucket, idx map[int64]*ledgerBucket, anchor *
 	return nil
 }
 
-// seedOpening synthesizes the opening of the earliest emitted bucket, which by definition
-// has no previous close to take.
+// bucketOpening synthesizes the opening of the bucket that establishes a series' level,
+// which by definition has no previous close to take.
 //
-// On a running-balance account it is the bank's own figure at the first row minus that
-// row's amount, which is the level immediately before it. That is arithmetically right, and
-// it means "the opening balance" only if the ledger truly starts there, which is why the
-// caller flags the bucket start_unverified.
-//
-// On a walked account the recurrence already answers it: extending it one step past the
-// earliest bucket gives close - net, which IS that bucket's opening.
-func seedOpening(first *ledgerBucket, rows []*ent.Transaction, pathBalanceAfter bool) float64 {
-	if pathBalanceAfter {
-		for _, t := range rows {
-			if t.BalanceAfter != nil {
-				return *t.BalanceAfter - t.Amount
-			}
-		}
+// It is the bank's own figure at the bucket's first covered row, walked back over the rows
+// up to and including it. That is arithmetically right, and it means "the opening balance"
+// only if the ledger truly starts there, which is why the caller flags the series
+// start_unverified.
+func bucketOpening(lb *ledgerBucket) float64 {
+	if lb.firstAfter != nil {
+		return *lb.firstAfter - lb.netThruFirst
 	}
-	return first.close - first.net
+	// Defensive: only a bucket with a covered row can establish a level on this path.
+	return lb.close - lb.net
 }
 
 // checkRunningBalance is reconciliation 3, and it only applies where the bank supplied a

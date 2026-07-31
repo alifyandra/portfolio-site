@@ -296,7 +296,7 @@ components:
           format: double
           type: number
         flow_mismatch:
-          description: Set when close - open does not equal net, meaning a row is missing from the bucket
+          description: Set when close - open does not equal net (a row is missing from the bucket) OR, on a running-balance account, when two consecutive rows' balance_after difference does not equal the intervening amount (a row is missing or duplicated between them, which can leave the bucket total intact). The offending row ids are logged for localisation
           type: boolean
         in:
           description: Gross money in across every posted row in the bucket

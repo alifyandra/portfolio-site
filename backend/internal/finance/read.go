@@ -107,8 +107,13 @@ type BalancePoint struct {
 	// Drift is the derived close minus a BalanceSnapshot reading falling in the same bucket,
 	// present only when there is one. Nonzero means a dropped or duplicated transaction.
 	Drift *float64
-	// FlowMismatch is set when close - open does not equal the bucket's net flow, meaning a
-	// row is missing from the bucket.
+	// FlowMismatch is set by EITHER reconciliation check that can localise to this bucket:
+	// close - open not equalling the bucket's net flow (a row is missing from the bucket), or,
+	// on a running-balance account, two consecutive rows whose balance_after difference does
+	// not equal the intervening amount (a row is missing or duplicated between that pair).
+	// The second catches offsetting row-level errors that leave the bucket total intact and so
+	// would pass the first. The offending row ids are logged for localisation, since a bucket
+	// flag alone cannot say which pair.
 	FlowMismatch bool
 }
 

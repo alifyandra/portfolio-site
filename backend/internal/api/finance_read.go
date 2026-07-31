@@ -77,7 +77,7 @@ type BalancePointDTO struct {
 	Txns         *int     `json:"txns,omitempty" doc:"Posted rows in the bucket, internal legs included"`
 	Source       *string  `json:"source,omitempty" doc:"balance_after (the bank's own running balance), accumulated (arithmetic from the anchor reading), or carried"`
 	Drift        *float64 `json:"drift,omitempty" doc:"Derived close minus a balance reading falling in this bucket; present only when there is one. Nonzero means a dropped or duplicated transaction"`
-	FlowMismatch *bool    `json:"flow_mismatch,omitempty" doc:"Set when close - open does not equal net, meaning a row is missing from the bucket"`
+	FlowMismatch *bool    `json:"flow_mismatch,omitempty" doc:"Set when close - open does not equal net (a row is missing from the bucket) OR, on a running-balance account, when two consecutive rows' balance_after difference does not equal the intervening amount (a row is missing or duplicated between them, which can leave the bucket total intact). The offending row ids are logged for localisation"`
 }
 
 // FinanceTxnDTO is one posted transaction with its account joined in.
@@ -412,7 +412,9 @@ func (h *Handler) getFinanceBalanceHistory(ctx context.Context, in *financeBalan
 		}
 		out.Body.Points = make([]BalancePointDTO, 0, len(points))
 		for _, p := range points {
-			out.Body.Points = append(out.Body.Points, toBalancePointDTO(p))
+			// A raw point is the bank's intra-day reading instant, not a bucket label, so it
+			// keeps its UTC rendering and this response stays what it has always been.
+			out.Body.Points = append(out.Body.Points, toBalancePointDTO(p, p.AsOf.UTC()))
 		}
 		return out, nil
 	}
@@ -433,7 +435,9 @@ func (h *Handler) getFinanceBalanceHistory(ctx context.Context, in *financeBalan
 	// One account id resolves to at most one series.
 	s := series[0]
 	for _, p := range s.Points {
-		out.Body.Points = append(out.Body.Points, toBalancePointDTO(p))
+		// A bucketed point's as_of is a bucket START, which is a local midnight. Rendering it
+		// in UTC would name the calendar period BEFORE the one it labels.
+		out.Body.Points = append(out.Body.Points, toBalancePointDTO(p, p.AsOf.In(finance.BucketZone())))
 	}
 	if basis == finance.BasisLedger {
 		b := string(s.Basis)
@@ -455,10 +459,12 @@ func (h *Handler) getFinanceBalanceHistory(ctx context.Context, in *financeBalan
 
 // toBalancePointDTO maps a read-service balance point to its wire DTO. The optional fields
 // stay nil (and so absent) unless the point actually carries them, which is what keeps a
-// raw or basis=snapshot response the shape it has always been.
-func toBalancePointDTO(p finance.BalancePoint) BalancePointDTO {
+// raw or basis=snapshot response the shape it has always been. asOf is passed in already in
+// the zone it should be rendered in, since a raw reading instant and a bucket start want
+// different zones (see finance.BucketZone).
+func toBalancePointDTO(p finance.BalancePoint, asOf time.Time) BalancePointDTO {
 	d := BalancePointDTO{
-		AsOf:        p.AsOf.UTC().Format(time.RFC3339),
+		AsOf:        asOf.Format(time.RFC3339),
 		Balance:     p.Balance,
 		Open:        p.Open,
 		Close:       p.Close,

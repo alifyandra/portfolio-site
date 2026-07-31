@@ -19,6 +19,7 @@ import (
 	"github.com/alifyandra/portfolio-site/backend/ent/account"
 	"github.com/alifyandra/portfolio-site/backend/ent/wishlistitem"
 	"github.com/alifyandra/portfolio-site/backend/internal/auth"
+	"github.com/alifyandra/portfolio-site/backend/internal/finance"
 )
 
 // newMCPTestServer builds the MCP handler over an in-memory SQLite ledger with a real
@@ -706,6 +707,132 @@ func deref(f *float64) any {
 		return "nil"
 	}
 	return *f
+}
+
+// TestMCP_BalanceHistory_BucketStartsRenderInLocalZone: every point the tool emits is a
+// bucket start, which is a local midnight, so a UTC rendering would name the period BEFORE
+// the bucket it labels and a model would attribute the close and the flows to the wrong month.
+func TestMCP_BalanceHistory_BucketStartsRenderInLocalZone(t *testing.T) {
+	h, svc, client := newMCPTestServer(t)
+	ctx := context.Background()
+	raw := mintToken(t, ctx, svc, client, []string{"finance.read"})
+	acc := client.Account.Query().OnlyX(ctx)
+
+	mel := finance.BucketZone()
+	// 9am Melbourne on the local 1st, which is 23:00 UTC the previous month.
+	local := time.Date(2026, 8, 1, 9, 0, 0, 0, mel)
+	client.BalanceSnapshot.Create().SetBalance(500).SetAsOf(local.UTC()).SetAccountID(acc.ID).SaveX(ctx)
+
+	_, out := rpc(t, h, raw, map[string]any{
+		"jsonrpc": "2.0", "id": 60, "method": "tools/call",
+		"params": map[string]any{"name": "balance_history", "arguments": map[string]any{
+			"step": "month", "account_id": acc.ID, "from": "2026-08-01", "to": "2026-08-31",
+		}},
+	})
+	var bh balanceHistoryPayload
+	decodeToolText(t, out, &bh)
+	if len(bh.Series) != 1 || len(bh.Series[0].Points) != 1 {
+		t.Fatalf("want one series with one August bucket, got %d series", len(bh.Series))
+	}
+	got := bh.Series[0].Points[0].AsOf
+	if got != "2026-08-01T00:00:00+10:00" {
+		t.Errorf("as_of = %q, want 2026-08-01T00:00:00+10:00 (a UTC rendering would read as July)", got)
+	}
+	ts, err := time.Parse(time.RFC3339, got)
+	if err != nil {
+		t.Fatalf("as_of %q is not RFC3339: %v", got, err)
+	}
+	if lt := ts.In(mel); lt.Month() != time.August || lt.Day() != 1 || lt.Hour() != 0 {
+		t.Errorf("as_of %q resolves to %s, want the local-midnight 1st of August", got, lt)
+	}
+}
+
+// TestAllotPoints_WaterFillsFromTheShallowest: the budget must never trim a series below what
+// it would have fitted on its own. An even budget/n split looked fair but dropped 74 points
+// to save 4 on the reviewer's case, and reported a truncation for a request 3% over.
+func TestAllotPoints_WaterFillsFromTheShallowest(t *testing.T) {
+	mk := func(counts ...int) []finance.BalanceSeriesView {
+		out := make([]finance.BalanceSeriesView, 0, len(counts))
+		for _, n := range counts {
+			out = append(out, finance.BalanceSeriesView{Points: make([]finance.BalancePoint, n)})
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		name   string
+		counts []int
+		budget int
+		want   []int
+	}{
+		{"under budget leaves everything", []int{10, 5}, 150, []int{10, 5}},
+		{"exactly at budget leaves everything", []int{100, 50}, 150, []int{100, 50}},
+		{"deep plus shallow trims only the deep one", []int{149, 5}, 150, []int{145, 5}},
+		{"shallow first in the input order", []int{5, 149}, 150, []int{5, 145}},
+		{"one series takes the whole budget", []int{11}, 5, []int{5}},
+		{"equal series split evenly", []int{100, 100}, 150, []int{75, 75}},
+		{"more series than budget still keeps one point each", []int{3, 3, 3}, 2, []int{1, 1, 1}},
+	} {
+		got := allotPoints(mk(tc.counts...), tc.budget)
+		if len(got) != len(tc.want) {
+			t.Fatalf("%s: allot len = %d, want %d", tc.name, len(got), len(tc.want))
+		}
+		for i := range tc.want {
+			if got[i] != tc.want[i] {
+				t.Errorf("%s: allot = %v, want %v", tc.name, got, tc.want)
+				break
+			}
+		}
+	}
+}
+
+// TestMCP_BalanceHistory_ShallowSeriesNotStarvedByDeepOne is the end-to-end half of the
+// water-fill fix: the shallow series keeps every point it had, and only the deep one is cut.
+func TestMCP_BalanceHistory_ShallowSeriesNotStarvedByDeepOne(t *testing.T) {
+	h, svc, client := newMCPTestServer(t)
+	ctx := context.Background()
+	raw := mintToken(t, ctx, svc, client, []string{"finance.read"})
+
+	origSnap := balanceSnapshotPointBudget
+	balanceSnapshotPointBudget = 10
+	t.Cleanup(func() { balanceSnapshotPointBudget = origSnap })
+
+	// A fixed window so neither series' length depends on the clock, and a deep account plus
+	// a shallow one whose 3 points exceed an even 10/2 = 5 share only in aggregate.
+	deep := client.Account.Create().SetSource("commbank").SetName("Y deep").
+		SetType(account.TypeSavings).SetClass(account.ClassAsset).SetCurrency("AUD").SaveX(ctx)
+	shallow := client.Account.Create().SetSource("commbank").SetName("Z shallow").
+		SetType(account.TypeSavings).SetClass(account.ClassAsset).SetCurrency("AUD").SaveX(ctx)
+	mel := finance.BucketZone()
+	for d := 1; d <= 12; d++ {
+		client.BalanceSnapshot.Create().SetBalance(float64(100 * d)).
+			SetAsOf(time.Date(2026, 6, d, 9, 0, 0, 0, mel).UTC()).SetAccountID(deep.ID).SaveX(ctx)
+	}
+	for d := 10; d <= 12; d++ {
+		client.BalanceSnapshot.Create().SetBalance(float64(10 * d)).
+			SetAsOf(time.Date(2026, 6, d, 9, 0, 0, 0, mel).UTC()).SetAccountID(shallow.ID).SaveX(ctx)
+	}
+
+	_, out := rpc(t, h, raw, map[string]any{
+		"jsonrpc": "2.0", "id": 61, "method": "tools/call",
+		"params": map[string]any{"name": "balance_history", "arguments": map[string]any{
+			"step": "day", "from": "2026-06-01", "to": "2026-06-12",
+		}},
+	})
+	var bh balanceHistoryPayload
+	decodeToolText(t, out, &bh)
+	if bh.Truncated == nil || !*bh.Truncated {
+		t.Fatalf("truncated = %v, want true", bh.Truncated)
+	}
+	byID := map[int]int{}
+	for _, s := range bh.Series {
+		byID[s.AccountID] = len(s.Points)
+	}
+	if got := byID[shallow.ID]; got != 3 {
+		t.Errorf("shallow series kept %d points, want all 3: a deep series must not starve it", got)
+	}
+	if got := byID[deep.ID]; got >= 12 || got <= 3 {
+		t.Errorf("deep series kept %d points, want it trimmed but given the remaining budget", got)
+	}
 }
 
 // TestMCP_BalanceHistory_UnknownStepAndBasisAreToolErrors: a bad enum is a tool-error result
