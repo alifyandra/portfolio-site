@@ -285,6 +285,19 @@ accepts sanitized finance rows from the [Finance Source]. It accepts derived dat
 only, never credentials or session, upserting [Posted Transaction]s and replacing
 the [Pending Transaction] set. See ADR 15.
 
+### Wishlist Item
+One thing Alif wants to buy or pay for **once**: a pending car service payment, new
+glasses, a bag, a computer. It carries a coarse priority, a status (`wanted`, `bought`,
+`abandoned`), an optional cost (null means the price is unknown, which is not the same
+as free) and an optional soft deadline. It is not a [Posted Transaction] and is never
+reconciled against one: a Wishlist Item records an intention, not money that moved.
+Resolved items are kept, not deleted, because "that was already bought" and "that was
+already decided against" are the context worth having. Recurring obligations are a
+different entity with a different lifecycle (a bill never reaches "done") and live in
+the sibling issue filed alongside portfolio-site#123. The read side feeds the admin
+dashboard and the `list_wishlist` MCP tool, so a model can weigh a new purchase against
+what is already queued. See ADR 17.
+
 ## Naming conventions
 
 - The owner / subject of the site is **Alif** (Ahmad Alifyandra).

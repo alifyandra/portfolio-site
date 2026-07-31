@@ -28,9 +28,22 @@ var uploadExtByContentType = map[string]string{
 // safeExtPattern accepts a short alphanumeric extension supplied by the client.
 var safeExtPattern = regexp.MustCompile(`^[a-zA-Z0-9]{1,5}$`)
 
+// uploadPrefixByKind maps the allowlisted upload kind to the S3 key prefix, so each
+// consumer's images land in their own folder. The set is closed: an unknown kind is a
+// 422 rather than a client-chosen path.
+var uploadPrefixByKind = map[string]string{
+	"projects": "projects",
+	"wishlist": "wishlist",
+}
+
+// defaultUploadKind is the kind assumed when the client omits it, keeping the original
+// project-image callers working unchanged.
+const defaultUploadKind = "projects"
+
 type presignUploadInput struct {
 	Body struct {
 		ContentType string `json:"content_type" enum:"image/png,image/jpeg,image/webp,image/gif" doc:"MIME type of the file to upload"`
+		Kind        string `json:"kind,omitempty" enum:"projects,wishlist" default:"projects" doc:"What the image belongs to; selects the S3 key prefix"`
 		Ext         string `json:"ext,omitempty" doc:"Optional file extension override (alphanumeric, no dot); defaults to one derived from content_type"`
 	}
 }
@@ -38,7 +51,7 @@ type presignUploadInput struct {
 type presignUploadOutput struct {
 	Body struct {
 		URL     string            `json:"url" doc:"Presigned S3 URL to PUT the file to"`
-		Key     string            `json:"key" doc:"Object key to store in Project.image_keys after a successful upload"`
+		Key     string            `json:"key" doc:"Object key to store on the owning record (Project.image_keys or WishlistItem.image_key) after a successful upload"`
 		Method  string            `json:"method" doc:"HTTP method to use for the upload (always PUT)"`
 		Headers map[string]string `json:"headers" doc:"Headers that must be sent verbatim on the PUT (Content-Type is bound into the signature)"`
 	}
@@ -58,7 +71,7 @@ func (h *Handler) registerAdminUploads(api huma.API) {
 		OperationID: "create-upload-presign",
 		Method:      http.MethodPost,
 		Path:        "/api/admin/uploads/presign",
-		Summary:     "Get a presigned S3 URL to upload a project image",
+		Summary:     "Get a presigned S3 URL to upload an image (project or wishlist)",
 		Tags:        adminTags,
 		Security:    cookieAuthSecurity,
 	}, func(ctx context.Context, in *presignUploadInput) (*presignUploadOutput, error) {
@@ -75,6 +88,15 @@ func (h *Handler) registerAdminUploads(api huma.API) {
 			return nil, huma.Error422UnprocessableEntity("content_type must be one of image/png, image/jpeg, image/webp, image/gif")
 		}
 
+		kind := strings.ToLower(strings.TrimSpace(in.Body.Kind))
+		if kind == "" {
+			kind = defaultUploadKind
+		}
+		prefix, ok := uploadPrefixByKind[kind]
+		if !ok {
+			return nil, huma.Error422UnprocessableEntity("kind must be one of projects, wishlist")
+		}
+
 		// Honor a client-supplied extension only when it is a safe short token;
 		// otherwise fall back to the one derived from the content type.
 		ext := derivedExt
@@ -86,7 +108,7 @@ func (h *Handler) registerAdminUploads(api huma.API) {
 		if err != nil {
 			return nil, huma.Error500InternalServerError("failed to generate upload key", err)
 		}
-		key := fmt.Sprintf("projects/%s.%s", id, ext)
+		key := fmt.Sprintf("%s/%s.%s", prefix, id, ext)
 
 		url, err := h.deps.Storage.PresignPutURL(ctx, key, ct, uploadPresignTTL)
 		if err != nil {

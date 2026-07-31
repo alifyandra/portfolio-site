@@ -51,7 +51,7 @@ in the same package.
 
 ### 2. Admin-gated dashboard read endpoints
 
-Five GET operations in `internal/api/finance_read.go`, all Huma, all cookie-authed and
+Six GET operations in `internal/api/finance_read.go`, all Huma, all cookie-authed and
 calling `requireAdmin` as their first line. Finance is single-tenant and never
 friend/member visible, so there is no tier below admin here.
 
@@ -61,6 +61,9 @@ friend/member visible, so there is no tier below admin here.
 - `list-finance-transactions` `GET /api/finance/transactions` (`account_id`, `from`, `to`,
   `limit` default 50 capped 500, `offset`)
 - `list-finance-pending` `GET /api/finance/pending` (`account_id`)
+- `list-finance-wishlist` `GET /api/finance/wishlist` (`status`, default `wanted`; see
+  portfolio-site#123). Returns the items plus a cost roll-up, and a `truncated` flag when
+  the read limit dropped rows.
 
 Dates on the wire are strings: date-only (`YYYY-MM-DD`) for `posted_date`, pending
 `date`, and `posted_watermark`; RFC3339 for snapshot `as_of` and `balance_as_of`. A
@@ -110,7 +113,10 @@ write and an ingest token can never read. A bearer identity is invisible to
 **Tools** (each calls the read service in-process, returns one JSON text content block):
 `get_net_worth`, `list_accounts`, `list_transactions` (`account_id?`, `from?`, `to?`,
 `limit?`), `search_merchant` (`query` required, `limit?`), `monthly_summary`
-(`account_id?`, `months?`), `list_pending`. Structural failures (unknown tool, bad
+(`account_id?`, `months?`), `list_pending`, `list_wishlist` (`status?`, `limit?`:
+the one-off wants plus a known-cost total and a count of items whose price is
+unknown, so a purchase can be weighed against what is already queued, see
+portfolio-site#123). Structural failures (unknown tool, bad
 params) are JSON-RPC errors; a domain/validation failure (bad date, missing query) is a
 tool-error result (`isError: true`) so the model sees the message, per MCP convention.
 

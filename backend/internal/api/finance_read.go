@@ -11,7 +11,7 @@ import (
 	"github.com/alifyandra/portfolio-site/backend/internal/finance"
 )
 
-// The finance dashboard read API (ADR 0017). Five admin-only GET endpoints over the
+// The finance dashboard read API (ADR 0017). Six admin-only GET endpoints over the
 // finance ledger, each backed by the pure read service (internal/finance.read.go) so
 // the same query path serves the /admin dashboard and the remote MCP tools. Every
 // operation is cookie-gated and calls requireAdmin as its first line: finance is
@@ -84,6 +84,37 @@ type FinancePendingDTO struct {
 	Merchant    string  `json:"merchant"`
 }
 
+// FinanceWishlistItemDTO is one wishlist item: something the owner wants to buy or pay
+// for once (portfolio-site#123). amount is null when the price is unknown, which is not
+// the same as free.
+type FinanceWishlistItemDTO struct {
+	ID               int      `json:"id"`
+	Name             string   `json:"name"`
+	Description      string   `json:"description"`
+	Amount           *float64 `json:"amount" doc:"Expected cost; null when the price is unknown (NOT free)"`
+	AmountIsEstimate bool     `json:"amount_is_estimate" doc:"True while the amount is a guess rather than a quoted price"`
+	Currency         string   `json:"currency"`
+	Priority         string   `json:"priority" enum:"low,medium,high"`
+	Status           string   `json:"status" enum:"wanted,bought,abandoned"`
+	Deadline         *string  `json:"deadline" doc:"Soft want-it-by date (YYYY-MM-DD); null when there is no date"`
+	ResolvedAt       *string  `json:"resolved_at" doc:"RFC3339 time the item left wanted (bought or abandoned); null while still wanted"`
+	Link             string   `json:"link"`
+	ImageKey         string   `json:"image_key" doc:"S3 object key returned by the upload presign endpoint"`
+}
+
+// FinanceWishlistTotalsDTO rolls up the items in the same response. known_cost_total
+// sums only the non-null amounts denominated in currency; unknown_cost_count reports how
+// many rows had no amount, so an unknown price is never counted as zero; and
+// currency_mismatch_count reports how many priced rows were excluded for carrying a
+// different currency, so a single-currency total never silently absorbs a foreign one.
+type FinanceWishlistTotalsDTO struct {
+	ItemCount             int     `json:"item_count"`
+	KnownCostTotal        float64 `json:"known_cost_total"`
+	UnknownCostCount      int     `json:"unknown_cost_count"`
+	CurrencyMismatchCount int     `json:"currency_mismatch_count" doc:"Priced rows left out of known_cost_total because their currency differs from currency"`
+	Currency              string  `json:"currency"`
+}
+
 // --- inputs / outputs ---
 
 type financeSummaryOutput struct {
@@ -132,6 +163,20 @@ type listFinancePendingOutput struct {
 	}
 }
 
+type listFinanceWishlistInput struct {
+	Status string `query:"status" default:"wanted" enum:"wanted,bought,abandoned,all" doc:"Which items to return; defaults to the still-outstanding ones"`
+}
+
+type listFinanceWishlistOutput struct {
+	Body struct {
+		Items  []FinanceWishlistItemDTO `json:"items"`
+		Totals FinanceWishlistTotalsDTO `json:"totals"`
+		// Truncated is present only when the read-service row limit actually dropped
+		// rows, so its absence means the list and its totals are complete.
+		Truncated bool `json:"truncated,omitempty" doc:"True when the row limit dropped the lowest-priority items from this response and its totals"`
+	}
+}
+
 func (h *Handler) registerFinanceRead(api huma.API) {
 	huma.Register(api, huma.Operation{
 		OperationID: "get-finance-summary",
@@ -177,6 +222,15 @@ func (h *Handler) registerFinanceRead(api huma.API) {
 		Tags:        financeReadTags,
 		Security:    cookieAuthSecurity,
 	}, h.listFinancePending)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "list-finance-wishlist",
+		Method:      http.MethodGet,
+		Path:        "/api/finance/wishlist",
+		Summary:     "List wishlist items with a cost roll-up (admin)",
+		Tags:        financeReadTags,
+		Security:    cookieAuthSecurity,
+	}, h.listFinanceWishlist)
 }
 
 func (h *Handler) getFinanceSummary(ctx context.Context, _ *struct{}) (*financeSummaryOutput, error) {
@@ -318,6 +372,46 @@ func (h *Handler) listFinancePending(ctx context.Context, in *listFinancePending
 			Description: p.Description,
 			Merchant:    p.Merchant,
 		})
+	}
+	return out, nil
+}
+
+func (h *Handler) listFinanceWishlist(ctx context.Context, in *listFinanceWishlistInput) (*listFinanceWishlistOutput, error) {
+	if _, err := requireAdmin(ctx); err != nil {
+		return nil, err
+	}
+	if h.deps.Ent == nil {
+		return nil, huma.Error503ServiceUnavailable("finance is not available")
+	}
+	items, totals, truncated, err := finance.Wishlist(ctx, h.deps.Ent, finance.WishlistFilter{Status: in.Status})
+	if err != nil {
+		return nil, huma.Error500InternalServerError("failed to load wishlist", err)
+	}
+	out := &listFinanceWishlistOutput{}
+	out.Body.Truncated = truncated
+	out.Body.Items = make([]FinanceWishlistItemDTO, 0, len(items))
+	for _, w := range items {
+		out.Body.Items = append(out.Body.Items, FinanceWishlistItemDTO{
+			ID:               w.ID,
+			Name:             w.Name,
+			Description:      w.Description,
+			Amount:           w.Amount,
+			AmountIsEstimate: w.AmountIsEstimate,
+			Currency:         w.Currency,
+			Priority:         w.Priority,
+			Status:           w.Status,
+			Deadline:         dateOnlyPtr(w.Deadline),
+			ResolvedAt:       rfc3339Ptr(w.ResolvedAt),
+			Link:             w.Link,
+			ImageKey:         w.ImageKey,
+		})
+	}
+	out.Body.Totals = FinanceWishlistTotalsDTO{
+		ItemCount:             totals.ItemCount,
+		KnownCostTotal:        totals.KnownCostTotal,
+		UnknownCostCount:      totals.UnknownCostCount,
+		CurrencyMismatchCount: totals.CurrencyMismatchCount,
+		Currency:              totals.Currency,
 	}
 	return out, nil
 }

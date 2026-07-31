@@ -61,6 +61,11 @@ type spendingArgs struct {
 	AccountID int    `json:"account_id"`
 }
 
+type wishlistArgs struct {
+	Status string `json:"status"`
+	Limit  int    `json:"limit"`
+}
+
 // --- tool result shapes (dates rendered as strings for a readable payload) ---
 
 type summaryResult struct {
@@ -105,6 +110,21 @@ type pendingResult struct {
 	Amount      float64 `json:"amount"`
 	Description string  `json:"description"`
 	Merchant    string  `json:"merchant"`
+}
+
+type wishlistResult struct {
+	ID               int      `json:"id"`
+	Name             string   `json:"name"`
+	Description      string   `json:"description"`
+	Amount           *float64 `json:"amount"`
+	AmountIsEstimate bool     `json:"amount_is_estimate"`
+	Currency         string   `json:"currency"`
+	Priority         string   `json:"priority"`
+	Status           string   `json:"status"`
+	Deadline         *string  `json:"deadline"`
+	ResolvedAt       *string  `json:"resolved_at"`
+	Link             string   `json:"link"`
+	ImageKey         string   `json:"image_key"`
 }
 
 type monthResult struct {
@@ -261,6 +281,36 @@ func (s *server) callTool(ctx context.Context, name string, rawArgs json.RawMess
 		}
 		return map[string]any{"pending": toPendingResults(pend)}, nil
 
+	case "list_wishlist":
+		var a wishlistArgs
+		if err := decodeArgs(rawArgs, &a); err != nil {
+			return nil, err
+		}
+		// An unknown status is rejected by the read service (a domain error the model
+		// sees), not by the input schema, so the allowed set lives in one place.
+		items, totals, truncated, err := finance.Wishlist(ctx, s.deps.Ent, finance.WishlistFilter{
+			Status: a.Status,
+			Limit:  a.Limit,
+		})
+		if err != nil {
+			return nil, err
+		}
+		res := map[string]any{
+			"items":              toWishlistResults(items),
+			"item_count":         totals.ItemCount,
+			"known_cost_total":   totals.KnownCostTotal,
+			"unknown_cost_count": totals.UnknownCostCount,
+			// Always present: it qualifies known_cost_total, so the model can see the
+			// total is single-currency rather than having to assume it.
+			"currency_mismatch_count": totals.CurrencyMismatchCount,
+		}
+		if truncated {
+			// Only present when the limit actually dropped rows, so its absence means a
+			// complete answer (no-silent-caps signal, as in list_transactions).
+			res["truncated"] = true
+		}
+		return res, nil
+
 	default:
 		return nil, fmt.Errorf("%w: %s", errUnknownTool, name)
 	}
@@ -323,6 +373,14 @@ func toolDefinitions() []map[string]any {
 			"name":        "list_pending",
 			"description": "List pending (not-yet-settled) transactions across all accounts, newest first. Pending rows are volatile and are replaced on each sync.",
 			"inputSchema": objectSchema(nil, nil),
+		},
+		{
+			"name":        "list_wishlist",
+			"description": "The owner's wishlist: things he wants to buy or pay for once, such as a new computer, a bag, or a pending car service payment. Read this before answering whether a purchase is a good idea, what he is saving toward, or how one want compares in cost and urgency to everything already queued. Each item has a status (wanted, bought, abandoned), a priority (low, medium, high), an amount in AUD, an optional deadline (YYYY-MM-DD), an optional link, and a description. amount_is_estimate=true means the price is the owner's guess, not a quote, so treat it as approximate. amount is null when the cost is unknown: that means unknown, NOT free, so say the cost is unrecorded rather than assuming zero. Defaults to status=wanted, which is what is still outstanding; pass status=all to include bought and abandoned items, which is how you check whether something was already bought or already decided against. Items are ordered by priority, then nearest deadline, then newest. Also returns totals: item_count, known_cost_total (the sum of the non-null amounts in this response) and unknown_cost_count. known_cost_total is AUD only, and currency_mismatch_count says how many priced items were left out of it for carrying another currency, so add those separately rather than assuming the total covers them. If the response carries \"truncated\": true the limit dropped the lowest-priority items from both the list and the totals; raise limit (up to 500) for a complete answer, and its absence means the answer is complete. This list is a set of intentions, not a budget and not a commitment: to judge affordability combine it with get_net_worth and spending_summary rather than reasoning from the wishlist alone.",
+			"inputSchema": objectSchema(map[string]any{
+				"status": strProp("Which items to return: \"wanted\" (default, still outstanding), \"bought\", \"abandoned\", or \"all\"."),
+				"limit":  intProp("Maximum rows to return (default 100, capped at 500)."),
+			}, nil),
 		},
 	}
 }
@@ -388,6 +446,30 @@ func toPendingResults(pend []finance.PendingView) []pendingResult {
 			Amount:      p.Amount,
 			Description: p.Description,
 			Merchant:    p.Merchant,
+		})
+	}
+	return out
+}
+
+// toWishlistResults maps wishlist rows to the model-facing shape: the deadline as a
+// plain date, resolved_at as an instant, and amount left null when the price is unknown
+// so the model cannot read it as zero.
+func toWishlistResults(items []finance.WishlistView) []wishlistResult {
+	out := make([]wishlistResult, 0, len(items))
+	for _, w := range items {
+		out = append(out, wishlistResult{
+			ID:               w.ID,
+			Name:             w.Name,
+			Description:      w.Description,
+			Amount:           w.Amount,
+			AmountIsEstimate: w.AmountIsEstimate,
+			Currency:         w.Currency,
+			Priority:         w.Priority,
+			Status:           w.Status,
+			Deadline:         fmtDateOnlyPtr(w.Deadline),
+			ResolvedAt:       fmtRFC3339Ptr(w.ResolvedAt),
+			Link:             w.Link,
+			ImageKey:         w.ImageKey,
 		})
 	}
 	return out

@@ -127,6 +127,79 @@ components:
         - created_at
         - updated_at
       type: object
+    AdminWishlistItemDTO:
+      additionalProperties: false
+      properties:
+        $schema:
+          description: A URL to the JSON Schema for this object.
+          examples:
+            - https://example.com/schemas/AdminWishlistItemDTO.json
+          format: uri
+          readOnly: true
+          type: string
+        amount:
+          description: Expected cost; null when the price is unknown (NOT free)
+          format: double
+          type:
+            - number
+            - "null"
+        amount_is_estimate:
+          type: boolean
+        created_at:
+          type: string
+        currency:
+          type: string
+        deadline:
+          description: Soft want-it-by date (YYYY-MM-DD); null when there is no date
+          type:
+            - string
+            - "null"
+        description:
+          type: string
+        id:
+          format: int64
+          type: integer
+        image_key:
+          type: string
+        link:
+          type: string
+        name:
+          type: string
+        priority:
+          enum:
+            - low
+            - medium
+            - high
+          type: string
+        resolved_at:
+          description: RFC3339 time the item left wanted; null while still wanted
+          type:
+            - string
+            - "null"
+        status:
+          enum:
+            - wanted
+            - bought
+            - abandoned
+          type: string
+        updated_at:
+          type: string
+      required:
+        - id
+        - name
+        - description
+        - amount
+        - amount_is_estimate
+        - currency
+        - priority
+        - status
+        - deadline
+        - resolved_at
+        - link
+        - image_key
+        - created_at
+        - updated_at
+      type: object
     ApiTokenDTO:
       additionalProperties: false
       properties:
@@ -575,6 +648,60 @@ components:
         - title
         - summary
       type: object
+    CreateWishlistItemInputBody:
+      additionalProperties: false
+      properties:
+        $schema:
+          description: A URL to the JSON Schema for this object.
+          examples:
+            - https://example.com/schemas/CreateWishlistItemInputBody.json
+          format: uri
+          readOnly: true
+          type: string
+        amount:
+          description: Expected cost, must be positive; omit when the price is unknown (which is NOT free)
+          format: double
+          type: number
+        amount_is_estimate:
+          description: Defaults to true (the amount is a guess, not a quote)
+          type: boolean
+        currency:
+          description: ISO currency code, upper-cased; blank or omitted means AUD
+          type: string
+        deadline:
+          description: Soft want-it-by date, YYYY-MM-DD; omit for no date
+          type: string
+        description:
+          description: "Longer note: why it is wanted, which model, what was ruled out"
+          type: string
+        image_key:
+          description: S3 object key returned by the upload presign endpoint (kind=wishlist)
+          type: string
+        link:
+          description: Product/reference URL; never fetched by the backend
+          type: string
+        name:
+          description: What the thing is, short enough to scan in a list
+          maxLength: 200
+          minLength: 1
+          type: string
+        priority:
+          description: Defaults to medium
+          enum:
+            - low
+            - medium
+            - high
+          type: string
+        status:
+          description: Defaults to wanted; creating straight into bought/abandoned stamps resolved_at
+          enum:
+            - wanted
+            - bought
+            - abandoned
+          type: string
+      required:
+        - name
+      type: object
     ErrorDetail:
       additionalProperties: false
       properties:
@@ -918,6 +1045,93 @@ components:
         - to
         - backfill
       type: object
+    FinanceWishlistItemDTO:
+      additionalProperties: false
+      properties:
+        amount:
+          description: Expected cost; null when the price is unknown (NOT free)
+          format: double
+          type:
+            - number
+            - "null"
+        amount_is_estimate:
+          description: True while the amount is a guess rather than a quoted price
+          type: boolean
+        currency:
+          type: string
+        deadline:
+          description: Soft want-it-by date (YYYY-MM-DD); null when there is no date
+          type:
+            - string
+            - "null"
+        description:
+          type: string
+        id:
+          format: int64
+          type: integer
+        image_key:
+          description: S3 object key returned by the upload presign endpoint
+          type: string
+        link:
+          type: string
+        name:
+          type: string
+        priority:
+          enum:
+            - low
+            - medium
+            - high
+          type: string
+        resolved_at:
+          description: RFC3339 time the item left wanted (bought or abandoned); null while still wanted
+          type:
+            - string
+            - "null"
+        status:
+          enum:
+            - wanted
+            - bought
+            - abandoned
+          type: string
+      required:
+        - id
+        - name
+        - description
+        - amount
+        - amount_is_estimate
+        - currency
+        - priority
+        - status
+        - deadline
+        - resolved_at
+        - link
+        - image_key
+      type: object
+    FinanceWishlistTotalsDTO:
+      additionalProperties: false
+      properties:
+        currency:
+          type: string
+        currency_mismatch_count:
+          description: Priced rows left out of known_cost_total because their currency differs from currency
+          format: int64
+          type: integer
+        item_count:
+          format: int64
+          type: integer
+        known_cost_total:
+          format: double
+          type: number
+        unknown_cost_count:
+          format: int64
+          type: integer
+      required:
+        - item_count
+        - known_cost_total
+        - unknown_cost_count
+        - currency_mismatch_count
+        - currency
+      type: object
     Item:
       additionalProperties: false
       properties:
@@ -1225,6 +1439,31 @@ components:
       required:
         - transactions
         - total
+      type: object
+    ListFinanceWishlistOutputBody:
+      additionalProperties: false
+      properties:
+        $schema:
+          description: A URL to the JSON Schema for this object.
+          examples:
+            - https://example.com/schemas/ListFinanceWishlistOutputBody.json
+          format: uri
+          readOnly: true
+          type: string
+        items:
+          items:
+            $ref: "#/components/schemas/FinanceWishlistItemDTO"
+          type:
+            - array
+            - "null"
+        totals:
+          $ref: "#/components/schemas/FinanceWishlistTotalsDTO"
+        truncated:
+          description: True when the row limit dropped the lowest-priority items from this response and its totals
+          type: boolean
+      required:
+        - items
+        - totals
       type: object
     ListGrantsOutputBody:
       additionalProperties: false
@@ -1693,6 +1932,13 @@ components:
         ext:
           description: Optional file extension override (alphanumeric, no dot); defaults to one derived from content_type
           type: string
+        kind:
+          default: projects
+          description: What the image belongs to; selects the S3 key prefix
+          enum:
+            - projects
+            - wishlist
+          type: string
       required:
         - content_type
       type: object
@@ -1712,7 +1958,7 @@ components:
           description: Headers that must be sent verbatim on the PUT (Content-Type is bound into the signature)
           type: object
         key:
-          description: Object key to store in Project.image_keys after a successful upload
+          description: Object key to store on the owning record (Project.image_keys or WishlistItem.image_key) after a successful upload
           type: string
         method:
           description: HTTP method to use for the upload (always PUT)
@@ -2140,6 +2386,57 @@ components:
           type:
             - string
             - "null"
+      type: object
+    UpdateWishlistItemInputBody:
+      additionalProperties: false
+      properties:
+        $schema:
+          description: A URL to the JSON Schema for this object.
+          examples:
+            - https://example.com/schemas/UpdateWishlistItemInputBody.json
+          format: uri
+          readOnly: true
+          type: string
+        amount:
+          description: Expected cost, must be positive; ignored when amount_unknown is true
+          format: double
+          type: number
+        amount_is_estimate:
+          type: boolean
+        amount_unknown:
+          description: Set true to move the price back to unknown; takes precedence over amount
+          type: boolean
+        currency:
+          description: ISO currency code, upper-cased; blank means AUD
+          type: string
+        deadline:
+          description: YYYY-MM-DD; send an empty string to clear the deadline
+          type: string
+        description:
+          type: string
+        image_key:
+          description: S3 object key; send an empty string to drop the image
+          type: string
+        link:
+          type: string
+        name:
+          description: Blank once trimmed is a 422
+          maxLength: 200
+          minLength: 1
+          type: string
+        priority:
+          enum:
+            - low
+            - medium
+            - high
+          type: string
+        status:
+          description: Moving out of wanted stamps resolved_at; moving back to wanted clears it
+          enum:
+            - wanted
+            - bought
+            - abandoned
+          type: string
       type: object
     UploadTicketDTO:
       additionalProperties: false
@@ -2833,7 +3130,95 @@ paths:
           description: Error
       security:
         - cookieAuth: []
-      summary: Get a presigned S3 URL to upload a project image
+      summary: Get a presigned S3 URL to upload an image (project or wishlist)
+      tags:
+        - admin
+  /api/admin/wishlist:
+    post:
+      operationId: create-wishlist-item
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateWishlistItemInputBody"
+        required: true
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminWishlistItemDTO"
+          description: Created
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ErrorModel"
+          description: Error
+      security:
+        - cookieAuth: []
+      summary: Create a wishlist item
+      tags:
+        - admin
+  /api/admin/wishlist/{id}:
+    delete:
+      operationId: delete-wishlist-item
+      parameters:
+        - description: Wishlist item ID
+          in: path
+          name: id
+          required: true
+          schema:
+            description: Wishlist item ID
+            format: int64
+            type: integer
+      responses:
+        "204":
+          description: No Content
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ErrorModel"
+          description: Error
+      security:
+        - cookieAuth: []
+      summary: Delete a wishlist item (for mistakes; resolved items stay for history)
+      tags:
+        - admin
+    patch:
+      operationId: update-wishlist-item
+      parameters:
+        - description: Wishlist item ID
+          in: path
+          name: id
+          required: true
+          schema:
+            description: Wishlist item ID
+            format: int64
+            type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateWishlistItemInputBody"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminWishlistItemDTO"
+          description: OK
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ErrorModel"
+          description: Error
+      security:
+        - cookieAuth: []
+      summary: Update a wishlist item (partial; status moves stamp resolved_at)
       tags:
         - admin
   /api/auth/logout:
@@ -3272,6 +3657,41 @@ paths:
       security:
         - cookieAuth: []
       summary: List posted transactions, filtered and paged (admin)
+      tags:
+        - finance
+  /api/finance/wishlist:
+    get:
+      operationId: list-finance-wishlist
+      parameters:
+        - description: Which items to return; defaults to the still-outstanding ones
+          explode: false
+          in: query
+          name: status
+          schema:
+            default: wanted
+            description: Which items to return; defaults to the still-outstanding ones
+            enum:
+              - wanted
+              - bought
+              - abandoned
+              - all
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListFinanceWishlistOutputBody"
+          description: OK
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ErrorModel"
+          description: Error
+      security:
+        - cookieAuth: []
+      summary: List wishlist items with a cost roll-up (admin)
       tags:
         - finance
   /api/projects:

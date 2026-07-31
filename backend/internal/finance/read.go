@@ -2,8 +2,10 @@ package finance
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -13,6 +15,7 @@ import (
 	"github.com/alifyandra/portfolio-site/backend/ent/pendingtransaction"
 	"github.com/alifyandra/portfolio-site/backend/ent/predicate"
 	"github.com/alifyandra/portfolio-site/backend/ent/transaction"
+	"github.com/alifyandra/portfolio-site/backend/ent/wishlistitem"
 )
 
 // This is the read side of the finance ledger (ADR 0017). Pure query functions over
@@ -642,6 +645,171 @@ func SpendingSummary(ctx context.Context, client *ent.Client, accountID int, fro
 		Transfers: tally.Transfers,
 		TxnCount:  tally.Count,
 	}, nil
+}
+
+// --- wishlist (portfolio-site#123) ---
+
+// defaultWishlistLimit / maxWishlistLimit bound a wishlist read the same way the
+// transaction limits do: a zero/negative request falls back to the default, anything
+// over the cap is clamped. The table holds tens of rows, so the default is generous
+// enough that a normal read is never cut short.
+const (
+	defaultWishlistLimit = 100
+	maxWishlistLimit     = 500
+)
+
+// WishlistStatusAll is the Status value that spans every lifecycle state instead of
+// filtering to one.
+const WishlistStatusAll = "all"
+
+// WishlistFilter narrows a wishlist query. Status "" (the default) means wanted only;
+// "all" spans every status; any single status value filters to it.
+type WishlistFilter struct {
+	Status string
+	Limit  int
+}
+
+// WishlistView is one wishlist item. Amount stays a pointer so "unknown price"
+// survives to the wire instead of collapsing to 0.
+type WishlistView struct {
+	ID               int
+	Name             string
+	Description      string
+	Amount           *float64
+	AmountIsEstimate bool
+	Currency         string
+	Priority         string
+	Status           string
+	Deadline         *time.Time
+	ResolvedAt       *time.Time
+	Link             string
+	ImageKey         string
+}
+
+// WishlistTotals is the roll-up the model would otherwise have to compute (and get
+// wrong when amounts are null). KnownCostTotal sums the non-nil amounts of the returned
+// rows that are denominated in Currency; UnknownCostCount is how many rows had no amount
+// at all. CurrencyMismatchCount is how many priced rows were left OUT of KnownCostTotal
+// because they carry a different currency: the total is a single-currency figure, and a
+// foreign-currency item would otherwise be added to it as if the codes matched. A row
+// with no amount is only counted as unknown, since there is no figure to convert.
+type WishlistTotals struct {
+	ItemCount             int
+	KnownCostTotal        float64
+	UnknownCostCount      int
+	CurrencyMismatchCount int
+	Currency              string
+}
+
+// wishlistPriorityRank ranks the priority enum for ordering. The enum is stored as a
+// string, so a SQL ORDER BY would sort it alphabetically (high, low, medium); ranking
+// in Go keeps high-to-low correct on both Postgres and the SQLite used by tests.
+var wishlistPriorityRank = map[wishlistitem.Priority]int{
+	wishlistitem.PriorityHigh:   3,
+	wishlistitem.PriorityMedium: 2,
+	wishlistitem.PriorityLow:    1,
+}
+
+// Wishlist lists the owner's one-off wants: priority high to low, then nearest
+// deadline (rows with no deadline last), then newest first. Ordering and the roll-up
+// both run in Go rather than SQL, because the priority enum does not sort
+// alphabetically and nulls-last differs per dialect. Totals describe the rows actually
+// returned, so a limited read never reports a cost total for rows the caller cannot
+// see. An unrecognised Status is an error rather than a silent full scan.
+//
+// The bool return is `truncated`: true only when the row limit actually dropped rows, so
+// its absence means the answer (and the roll-up) covers the whole list. Truncation drops
+// the tail of the read order, which is the lowest-priority end. A caller can raise Limit
+// (up to maxWishlistLimit) for a complete answer. Following the no-silent-caps rule the
+// external_only path set (see externalScanCap).
+func Wishlist(ctx context.Context, client *ent.Client, f WishlistFilter) ([]WishlistView, WishlistTotals, bool, error) {
+	q := client.WishlistItem.Query()
+	switch status := strings.ToLower(strings.TrimSpace(f.Status)); status {
+	case "":
+		q = q.Where(wishlistitem.StatusEQ(wishlistitem.StatusWanted))
+	case WishlistStatusAll:
+		// Every status: no predicate.
+	case string(wishlistitem.StatusWanted), string(wishlistitem.StatusBought), string(wishlistitem.StatusAbandoned):
+		q = q.Where(wishlistitem.StatusEQ(wishlistitem.Status(status)))
+	default:
+		return nil, WishlistTotals{}, false, fmt.Errorf("unknown status %q (want wanted, bought, abandoned or all)", f.Status)
+	}
+
+	rows, err := q.All(ctx)
+	if err != nil {
+		return nil, WishlistTotals{}, false, err
+	}
+
+	sort.SliceStable(rows, func(i, j int) bool { return lessWishlistItem(rows[i], rows[j]) })
+
+	limit := f.Limit
+	if limit <= 0 {
+		limit = defaultWishlistLimit
+	}
+	if limit > maxWishlistLimit {
+		limit = maxWishlistLimit
+	}
+	truncated := false
+	if len(rows) > limit {
+		truncated = true
+		slog.Warn("finance: wishlist read hit the row limit; the lowest-priority items are omitted from this page and from its totals",
+			"limit", limit, "matched", len(rows))
+		rows = rows[:limit]
+	}
+
+	views := make([]WishlistView, 0, len(rows))
+	totals := WishlistTotals{ItemCount: len(rows), Currency: reportCurrency}
+	for _, w := range rows {
+		views = append(views, WishlistView{
+			ID:               w.ID,
+			Name:             w.Name,
+			Description:      w.Description,
+			Amount:           w.Amount,
+			AmountIsEstimate: w.AmountIsEstimate,
+			Currency:         w.Currency,
+			Priority:         string(w.Priority),
+			Status:           string(w.Status),
+			Deadline:         w.Deadline,
+			ResolvedAt:       w.ResolvedAt,
+			Link:             w.Link,
+			ImageKey:         w.ImageKey,
+		})
+		if w.Amount == nil {
+			totals.UnknownCostCount++
+			continue
+		}
+		if w.Currency != totals.Currency {
+			// Keep a foreign-currency figure out of a single-currency total, and report
+			// how many were left out so the omission is visible rather than silent.
+			totals.CurrencyMismatchCount++
+			continue
+		}
+		totals.KnownCostTotal += *w.Amount
+	}
+	return views, totals, truncated, nil
+}
+
+// lessWishlistItem is the wishlist read order: priority high to low, then deadline
+// ascending with no-deadline rows last, then created_at descending (id descending as a
+// stable tiebreak). Pressing items come first, so a truncated read still shows them.
+func lessWishlistItem(a, b *ent.WishlistItem) bool {
+	if ra, rb := wishlistPriorityRank[a.Priority], wishlistPriorityRank[b.Priority]; ra != rb {
+		return ra > rb
+	}
+	if a.Deadline != nil || b.Deadline != nil {
+		switch {
+		case a.Deadline == nil:
+			return false
+		case b.Deadline == nil:
+			return true
+		case !a.Deadline.Equal(*b.Deadline):
+			return a.Deadline.Before(*b.Deadline)
+		}
+	}
+	if !a.CreatedAt.Equal(b.CreatedAt) {
+		return a.CreatedAt.After(b.CreatedAt)
+	}
+	return a.ID > b.ID
 }
 
 // toTxnViews maps posted transaction rows (with their account edge eager-loaded) to
