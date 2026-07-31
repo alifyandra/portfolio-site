@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -271,6 +272,189 @@ func TestFinanceWishlist_Ordering(t *testing.T) {
 	if got.Items[1].Deadline != nil {
 		t.Errorf("no-deadline row rendered %v, want null", *got.Items[1].Deadline)
 	}
+}
+
+// TestFinanceBalanceHistory_UnknownStepAndBasisAre400: a mistyped step or basis is
+// rejected, never quietly served as the raw/snapshot default, so a caller cannot read a
+// differently-shaped series as the one it asked for.
+func TestFinanceBalanceHistory_UnknownStepAndBasisAre400(t *testing.T) {
+	api, client := newFinanceReadTestAPI(t)
+	ctx := context.Background()
+	admin := sessionCookieFor(t, ctx, client, user.RoleAdmin)
+	acc := client.Account.Create().SetSource("commbank").SetName("A").
+		SetType(account.TypeEveryday).SetClass(account.ClassAsset).SetCurrency("AUD").SaveX(ctx)
+
+	base := "/api/finance/accounts/" + strconv.Itoa(acc.ID) + "/balances"
+	for _, q := range []string{"?step=monthly", "?step=hour", "?basis=derived", "?basis=ledgers"} {
+		if resp := api.Get(base+q, admin); resp.Code != http.StatusBadRequest {
+			t.Errorf("%s = %d, want 400; body=%s", q, resp.Code, resp.Body.String())
+		}
+	}
+	// The known values are accepted.
+	for _, q := range []string{"", "?step=day", "?step=week", "?step=month", "?basis=snapshot", "?basis=ledger", "?step=month&basis=ledger"} {
+		if resp := api.Get(base+q, admin); resp.Code != http.StatusOK {
+			t.Errorf("%s = %d, want 200; body=%s", q, resp.Code, resp.Body.String())
+		}
+	}
+}
+
+// TestFinanceBalanceHistory_SnapshotResponseUnchanged: omitting step and basis returns the
+// raw reading list with exactly as_of and balance per point and no other keys, so nothing
+// consuming that path changes. Bucketing on the snapshot basis adds only `carried`.
+func TestFinanceBalanceHistory_SnapshotResponseUnchanged(t *testing.T) {
+	api, client := newFinanceReadTestAPI(t)
+	ctx := context.Background()
+	admin := sessionCookieFor(t, ctx, client, user.RoleAdmin)
+	acc := client.Account.Create().SetSource("commbank").SetName("A").
+		SetType(account.TypeEveryday).SetClass(account.ClassAsset).SetCurrency("AUD").SaveX(ctx)
+	// Two readings a day apart, both inside the default 90-day window.
+	now := time.Now().UTC()
+	client.BalanceSnapshot.Create().SetBalance(100).SetAsOf(now.AddDate(0, 0, -3)).SetAccountID(acc.ID).SaveX(ctx)
+	client.BalanceSnapshot.Create().SetBalance(300).SetAsOf(now.AddDate(0, 0, -1)).SetAccountID(acc.ID).SaveX(ctx)
+
+	base := "/api/finance/accounts/" + strconv.Itoa(acc.ID) + "/balances"
+
+	// Raw: exactly the two keys, on every point, and no series-level keys.
+	resp := api.Get(base, admin)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("raw = %d, want 200; body=%s", resp.Code, resp.Body.String())
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(raw) != 1 || raw["points"] == nil {
+		t.Errorf("raw body keys = %v, want only points", keysOf(raw))
+	}
+	pts, _ := raw["points"].([]any)
+	if len(pts) != 2 {
+		t.Fatalf("raw points = %d, want 2", len(pts))
+	}
+	for i, p := range pts {
+		pm := p.(map[string]any)
+		if len(pm) != 2 || pm["as_of"] == nil || pm["balance"] == nil {
+			t.Errorf("raw point %d keys = %v, want only as_of and balance", i, keysOf(pm))
+		}
+	}
+
+	// basis=snapshot with a step: still only as_of/balance plus carried where it applies,
+	// and no ledger fields anywhere.
+	resp = api.Get(base+"?step=day", admin)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("step=day = %d, want 200; body=%s", resp.Code, resp.Body.String())
+	}
+	var bucketed map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &bucketed); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(bucketed) != 1 {
+		t.Errorf("snapshot body keys = %v, want only points (ledger metadata must be absent)", keysOf(bucketed))
+	}
+	bpts, _ := bucketed["points"].([]any)
+	if len(bpts) != 3 {
+		t.Fatalf("day points = %d, want 3 (a reading, a carried gap, a reading)", len(bpts))
+	}
+	carried := 0
+	for i, p := range bpts {
+		pm := p.(map[string]any)
+		for _, banned := range []string{"open", "close", "in", "out", "net", "external_in", "external_out", "txns", "source", "drift", "flow_mismatch"} {
+			if _, ok := pm[banned]; ok {
+				t.Errorf("snapshot point %d leaked the ledger field %q", i, banned)
+			}
+		}
+		if c, ok := pm["carried"]; ok {
+			if c != true {
+				t.Errorf("point %d carried = %v, want true whenever the key is present", i, c)
+			}
+			carried++
+		}
+	}
+	if carried != 1 {
+		t.Errorf("carried points = %d, want 1 (the gap day)", carried)
+	}
+}
+
+// TestFinanceBalanceHistory_LedgerBasisDTO: basis=ledger carries the per-bucket flow fields
+// and the series-level metadata through the wire DTO.
+func TestFinanceBalanceHistory_LedgerBasisDTO(t *testing.T) {
+	api, client := newFinanceReadTestAPI(t)
+	ctx := context.Background()
+	admin := sessionCookieFor(t, ctx, client, user.RoleAdmin)
+	acc := client.Account.Create().SetSource("commbank").SetName("A").
+		SetType(account.TypeEveryday).SetClass(account.ClassAsset).SetCurrency("AUD").SaveX(ctx)
+
+	now := time.Now().UTC()
+	day := func(back int) time.Time {
+		d := now.AddDate(0, 0, -back)
+		return time.Date(d.Year(), d.Month(), d.Day(), 0, 0, 0, 0, time.UTC)
+	}
+	client.Transaction.Create().SetDedupHash("api-l1").SetPostedDate(day(3)).
+		SetAmount(-100).SetDescription("MERCHANT").SetBalanceAfter(900).SetAccountID(acc.ID).SaveX(ctx)
+	client.Transaction.Create().SetDedupHash("api-l2").SetPostedDate(day(2)).
+		SetAmount(-200).SetDescription("MERCHANT").SetBalanceAfter(700).SetAccountID(acc.ID).SaveX(ctx)
+
+	resp := api.Get("/api/finance/accounts/"+strconv.Itoa(acc.ID)+"/balances?step=day&basis=ledger", admin)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("ledger = %d, want 200; body=%s", resp.Code, resp.Body.String())
+	}
+	var body struct {
+		Points          []BalancePointDTO `json:"points"`
+		Basis           *string           `json:"basis"`
+		LedgerFrom      *string           `json:"ledger_from"`
+		StartUnverified *bool             `json:"start_unverified"`
+		DriftMax        *float64          `json:"drift_max"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v; body=%s", err, resp.Body.String())
+	}
+	if body.Basis == nil || *body.Basis != "ledger" {
+		t.Errorf("basis = %v, want ledger", body.Basis)
+	}
+	if body.LedgerFrom == nil || *body.LedgerFrom != day(3).Format(dateLayout) {
+		t.Errorf("ledger_from = %v, want %s", body.LedgerFrom, day(3).Format(dateLayout))
+	}
+	if body.StartUnverified == nil || !*body.StartUnverified {
+		t.Errorf("start_unverified = %v, want true", body.StartUnverified)
+	}
+	if body.DriftMax == nil {
+		t.Error("drift_max missing under basis=ledger")
+	}
+	if len(body.Points) != 2 {
+		t.Fatalf("points = %d, want 2", len(body.Points))
+	}
+	p := body.Points[0]
+	if p.Open == nil || *p.Open != 1000 {
+		t.Errorf("open = %v, want 1000", p.Open)
+	}
+	if p.Close == nil || *p.Close != 900 || p.Balance != 900 {
+		t.Errorf("close/balance = %v/%v, want 900/900", p.Close, p.Balance)
+	}
+	if p.Out == nil || *p.Out != 100 {
+		t.Errorf("out = %v, want 100 as a positive magnitude", p.Out)
+	}
+	if p.Net == nil || *p.Net != -100 {
+		t.Errorf("net = %v, want -100", p.Net)
+	}
+	if p.Txns == nil || *p.Txns != 1 {
+		t.Errorf("txns = %v, want 1", p.Txns)
+	}
+	if p.Source == nil || *p.Source != "balance_after" {
+		t.Errorf("source = %v, want balance_after", p.Source)
+	}
+	if p.FlowMismatch != nil {
+		t.Errorf("flow_mismatch = %v, want absent on a consistent bucket", p.FlowMismatch)
+	}
+}
+
+// keysOf lists a decoded object's keys, for asserting that a response carries no more than
+// the fields it is supposed to.
+func keysOf(m map[string]any) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // TestFinanceTransactions_BadDateIs422: a malformed from/to query is a 422, not a

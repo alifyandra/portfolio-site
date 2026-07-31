@@ -695,7 +695,7 @@ func TestLedgerSeries_FlowsMatchSpendingSummary(t *testing.T) {
 	// External in, external out, and an internal transfer to the owner's own saver.
 	seedTxnAfter(t, ctx, client, checking, "ts1", day, 3000, 4000, "SALARY")
 	seedTxnAfter(t, ctx, client, checking, "ts2", day, -500, 3500, "RENT DIRECT DEBIT")
-	seedTxnAfter(t, ctx, client, checking, "ts3", day, -1000, 2500, "Transfer to xx2158")
+	seedTxnAfter(t, ctx, client, checking, "ts3", day, -1000, 2500, "Transfer to xx5353")
 
 	series, err := BalanceSeries(ctx, client, BalanceSeriesFilter{AccountID: checking.ID, Step: StepDay, Basis: BasisLedger})
 	if err != nil {
