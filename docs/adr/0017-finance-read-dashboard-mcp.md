@@ -30,7 +30,10 @@ the dashboard and the LLM drift apart.
 
 `internal/finance/read.go` holds query-only functions over the Ent client:
 `NetWorthSummary`, `Accounts`, `BalanceHistory`, `ListTransactions` (filter + paging +
-total), `Pending`, `SearchMerchant`, and `MonthlySummary`. They return plain view
+total), `Pending`, `SearchMerchant`, and `MonthlySummary`, with `BalanceSeries` (the
+bucketing and both derivation bases) alongside in `internal/finance/balance_series.go`.
+Aggregation runs in Go rather than SQL: the finance tests run on in-memory sqlite, which has
+no `date_trunc`, and the bucket rules are the part that most needs unit tests. They return plain view
 structs, round nothing (money stays `float64`; formatting is the caller's job), and
 never mutate. Both the HTTP handlers and the MCP tools call these directly, so the
 dashboard and the LLM run byte-identical queries.
@@ -57,7 +60,14 @@ friend/member visible, so there is no tier below admin here.
 
 - `get-finance-summary` `GET /api/finance/summary`
 - `list-finance-accounts` `GET /api/finance/accounts`
-- `get-finance-balance-history` `GET /api/finance/accounts/{id}/balances` (`days`, 0 = all)
+- `get-finance-balance-history` `GET /api/finance/accounts/{id}/balances` (`days`, 0 = all;
+  `step` = ""|day|week|month; `basis` = snapshot|ledger). Omitting `step` and `basis` returns
+  the raw per-reading list unchanged. A step buckets to Australia/Melbourne local boundaries
+  and reports each bucket's LAST value (close-of-period, since a balance is a stock and not a
+  flow), carrying a quiet bucket forward flagged `carried`. `basis=ledger` derives the same
+  series from posted transactions and adds per-bucket open/in/out/net plus the reconciliation
+  fields. An unknown `step` or `basis` is a 400, never a silent fall back. See the
+  [Balance Series] / [Balance Basis] / [Balance Reconciliation] terms in CONTEXT.md.
 - `list-finance-transactions` `GET /api/finance/transactions` (`account_id`, `from`, `to`,
   `limit` default 50 capped 500, `offset`)
 - `list-finance-pending` `GET /api/finance/pending` (`account_id`)
@@ -113,10 +123,17 @@ write and an ingest token can never read. A bearer identity is invisible to
 **Tools** (each calls the read service in-process, returns one JSON text content block):
 `get_net_worth`, `list_accounts`, `list_transactions` (`account_id?`, `from?`, `to?`,
 `limit?`), `search_merchant` (`query` required, `limit?`), `monthly_summary`
-(`account_id?`, `months?`), `list_pending`, `list_wishlist` (`status?`, `limit?`:
-the one-off wants plus a known-cost total and a count of items whose price is
-unknown, so a purchase can be weighed against what is already queued, see
-portfolio-site#123). Structural failures (unknown tool, bad
+(`account_id?`, `months?`), `balance_history` (`account_id?` omitted = every account as its
+own series, `step?` default month, `from?`/`to?` default the last 12 months, `basis?` default
+snapshot; a total point budget bounds the answer and going over returns `truncated: true`
+with the coarsen-step advice rather than trimming quietly), `list_pending`, `list_wishlist`
+(`status?`, `limit?`: the one-off wants plus a known-cost total and a count of items whose
+price is unknown, so a purchase can be weighed against what is already queued, see
+portfolio-site#123). The tool defaults are deliberately coarser than the dashboard's:
+pixels are cheap and tokens are not, so bucketing is what makes balance history affordable
+to expose to an LLM at all. Note also that the HTTP endpoint above is admin-cookie-gated,
+so a `finance.read` bearer cannot read balance history any other way.
+Structural failures (unknown tool, bad
 params) are JSON-RPC errors; a domain/validation failure (bad date, missing query) is a
 tool-error result (`isError: true`) so the model sees the message, per MCP convention.
 
