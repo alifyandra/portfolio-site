@@ -125,6 +125,9 @@ func TestFinanceBills_CRUDAndDerivedFields(t *testing.T) {
 	if created.Currency != "AUD" || created.Status != "active" || created.MatchWindowDays != 5 || created.AmountTolerancePct != 10 {
 		t.Errorf("defaults = %+v, want AUD / active / 5 / 10", created)
 	}
+	if !created.AutoMatched {
+		t.Error("auto_matched = false for a bill created with a pattern, want true")
+	}
 	if created.NextDue != today.Format(dateLayout) || created.DaysUntil != 0 {
 		t.Errorf("derived = %s / %d, want today / 0", created.NextDue, created.DaysUntil)
 	}
@@ -215,6 +218,41 @@ func TestFinanceBills_BadInputIs422(t *testing.T) {
 	}
 }
 
+// TestFinanceBills_HandReconciledBill: a bill created with no match_pattern reports
+// auto_matched=false and is never dragged into an overdue state or a narrow "due soon"
+// answer, however many unmatched cycles sit behind it. Nothing can ever match it, so its
+// absent payments say nothing.
+func TestFinanceBills_HandReconciledBill(t *testing.T) {
+	api, client := newFinanceBillsTestAPI(t)
+	ctx := context.Background()
+	admin := sessionCookieFor(t, ctx, client, user.RoleAdmin)
+	today := todayUTC()
+
+	acc := client.Account.Create().SetSource("commbank").SetName("Everyday").
+		SetType(account.TypeEveryday).SetClass(account.ClassAsset).SetCurrency("AUD").SaveX(ctx)
+	client.Transaction.Create().SetDedupHash("bills-coverage").SetPostedDate(today.AddDate(0, -8, 0)).
+		SetAmount(-1).SetDescription("COVERAGE ROW").SetAccountID(acc.ID).SaveX(ctx)
+
+	resp := api.Post("/api/admin/finance/bills", admin, map[string]any{
+		"name": "Hand reconciled", "expected_amount": 500,
+		"anchor_date": today.AddDate(0, -6, 0).Format(dateLayout),
+	})
+	if resp.Code != http.StatusCreated {
+		t.Fatalf("create = %d; body=%s", resp.Code, resp.Body.String())
+	}
+	var bill FinanceBillDTO
+	_ = json.Unmarshal(resp.Body.Bytes(), &bill)
+	if bill.AutoMatched {
+		t.Error("auto_matched = true for a bill with no match pattern, want false")
+	}
+	if bill.Overdue {
+		t.Error("overdue = true for a bill nothing can ever match, want false")
+	}
+	if bill.DaysUntil < 0 {
+		t.Errorf("days_until = %d, want the forward occurrence rather than a backdated cycle", bill.DaysUntil)
+	}
+}
+
 // TestFinanceBills_ReconcileAndManualLink: reconcile links a cycle from a stored row and a
 // re-run links nothing; a hand link sets method=manual, and repeating it is a 409 rather
 // than a silent replacement.
@@ -245,8 +283,9 @@ func TestFinanceBills_ReconcileAndManualLink(t *testing.T) {
 		t.Fatalf("reconcile = %d, want 200; body=%s", resp.Code, resp.Body.String())
 	}
 	var rec struct {
-		BillsScanned   int `json:"bills_scanned"`
-		PaymentsLinked int `json:"payments_linked"`
+		BillsScanned       int `json:"bills_scanned"`
+		CandidatesCompared int `json:"candidates_compared"`
+		PaymentsLinked     int `json:"payments_linked"`
 	}
 	_ = json.Unmarshal(resp.Body.Bytes(), &rec)
 	if rec.BillsScanned != 1 || rec.PaymentsLinked != 1 {
@@ -256,6 +295,9 @@ func TestFinanceBills_ReconcileAndManualLink(t *testing.T) {
 	_ = json.Unmarshal(resp.Body.Bytes(), &rec)
 	if rec.PaymentsLinked != 0 {
 		t.Errorf("re-run linked %d, want 0", rec.PaymentsLinked)
+	}
+	if rec.CandidatesCompared != 0 {
+		t.Errorf("re-run compared %d rows, want 0: a settled cycle costs nothing", rec.CandidatesCompared)
 	}
 
 	// The linked cycle surfaces on the read as last_paid_*.
@@ -291,6 +333,13 @@ func TestFinanceBills_ReconcileAndManualLink(t *testing.T) {
 	}
 	if resp := api.Post("/api/admin/finance/bills/9999/payments", admin, map[string]any{"transaction_id": txn.ID}); resp.Code != http.StatusNotFound {
 		t.Errorf("link on a missing bill = %d, want 404", resp.Code)
+	}
+	// A date off the bill's cadence grid is a 422: it would settle a cycle that does not
+	// exist and leave the real one open to the matcher.
+	if resp := api.Post("/api/admin/finance/bills/"+itoa(bill.ID)+"/payments", admin, map[string]any{
+		"transaction_id": txn.ID, "occurrence_date": today.AddDate(0, 0, 3).Format(dateLayout),
+	}); resp.Code != http.StatusUnprocessableEntity {
+		t.Errorf("off-grid occurrence_date = %d, want 422; body=%s", resp.Code, resp.Body.String())
 	}
 
 	// Deleting the bill takes its links with it, leaving the ledger row alone.

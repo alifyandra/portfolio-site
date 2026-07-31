@@ -587,7 +587,7 @@ components:
           readOnly: true
           type: string
         occurrence_date:
-          description: Cycle due date, YYYY-MM-DD; defaults to the cycle nearest the transaction's posted date
+          description: Cycle due date, YYYY-MM-DD; must be one of the bill's derived occurrences. Defaults to the cycle nearest the transaction's posted date
           type: string
         transaction_id:
           description: Posted transaction that paid the cycle
@@ -1023,6 +1023,9 @@ components:
         anchor_date:
           description: YYYY-MM-DD; every occurrence steps the cadence from here
           type: string
+        auto_matched:
+          description: "False when the bill has no match_pattern: it is reconciled by hand, so no absence is inferred and it is never reported overdue"
+          type: boolean
         cadence:
           enum:
             - weekly
@@ -1036,7 +1039,7 @@ components:
         currency:
           type: string
         days_until:
-          description: Whole days from today to next_due; negative when overdue
+          description: Whole days from today to next_due; negative when that date is in the past
           format: int64
           type: integer
         ended_on:
@@ -1075,12 +1078,12 @@ components:
         name:
           type: string
         next_due:
-          description: YYYY-MM-DD; the derived due date needing attention (the unsettled past cycle when overdue)
+          description: YYYY-MM-DD; the derived due date needing attention (the unsettled past cycle when overdue, the last expected cycle once ended)
           type: string
         notes:
           type: string
         overdue:
-          description: An active bill whose previous cycle is past its match window with no payment linked
+          description: An active, auto-matched bill whose previous covered cycle is past its match window with no payment linked
           type: boolean
         payee:
           type: string
@@ -1114,6 +1117,7 @@ components:
         - last_paid_date
         - last_paid_amount
         - overdue
+        - auto_matched
         - expected_monthly
         - created_at
         - updated_at
@@ -2365,7 +2369,12 @@ components:
           description: Bills with a match pattern and at least one cycle in range
           format: int64
           type: integer
+        candidates_compared:
+          description: Posted rows the match rule was evaluated against; the pass's cost, bounded by the window rather than the ledger's age
+          format: int64
+          type: integer
         cycles_checked:
+          description: Unsettled cycles the pass tried to fill; settled ones are skipped before any work
           format: int64
           type: integer
         payments_linked:
@@ -2375,6 +2384,7 @@ components:
       required:
         - bills_scanned
         - cycles_checked
+        - candidates_compared
         - payments_linked
       type: object
     ReorderPlaylistsInputBody:
@@ -4022,12 +4032,12 @@ paths:
               - ended
               - all
             type: string
-        - description: Keep only bills due within this many days from today (overdue bills always pass); 0 (default) returns all
+        - description: Keep only bills due within this many days from today, plus anything overdue; 0 (default) returns all
           explode: false
           in: query
           name: within_days
           schema:
-            description: Keep only bills due within this many days from today (overdue bills always pass); 0 (default) returns all
+            description: Keep only bills due within this many days from today, plus anything overdue; 0 (default) returns all
             format: int64
             type: integer
         - description: Filter to bills paid from one account; 0 (default) spans all, and bills with no account are then included

@@ -14,9 +14,9 @@ import (
 )
 
 // Recurring-bill tests (portfolio-site#125). Two halves: the occurrence generator (pure
-// arithmetic, table-driven over the nasty calendar cases) and the matching pass (each AND
-// clause on its own, plus idempotency and the manual-link rule). All amounts and labels
-// here are invented.
+// arithmetic, table-driven over the nasty calendar cases) and the derivations layered on
+// top of it (overdue, ended, the matching pass and the cost of that pass). All amounts and
+// labels here are invented.
 
 // seedBill creates a bill with sane defaults, applying the caller's overrides last.
 func seedBill(t *testing.T, ctx context.Context, client *ent.Client, name string, amount float64, cadence recurringbill.Cadence, anchor time.Time, opts ...func(*ent.RecurringBillCreate)) *ent.RecurringBill {
@@ -30,6 +30,14 @@ func seedBill(t *testing.T, ctx context.Context, client *ent.Client, name string
 		o(create)
 	}
 	return create.SaveX(ctx)
+}
+
+// seedCoverage puts one unrelated posted row in the ledger so coverage starts at `from`.
+// Overdue is an inference from an absence, and an absence before the ledger begins means
+// "no data", so a test asserting anything about overdue needs a coverage floor first.
+func seedCoverage(t *testing.T, ctx context.Context, client *ent.Client, acc *ent.Account, from time.Time) {
+	t.Helper()
+	seedTxn(t, ctx, client, acc, "coverage", from, -1, "COVERAGE ROW", "")
 }
 
 // --- occurrence generation ---
@@ -157,10 +165,29 @@ func TestNextPrevDue(t *testing.T) {
 	}
 }
 
-// TestOccurrencesBetween_EndedOnMidCycle: ended_on landing in the middle of a cycle caps
-// the window at the end date, so the cycle whose due date falls after it is not expected
-// and never generated. The reconcile window is where that clip is applied.
-func TestOccurrencesBetween_EndedOnMidCycle(t *testing.T) {
+// TestIsOccurrence_OnAndOffGrid is the grid check the manual-link endpoint relies on.
+func TestIsOccurrence_OnAndOffGrid(t *testing.T) {
+	anchor := day(2026, time.March, 5)
+	for _, d := range []time.Time{anchor, day(2026, time.April, 5), day(2026, time.February, 5)} {
+		if !isOccurrence(anchor, recurringbill.CadenceMonthly, d) {
+			t.Errorf("%s reported off-grid, want on-grid", d.Format(dateLayoutTest))
+		}
+	}
+	for _, d := range []time.Time{anchor.AddDate(0, 0, 3), day(2026, time.April, 6), day(2026, time.April, 4)} {
+		if isOccurrence(anchor, recurringbill.CadenceMonthly, d) {
+			t.Errorf("%s reported on-grid, want off-grid", d.Format(dateLayoutTest))
+		}
+	}
+	// A 31st anchor's clamped cycle is a real occurrence.
+	if !isOccurrence(day(2026, time.January, 31), recurringbill.CadenceMonthly, day(2026, time.February, 28)) {
+		t.Error("28 Feb reported off-grid for a 31st anchor, want on-grid (clamped)")
+	}
+}
+
+// TestCycleWindow_EndedOnMidCycle: ended_on landing in the middle of a cycle caps the
+// window at the end date, so the cycle whose due date falls after it is not expected and
+// never generated.
+func TestCycleWindow_EndedOnMidCycle(t *testing.T) {
 	client := newFinanceTestClient(t)
 	ctx := context.Background()
 	anchor := day(2026, time.January, 10)
@@ -170,7 +197,8 @@ func TestOccurrencesBetween_EndedOnMidCycle(t *testing.T) {
 		c.SetStatus(recurringbill.StatusEnded).SetEndedOn(ended).SetMatchPattern("streaming")
 	})
 
-	got := reconcileWindow(b, day(2026, time.July, 1))
+	coverage := anchor
+	got := cycleWindow(b, &coverage, ReconcileOptions{}, day(2026, time.July, 1))
 	want := []time.Time{
 		day(2026, time.January, 10), day(2026, time.February, 10), day(2026, time.March, 10), day(2026, time.April, 10),
 	}
@@ -212,6 +240,21 @@ func TestMonthlyEquivalent(t *testing.T) {
 	}
 }
 
+// TestLocalToday_IsMelbourneCalendarDay: due dates are calendar facts the owner reads in
+// Melbourne, so "today" must be the Melbourne day. For the first ten hours of an
+// Australian day the UTC day is still yesterday, and keying off UTC there would report a
+// bill due today as one day out and cut every overdue window short.
+func TestLocalToday_IsMelbourneCalendarDay(t *testing.T) {
+	if reportTZ.String() != "Australia/Melbourne" {
+		t.Fatalf("reportTZ = %q, want Australia/Melbourne (is the tz database available?)", reportTZ)
+	}
+	n := time.Now().In(reportTZ)
+	want := time.Date(n.Year(), n.Month(), n.Day(), 0, 0, 0, 0, time.UTC)
+	if got := localToday(); !got.Equal(want) {
+		t.Errorf("localToday = %s, want the Melbourne calendar day %s", got.Format(dateLayoutTest), want.Format(dateLayoutTest))
+	}
+}
+
 // --- read layer ---
 
 // TestListRecurringBills_TotalsExcludePaused: a paused subscription still lists (with
@@ -220,7 +263,7 @@ func TestMonthlyEquivalent(t *testing.T) {
 func TestListRecurringBills_TotalsExcludePaused(t *testing.T) {
 	client := newFinanceTestClient(t)
 	ctx := context.Background()
-	today := normalizeDate(time.Now())
+	today := localToday()
 
 	seedBill(t, ctx, client, "Rent", 600, recurringbill.CadenceFortnightly, today)
 	seedBill(t, ctx, client, "Gym", 50, recurringbill.CadenceMonthly, today, func(c *ent.RecurringBillCreate) {
@@ -263,11 +306,11 @@ func TestListRecurringBills_TotalsExcludePaused(t *testing.T) {
 func TestListRecurringBills_DerivedFields(t *testing.T) {
 	client := newFinanceTestClient(t)
 	ctx := context.Background()
-	today := normalizeDate(time.Now())
+	today := localToday()
 	acc := seedAccount(t, ctx, client, "Everyday", account.ClassAsset, account.TypeEveryday)
 
 	seedBill(t, ctx, client, "Insurance", 42.5, recurringbill.CadenceMonthly, today, func(c *ent.RecurringBillCreate) {
-		c.SetAccountID(acc.ID).SetPayee("Placeholder Insurer")
+		c.SetAccountID(acc.ID).SetPayee("Placeholder Insurer").SetMatchPattern("insurance")
 	})
 
 	views, _, err := ListRecurringBills(ctx, client, BillFilter{})
@@ -284,6 +327,9 @@ func TestListRecurringBills_DerivedFields(t *testing.T) {
 	if v.Overdue || v.LastPaidDate != nil || v.LastPaidAmount != nil {
 		t.Errorf("unreconciled bill = %+v, want not overdue and no last paid", v)
 	}
+	if !v.AutoMatched {
+		t.Error("auto_matched = false for a bill that carries a pattern, want true")
+	}
 	if v.ExpectedMonthly != 42.5 {
 		t.Errorf("expected_monthly = %v, want 42.5", v.ExpectedMonthly)
 	}
@@ -293,14 +339,152 @@ func TestListRecurringBills_DerivedFields(t *testing.T) {
 	}
 }
 
+// TestBillView_NoPatternIsNeverOverdue is the hand-reconciled probe. A bill with no
+// match_pattern can never be matched automatically, so an absent payment says nothing: it
+// must NOT be reported overdue, must NOT have its due date dragged into the past, and must
+// not turn up in a "due in the next day" answer. auto_matched carries the real state.
+func TestBillView_NoPatternIsNeverOverdue(t *testing.T) {
+	client := newFinanceTestClient(t)
+	ctx := context.Background()
+	today := localToday()
+	acc := seedAccount(t, ctx, client, "Everyday", account.ClassAsset, account.TypeEveryday)
+	seedCoverage(t, ctx, client, acc, today.AddDate(0, -8, 0))
+
+	// Monthly, anchored six months back, no pattern: six unmatched cycles behind it.
+	anchor := today.AddDate(0, -6, 0)
+	seedBill(t, ctx, client, "Hand reconciled", 500, recurringbill.CadenceMonthly, anchor)
+
+	views, _, err := ListRecurringBills(ctx, client, BillFilter{})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	v := views[0]
+	if v.Overdue {
+		t.Error("overdue = true for a bill with no match pattern; nothing can ever match it")
+	}
+	if v.AutoMatched {
+		t.Error("auto_matched = true for a bill with no match pattern, want false")
+	}
+	if v.DaysUntil < 0 {
+		t.Errorf("days_until = %d, want the forward occurrence (>= 0), not a backdated cycle", v.DaysUntil)
+	}
+	want := nextDue(anchor, recurringbill.CadenceMonthly, today)
+	if !v.NextDue.Equal(want) {
+		t.Errorf("next_due = %s, want the true forward occurrence %s", v.NextDue.Format(dateLayoutTest), want.Format(dateLayoutTest))
+	}
+
+	// "What is due in the next day" must not pick it up weeks early.
+	if v.DaysUntil > 1 {
+		narrow, _, err := ListRecurringBills(ctx, client, BillFilter{WithinDays: 1})
+		if err != nil {
+			t.Fatalf("list within_days: %v", err)
+		}
+		if len(narrow) != 0 {
+			t.Errorf("within_days=1 returned %d bills, want 0 (its next cycle is %d days out)", len(narrow), v.DaysUntil)
+		}
+	}
+}
+
+// TestBillView_OverdueBoundedByLedgerCoverage: a cycle older than the earliest posted row
+// cannot be reconciled, so its absence is "no data" rather than "not paid" and must not
+// backdate the reported due date forever. A cycle inside coverage still reports overdue.
+func TestBillView_OverdueBoundedByLedgerCoverage(t *testing.T) {
+	client := newFinanceTestClient(t)
+	ctx := context.Background()
+	today := localToday()
+	acc := seedAccount(t, ctx, client, "Everyday", account.ClassAsset, account.TypeEveryday)
+
+	// An annual bill whose only past cycle is 40 days back, matchable, but a ledger that
+	// starts only 10 days ago: the cycle predates coverage.
+	seedBill(t, ctx, client, "Before coverage", 300, recurringbill.CadenceAnnual, today.AddDate(0, 0, -40), func(c *ent.RecurringBillCreate) {
+		c.SetMatchPattern("before coverage")
+	})
+	seedCoverage(t, ctx, client, acc, today.AddDate(0, 0, -10))
+
+	views, _, err := ListRecurringBills(ctx, client, BillFilter{})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if views[0].Overdue {
+		t.Error("overdue = true for a cycle before the ledger's earliest row; that absence is missing data")
+	}
+	if views[0].DaysUntil < 0 {
+		t.Errorf("days_until = %d, want the forward occurrence", views[0].DaysUntil)
+	}
+
+	// Same shape but the cycle sits inside coverage: that absence IS a missed bill.
+	seedBill(t, ctx, client, "Inside coverage", 300, recurringbill.CadenceAnnual, today.AddDate(0, 0, -8), func(c *ent.RecurringBillCreate) {
+		c.SetMatchPattern("inside coverage")
+	})
+	views, _, err = ListRecurringBills(ctx, client, BillFilter{Status: "active"})
+	if err != nil {
+		t.Fatalf("list again: %v", err)
+	}
+	var inside *BillView
+	for i := range views {
+		if views[i].Name == "Inside coverage" {
+			inside = &views[i]
+		}
+	}
+	if inside == nil {
+		t.Fatal("the in-coverage bill did not come back")
+	}
+	if !inside.Overdue || inside.DaysUntil != -8 {
+		t.Errorf("in-coverage bill = overdue %v / days_until %d, want overdue with -8", inside.Overdue, inside.DaysUntil)
+	}
+}
+
+// TestBillView_EndedBillStopsAtEndedOn: a commitment that stopped expects no occurrence
+// after ended_on, so it must not keep generating a fresh due date and render as "due
+// today", and it must not appear in a "due in the next 40 days" answer.
+func TestBillView_EndedBillStopsAtEndedOn(t *testing.T) {
+	client := newFinanceTestClient(t)
+	ctx := context.Background()
+	today := localToday()
+	acc := seedAccount(t, ctx, client, "Everyday", account.ClassAsset, account.TypeEveryday)
+	seedCoverage(t, ctx, client, acc, today.AddDate(-4, 0, 0))
+
+	anchor := today.AddDate(-3, 0, 0)
+	ended := today.AddDate(-1, 0, 0)
+	seedBill(t, ctx, client, "Cancelled policy", 120, recurringbill.CadenceMonthly, anchor, func(c *ent.RecurringBillCreate) {
+		c.SetStatus(recurringbill.StatusEnded).SetEndedOn(ended).SetMatchPattern("cancelled policy")
+	})
+
+	views, _, err := ListRecurringBills(ctx, client, BillFilter{Status: "all"})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	v := views[0]
+	wantDue := lastOccurrenceOnOrBefore(anchor, recurringbill.CadenceMonthly, ended)
+	if !v.NextDue.Equal(wantDue) {
+		t.Errorf("next_due = %s, want the last expected cycle %s (no occurrence past ended_on)",
+			v.NextDue.Format(dateLayoutTest), wantDue.Format(dateLayoutTest))
+	}
+	if v.DaysUntil >= 0 {
+		t.Errorf("days_until = %d, want negative: the last cycle is a year behind us", v.DaysUntil)
+	}
+	if v.Overdue {
+		t.Error("overdue = true for an ended commitment, want false")
+	}
+
+	views, _, err = ListRecurringBills(ctx, client, BillFilter{Status: "all", WithinDays: 40})
+	if err != nil {
+		t.Fatalf("list within_days: %v", err)
+	}
+	if len(views) != 0 {
+		t.Errorf("within_days=40 returned %d bills, want 0: a cancelled commitment is not falling due", len(views))
+	}
+}
+
 // TestListRecurringBills_WithinDaysAndAccountFilter: within_days keeps only what falls in
-// the window (an overdue bill always passes, since its days_until is negative), and
-// account_id excludes bills with no account set.
+// the window (an overdue bill still passes, since it is actionable now), and account_id
+// excludes bills with no account set.
 func TestListRecurringBills_WithinDaysAndAccountFilter(t *testing.T) {
 	client := newFinanceTestClient(t)
 	ctx := context.Background()
-	today := normalizeDate(time.Now())
+	today := localToday()
 	acc := seedAccount(t, ctx, client, "Everyday", account.ClassAsset, account.TypeEveryday)
+	seedCoverage(t, ctx, client, acc, today.AddDate(0, 0, -60))
 
 	// Due in 3 days, on the account.
 	seedBill(t, ctx, client, "Soon", 30, recurringbill.CadenceAnnual, today.AddDate(0, 0, 3), func(c *ent.RecurringBillCreate) {
@@ -308,8 +492,10 @@ func TestListRecurringBills_WithinDaysAndAccountFilter(t *testing.T) {
 	})
 	// Due in 200 days, no account.
 	seedBill(t, ctx, client, "Later", 300, recurringbill.CadenceAnnual, today.AddDate(0, 0, 200))
-	// Overdue: annual cycle 40 days back, past the 5-day window, nothing linked.
-	seedBill(t, ctx, client, "Missed", 80, recurringbill.CadenceAnnual, today.AddDate(0, 0, -40))
+	// Overdue: annual cycle 40 days back, matchable, inside coverage, nothing linked.
+	seedBill(t, ctx, client, "Missed", 80, recurringbill.CadenceAnnual, today.AddDate(0, 0, -40), func(c *ent.RecurringBillCreate) {
+		c.SetMatchPattern("missed bill")
+	})
 
 	views, totals, err := ListRecurringBills(ctx, client, BillFilter{WithinDays: 30})
 	if err != nil {
@@ -351,8 +537,9 @@ func TestListRecurringBills_WithinDaysAndAccountFilter(t *testing.T) {
 func TestBillView_OverdueGoesAwayOnceLinked(t *testing.T) {
 	client := newFinanceTestClient(t)
 	ctx := context.Background()
-	today := normalizeDate(time.Now())
+	today := localToday()
 	acc := seedAccount(t, ctx, client, "Everyday", account.ClassAsset, account.TypeEveryday)
+	seedCoverage(t, ctx, client, acc, today.AddDate(0, 0, -60))
 
 	anchor := today.AddDate(0, 0, -40)
 	b := seedBill(t, ctx, client, "Subscription", 25, recurringbill.CadenceAnnual, anchor, func(c *ent.RecurringBillCreate) {
@@ -370,7 +557,7 @@ func TestBillView_OverdueGoesAwayOnceLinked(t *testing.T) {
 	// Link the missed cycle to a real posted row two days late.
 	paid := anchor.AddDate(0, 0, 2)
 	seedTxn(t, ctx, client, acc, "sub-1", paid, -27.5, "SUBSCRIPTION MONTHLY", "")
-	txn := client.Transaction.Query().OnlyX(ctx)
+	txn := client.Transaction.Query().Order(ent.Desc("id")).FirstX(ctx)
 	client.BillPayment.Create().SetBillID(b.ID).SetTransactionID(txn.ID).
 		SetOccurrenceDate(anchor).SetMethod(billpayment.MethodAuto).SaveX(ctx)
 
@@ -398,36 +585,37 @@ func TestBillView_OverdueGoesAwayOnceLinked(t *testing.T) {
 // per clause rather than in aggregate.
 func TestBillMatches_EachClause(t *testing.T) {
 	occ := day(2026, time.July, 10)
-	bill := &ent.RecurringBill{
-		ExpectedAmount:     100,
-		AmountTolerancePct: 10,
-		MatchPattern:       "Placeholder Co",
-		MatchWindowDays:    5,
-		Cadence:            recurringbill.CadenceMonthly,
-		AnchorDate:         occ,
+	base := func() *ent.RecurringBill {
+		return &ent.RecurringBill{
+			ExpectedAmount:     100,
+			AmountTolerancePct: 10,
+			MatchPattern:       "Placeholder Co",
+			MatchWindowDays:    5,
+			Cadence:            recurringbill.CadenceMonthly,
+			AnchorDate:         occ,
+		}
 	}
 	txn := func(mut func(*ent.Transaction)) *ent.Transaction {
-		t := &ent.Transaction{
+		tr := &ent.Transaction{
 			PostedDate:  occ,
 			Amount:      -100,
 			Description: "DIRECT DEBIT PLACEHOLDER CO 123",
 		}
 		if mut != nil {
-			mut(t)
+			mut(tr)
 		}
-		return t
+		return tr
 	}
 
-	if !billMatches(bill, 0, txn(nil), occ) {
+	if !newBillMatcher(base()).matches(newCandidate(txn(nil)), occ) {
 		t.Fatal("the baseline row did not match; the rest of this test proves nothing")
 	}
 
 	cases := []struct {
-		name  string
-		bill  func(*ent.RecurringBill)
-		txn   func(*ent.Transaction)
-		scope int
-		want  bool
+		name string
+		bill func(*ent.RecurringBill)
+		txn  func(*ent.Transaction)
+		want bool
 	}{
 		{name: "pattern matches merchant instead of description", txn: func(tr *ent.Transaction) {
 			tr.Description = "CARD PURCHASE"
@@ -438,10 +626,14 @@ func TestBillMatches_EachClause(t *testing.T) {
 			tr.Merchant = "another payee"
 		}, want: false},
 		{name: "empty pattern never matches", bill: func(b *ent.RecurringBill) { b.MatchPattern = "" }, want: false},
-		{name: "account scope satisfied", scope: 7, txn: func(tr *ent.Transaction) {
+		{name: "account scope satisfied", bill: func(b *ent.RecurringBill) {
+			b.Edges.Account = &ent.Account{ID: 7}
+		}, txn: func(tr *ent.Transaction) {
 			tr.Edges.Account = &ent.Account{ID: 7}
 		}, want: true},
-		{name: "account scope violated", scope: 7, txn: func(tr *ent.Transaction) {
+		{name: "account scope violated", bill: func(b *ent.RecurringBill) {
+			b.Edges.Account = &ent.Account{ID: 7}
+		}, txn: func(tr *ent.Transaction) {
 			tr.Edges.Account = &ent.Account{ID: 8}
 		}, want: false},
 		{name: "amount inside tolerance", txn: func(tr *ent.Transaction) { tr.Amount = -109 }, want: true},
@@ -452,12 +644,12 @@ func TestBillMatches_EachClause(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			b := *bill
+			b := base()
 			if c.bill != nil {
-				c.bill(&b)
+				c.bill(b)
 			}
-			if got := billMatches(&b, c.scope, txn(c.txn), occ); got != c.want {
-				t.Errorf("billMatches = %v, want %v", got, c.want)
+			if got := newBillMatcher(b).matches(newCandidate(txn(c.txn)), occ); got != c.want {
+				t.Errorf("matches = %v, want %v", got, c.want)
 			}
 		})
 	}
@@ -474,13 +666,13 @@ func TestBillMatches_AmountVariableSkipsAmountCheck(t *testing.T) {
 		MatchPattern:       "utility",
 		MatchWindowDays:    5,
 	}
-	txn := &ent.Transaction{PostedDate: occ, Amount: -412.87, Description: "UTILITY BILL"}
+	c := newCandidate(&ent.Transaction{PostedDate: occ, Amount: -412.87, Description: "UTILITY BILL"})
 
-	if billMatches(bill, 0, txn, occ) {
+	if newBillMatcher(bill).matches(c, occ) {
 		t.Fatal("a fixed-amount bill matched a row far outside tolerance")
 	}
 	bill.AmountVariable = true
-	if !billMatches(bill, 0, txn, occ) {
+	if !newBillMatcher(bill).matches(c, occ) {
 		t.Error("amount_variable did not skip the amount check")
 	}
 }
@@ -492,7 +684,7 @@ func TestBillMatches_AmountVariableSkipsAmountCheck(t *testing.T) {
 func TestReconcileBills_IdempotentAndRespectsManual(t *testing.T) {
 	client := newFinanceTestClient(t)
 	ctx := context.Background()
-	today := normalizeDate(time.Now())
+	today := localToday()
 	acc := seedAccount(t, ctx, client, "Everyday", account.ClassAsset, account.TypeEveryday)
 
 	// Monthly bill anchored two cycles back, so there are cycles to settle.
@@ -514,7 +706,7 @@ func TestReconcileBills_IdempotentAndRespectsManual(t *testing.T) {
 		seedTxn(t, ctx, client, acc, fmt.Sprintf("housing-%d", i), occ.AddDate(0, 0, 1), -600, "HOUSING DEBIT REF 9", "")
 	}
 
-	first, err := ReconcileBills(ctx, client)
+	first, err := ReconcileBills(ctx, client, ReconcileOptions{})
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -526,12 +718,15 @@ func TestReconcileBills_IdempotentAndRespectsManual(t *testing.T) {
 	}
 	linked := client.BillPayment.Query().CountX(ctx)
 
-	second, err := ReconcileBills(ctx, client)
+	second, err := ReconcileBills(ctx, client, ReconcileOptions{})
 	if err != nil {
 		t.Fatalf("second reconcile: %v", err)
 	}
 	if second.PaymentsLinked != 0 {
 		t.Errorf("second pass linked %d, want 0 (the pass must be idempotent)", second.PaymentsLinked)
+	}
+	if second.CandidatesCompared != 0 {
+		t.Errorf("second pass compared %d rows, want 0: a settled cycle is skipped before any matching work", second.CandidatesCompared)
 	}
 	if got := client.BillPayment.Query().CountX(ctx); got != linked {
 		t.Errorf("payments after re-run = %d, want %d unchanged", got, linked)
@@ -544,7 +739,7 @@ func TestReconcileBills_IdempotentAndRespectsManual(t *testing.T) {
 	client.BillPayment.Create().SetBillID(rent.ID).SetTransactionID(manualTxn.ID).
 		SetOccurrenceDate(anchor).SetMethod(billpayment.MethodManual).SaveX(ctx)
 
-	if _, err := ReconcileBills(ctx, client); err != nil {
+	if _, err := ReconcileBills(ctx, client, ReconcileOptions{}); err != nil {
 		t.Fatalf("reconcile after manual link: %v", err)
 	}
 	kept := client.BillPayment.Query().
@@ -564,7 +759,7 @@ func TestReconcileBills_IdempotentAndRespectsManual(t *testing.T) {
 func TestReconcileBills_SkipsUnmatchable(t *testing.T) {
 	client := newFinanceTestClient(t)
 	ctx := context.Background()
-	today := normalizeDate(time.Now())
+	today := localToday()
 	one := seedAccount(t, ctx, client, "Card A", account.ClassLiability, account.TypeCreditCard)
 	two := seedAccount(t, ctx, client, "Card B", account.ClassLiability, account.TypeCreditCard)
 
@@ -574,7 +769,7 @@ func TestReconcileBills_SkipsUnmatchable(t *testing.T) {
 	})
 	seedTxn(t, ctx, client, one, "fee-1", today.AddDate(0, 0, -3), -40, "SERVICE FEE", "")
 
-	sum, err := ReconcileBills(ctx, client)
+	sum, err := ReconcileBills(ctx, client, ReconcileOptions{})
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -583,6 +778,131 @@ func TestReconcileBills_SkipsUnmatchable(t *testing.T) {
 	}
 	if sum.BillsScanned != 1 {
 		t.Errorf("bills_scanned = %d, want 1 (the pattern-less bill is not a candidate)", sum.BillsScanned)
+	}
+}
+
+// TestReconcileBills_WorkBoundedByIngestedRange is the cost guard. The pass runs INLINE on
+// the synchronous ingest request, so its work must track the window it was handed and not
+// how long ago the bill was anchored: an anchor-to-today scan grows a cycle a week forever
+// and would eventually time the daily sync out.
+//
+// Two assertions: a one-week pass over a bill anchored four years back does a couple of
+// cycles' worth of work, and moving the anchor five years further back leaves that figure
+// unchanged.
+func TestReconcileBills_WorkBoundedByIngestedRange(t *testing.T) {
+	// A one-week ingest window, the shape the daily sync actually posts. Widened by the
+	// 5-day match window either side, that spans 17 days, so a weekly bill can present at
+	// most 3 cycles however old it is.
+	const maxCyclesInWindow = 3
+
+	// measure builds a fresh ledger with a weekly bill anchored yearsBack, one matching row
+	// per cycle for its whole life, and reports what a one-week pass costs over it. Each
+	// subtest gets its own in-memory DB (the harness keys off t.Name()).
+	measure := func(t *testing.T, yearsBack int) ReconcileSummary {
+		t.Helper()
+		client := newFinanceTestClient(t)
+		ctx := context.Background()
+		today := localToday()
+		acc := seedAccount(t, ctx, client, "Everyday", account.ClassAsset, account.TypeEveryday)
+		anchor := today.AddDate(-yearsBack, 0, 0)
+		seedBill(t, ctx, client, "Weekly thing", 90, recurringbill.CadenceWeekly, anchor, func(c *ent.RecurringBillCreate) {
+			c.SetMatchPattern("weekly debit").SetAccountID(acc.ID)
+		})
+		cycles := 0
+		for i := 0; ; i++ {
+			occ := occurrenceAt(anchor, recurringbill.CadenceWeekly, i)
+			if occ.After(today) {
+				break
+			}
+			seedTxn(t, ctx, client, acc, fmt.Sprintf("weekly-%d", i), occ, -90, "WEEKLY DEBIT", "")
+			cycles++
+		}
+
+		from, to := today.AddDate(0, 0, -7), today
+		sum, err := ReconcileBills(ctx, client, ReconcileOptions{From: &from, To: &to})
+		if err != nil {
+			t.Fatalf("bounded reconcile: %v", err)
+		}
+		t.Logf("bill life: %d cycles over %d posted rows (an anchor-to-today pass would compare up to %d times)",
+			cycles, cycles, cycles*cycles)
+		t.Logf("one-week pass: cycles_checked=%d candidates_compared=%d linked=%d",
+			sum.CyclesChecked, sum.CandidatesCompared, sum.PaymentsLinked)
+
+		if sum.CyclesChecked > maxCyclesInWindow {
+			t.Errorf("cycles_checked = %d over a 7-day window, want at most %d; the pass is still scanning the bill's whole life",
+				sum.CyclesChecked, maxCyclesInWindow)
+		}
+		if sum.CandidatesCompared > maxCyclesInWindow*11 {
+			t.Errorf("candidates_compared = %d, want work proportional to the window (at most 2*match_window+1 days a cycle), not to %d rows",
+				sum.CandidatesCompared, cycles)
+		}
+		if sum.PaymentsLinked == 0 {
+			t.Error("the pass linked nothing; it must still settle the cycles inside its window")
+		}
+		return sum
+	}
+
+	var young, old ReconcileSummary
+	t.Run("anchored 4 years back", func(t *testing.T) { young = measure(t, 4) })
+	t.Run("anchored 9 years back", func(t *testing.T) { old = measure(t, 9) })
+
+	// The point of the bound: five more years of history buys no extra work.
+	if absInt(old.CyclesChecked-young.CyclesChecked) > 1 {
+		t.Errorf("cycles_checked = %d at 9 years vs %d at 4 years; cost must not grow with the bill's age",
+			old.CyclesChecked, young.CyclesChecked)
+	}
+	if absInt(old.CandidatesCompared-young.CandidatesCompared) > 11 {
+		t.Errorf("candidates_compared = %d at 9 years vs %d at 4 years; cost must not grow with the bill's age",
+			old.CandidatesCompared, young.CandidatesCompared)
+	}
+}
+
+// TestReconcileBills_CoverageBoundsTheBackfill: even the unbounded admin backfill must not
+// rescan cycles the ledger cannot cover, since nothing there can ever match.
+func TestReconcileBills_CoverageBoundsTheBackfill(t *testing.T) {
+	client := newFinanceTestClient(t)
+	ctx := context.Background()
+	today := localToday()
+	acc := seedAccount(t, ctx, client, "Everyday", account.ClassAsset, account.TypeEveryday)
+
+	// Weekly bill anchored two years back, but a ledger that only starts three weeks ago.
+	anchor := today.AddDate(-2, 0, 0)
+	seedBill(t, ctx, client, "Weekly thing", 90, recurringbill.CadenceWeekly, anchor, func(c *ent.RecurringBillCreate) {
+		c.SetMatchPattern("weekly debit").SetAccountID(acc.ID)
+	})
+	// Three rows on the cadence grid, three weeks of coverage.
+	for i := 3; i >= 1; i-- {
+		occ := lastOccurrenceOnOrBefore(anchor, recurringbill.CadenceWeekly, today.AddDate(0, 0, -7*i))
+		seedTxn(t, ctx, client, acc, fmt.Sprintf("cov-%d", i), occ, -90, "WEEKLY DEBIT", "")
+	}
+
+	sum, err := ReconcileBills(ctx, client, ReconcileOptions{})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	t.Logf("full backfill over a 2-year-old bill with 3 weeks of ledger: cycles_checked=%d candidates_compared=%d linked=%d",
+		sum.CyclesChecked, sum.CandidatesCompared, sum.PaymentsLinked)
+	if sum.CyclesChecked > 6 {
+		t.Errorf("cycles_checked = %d, want only the cycles the ledger covers (about 4)", sum.CyclesChecked)
+	}
+	if sum.PaymentsLinked != 3 {
+		t.Errorf("linked = %d, want 3 (every covered cycle that has a row)", sum.PaymentsLinked)
+	}
+}
+
+// TestPostedDateRange spans the payload's posted rows and reports ok=false for a payload
+// that carried none, which is what keeps the post-ingest pass bounded.
+func TestPostedDateRange(t *testing.T) {
+	p := &Payload{}
+	if _, _, ok := PostedDateRange(p); ok {
+		t.Error("ok = true for a payload with no posted rows, want false")
+	}
+	p.Transactions.Posted = []PostedRow{
+		{PostedDate: "2026-07-10"}, {PostedDate: "2026-07-03"}, {PostedDate: "2026-07-08"},
+	}
+	from, to, ok := PostedDateRange(p)
+	if !ok || !from.Equal(day(2026, time.July, 3)) || !to.Equal(day(2026, time.July, 10)) {
+		t.Errorf("range = %s..%s (ok=%v), want 2026-07-03..2026-07-10", from.Format(dateLayoutTest), to.Format(dateLayoutTest), ok)
 	}
 }
 
@@ -621,6 +941,84 @@ func TestLinkBillPayment_DefaultsToNearestCycleAndBeatsAuto(t *testing.T) {
 	// ...but never another manual one.
 	if _, err := LinkBillPayment(ctx, client, b.ID, txn.ID, nil); !errors.Is(err, ErrCycleAlreadyLinked) {
 		t.Errorf("second manual link error = %v, want ErrCycleAlreadyLinked", err)
+	}
+}
+
+// TestLinkBillPayment_RejectsOffGridDate: a date that is not one of the bill's occurrences
+// is refused. Accepting it would settle a cycle that does not exist, so the bill would
+// report a payment AND an overdue absence while the real cycle stayed open to the matcher.
+func TestLinkBillPayment_RejectsOffGridDate(t *testing.T) {
+	client := newFinanceTestClient(t)
+	ctx := context.Background()
+	today := localToday()
+	acc := seedAccount(t, ctx, client, "Everyday", account.ClassAsset, account.TypeEveryday)
+	seedCoverage(t, ctx, client, acc, today.AddDate(0, 0, -60))
+
+	anchor := today.AddDate(0, 0, -40)
+	b := seedBill(t, ctx, client, "Levy", 75, recurringbill.CadenceAnnual, anchor, func(c *ent.RecurringBillCreate) {
+		c.SetMatchPattern("levy")
+	})
+	seedTxn(t, ctx, client, acc, "levy-1", anchor.AddDate(0, 0, 3), -75, "LEVY PAYMENT", "")
+	txn := client.Transaction.Query().Order(ent.Desc("id")).FirstX(ctx)
+
+	offGrid := anchor.AddDate(0, 0, 3)
+	if _, err := LinkBillPayment(ctx, client, b.ID, txn.ID, &offGrid); !errors.Is(err, ErrNotAnOccurrence) {
+		t.Fatalf("off-grid link error = %v, want ErrNotAnOccurrence", err)
+	}
+	if n := client.BillPayment.Query().CountX(ctx); n != 0 {
+		t.Errorf("payments = %d after a rejected link, want 0", n)
+	}
+	// The real cycle stays open, so the bill still reports the absence honestly instead of
+	// claiming both a payment and a missed cycle.
+	views, _, err := ListRecurringBills(ctx, client, BillFilter{})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if !views[0].Overdue || views[0].LastPaidDate != nil {
+		t.Errorf("bill = overdue %v / last paid %v, want overdue with nothing paid", views[0].Overdue, views[0].LastPaidDate)
+	}
+	// On-grid, the same transaction links fine.
+	if _, err := LinkBillPayment(ctx, client, b.ID, txn.ID, &anchor); err != nil {
+		t.Errorf("on-grid link failed: %v", err)
+	}
+}
+
+// TestLinkBillPayment_RollsBackOnConstraintFailure: replacing an auto link is a
+// delete-then-insert, so it has to be one transaction. Linking a transaction another cycle
+// of the same bill already holds trips the (bill, transaction) unique index, and the link
+// being replaced must survive that.
+func TestLinkBillPayment_RollsBackOnConstraintFailure(t *testing.T) {
+	client := newFinanceTestClient(t)
+	ctx := context.Background()
+	acc := seedAccount(t, ctx, client, "Everyday", account.ClassAsset, account.TypeEveryday)
+	anchor := day(2026, time.March, 5)
+	b := seedBill(t, ctx, client, "Levy", 75, recurringbill.CadenceMonthly, anchor)
+
+	seedTxn(t, ctx, client, acc, "levy-a", day(2026, time.March, 6), -75, "LEVY PAYMENT", "")
+	seedTxn(t, ctx, client, acc, "levy-b", day(2026, time.April, 6), -75, "LEVY PAYMENT", "")
+	txns := client.Transaction.Query().Order(ent.Asc("id")).AllX(ctx)
+	first, second := txns[0], txns[1]
+
+	// Two cycles, each auto-linked to its own row.
+	client.BillPayment.Create().SetBillID(b.ID).SetTransactionID(first.ID).
+		SetOccurrenceDate(anchor).SetMethod(billpayment.MethodAuto).SaveX(ctx)
+	client.BillPayment.Create().SetBillID(b.ID).SetTransactionID(second.ID).
+		SetOccurrenceDate(day(2026, time.April, 5)).SetMethod(billpayment.MethodAuto).SaveX(ctx)
+
+	// Hand-link cycle one to the row cycle two already holds: the insert must fail on the
+	// (bill, transaction) unique index AFTER the delete, so the delete has to roll back.
+	if _, err := LinkBillPayment(ctx, client, b.ID, second.ID, &anchor); err == nil {
+		t.Fatal("linking an already-linked transaction succeeded, want a constraint failure")
+	}
+	if n := client.BillPayment.Query().CountX(ctx); n != 2 {
+		t.Fatalf("payments after the failed link = %d, want 2 (the replaced link must roll back, not be destroyed)", n)
+	}
+	kept := client.BillPayment.Query().
+		Where(billpayment.HasBillWith(recurringbill.IDEQ(b.ID)), billpayment.OccurrenceDateEQ(anchor)).
+		WithTransaction().
+		OnlyX(ctx)
+	if kept.Edges.Transaction.ID != first.ID || kept.Method != billpayment.MethodAuto {
+		t.Errorf("first cycle = txn %d / %s, want the original auto link to txn %d", kept.Edges.Transaction.ID, kept.Method, first.ID)
 	}
 }
 

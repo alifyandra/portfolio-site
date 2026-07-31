@@ -167,6 +167,7 @@ type billResult struct {
 	NextDue         string   `json:"next_due"`
 	DaysUntil       int      `json:"days_until"`
 	Overdue         bool     `json:"overdue"`
+	AutoMatched     bool     `json:"auto_matched"`
 	LastPaidDate    *string  `json:"last_paid_date"`
 	LastPaidAmount  *float64 `json:"last_paid_amount"`
 	AccountID       *int     `json:"account_id"`
@@ -443,7 +444,7 @@ func toolDefinitions() []map[string]any {
 		},
 		{
 			"name":        "list_recurring_bills",
-			"description": "List the owner's known recurring commitments (rent, insurance, subscriptions, utilities) with each one's cadence, expected amount, the next date it falls due, and how many days away that is. Use this for any question about COMMITTED money rather than money already spent: what is due in the next N days, what is spoken for before any discretionary spending, or whether a one-off purchase is actually affordable. A recurring bill is a DECLARED commitment, not a ledger row: it is separate from transactions, so expected_amount is what is expected to leave the account each cycle, while the amount actually charged last cycle (matched to a posted transaction) is reported as last_paid_amount/last_paid_date, and those two differing is the signal a bill changed price. days_until is negative when a cycle is past due with no matching payment found. Pass within_days to keep only bills whose next occurrence falls inside that many days from today, and status (default \"active\") to include paused or ended commitments. committed_total sums the expected amounts of the returned bills, and monthly_equivalent normalises every cadence to a per-month figure so bills on different cadences are comparable: free money over a period is roughly that period's income minus committed_total minus the discretionary spend that spending_summary reports. Expected amounts are the owner's declarations, so treat a bill with amount_variable=true (utilities) as an estimate, not a fact.",
+			"description": "List the owner's known recurring commitments (rent, insurance, subscriptions, utilities) with each one's cadence, expected amount, the next date it falls due, and how many days away that is. Use this for any question about COMMITTED money rather than money already spent: what is due in the next N days, what is spoken for before any discretionary spending, or whether a one-off purchase is actually affordable. A recurring bill is a DECLARED commitment, not a ledger row: it is separate from transactions, so expected_amount is what is expected to leave the account each cycle, while the amount actually charged last cycle (matched to a posted transaction) is reported as last_paid_amount/last_paid_date, and those two differing is the signal a bill changed price. days_until is negative when a cycle is past due with no matching payment found. Pass within_days to keep only bills whose next occurrence falls inside that many days from today, and status (default \"active\") to include paused or ended commitments. committed_total sums the expected amounts of the returned bills, and monthly_equivalent normalises every cadence to a per-month figure so bills on different cadences are comparable: free money over a period is roughly that period's income minus committed_total minus the discretionary spend that spending_summary reports. Expected amounts are the owner's declarations, so treat a bill with amount_variable=true (utilities) as an estimate, not a fact. A bill with auto_matched=false carries no match pattern, so it is reconciled by hand: no payment is ever matched to it automatically, its last_paid fields stay empty, and it is never reported overdue, so absence of a payment there says nothing about whether it was paid.",
 			"inputSchema": objectSchema(map[string]any{
 				"status":      strProp(`Which commitments to include: "active" (default), "paused", "ended", or "all".`),
 				"within_days": intProp("Keep only bills whose next occurrence falls within this many days from today; omit or 0 for all bills."),
@@ -567,6 +568,7 @@ func toBillResults(bills []finance.BillView) []billResult {
 			NextDue:         b.NextDue.UTC().Format(dateLayout),
 			DaysUntil:       b.DaysUntil,
 			Overdue:         b.Overdue,
+			AutoMatched:     b.AutoMatched,
 			LastPaidDate:    fmtDateOnlyPtr(b.LastPaidDate),
 			LastPaidAmount:  b.LastPaidAmount,
 			AccountName:     b.AccountName,

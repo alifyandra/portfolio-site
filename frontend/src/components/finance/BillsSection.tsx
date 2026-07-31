@@ -116,15 +116,29 @@ function dueLabel(days: number): string {
   return `${late} day${late === 1 ? '' : 's'} ago`;
 }
 
+// COMMITTED_WINDOW_DAYS is the horizon the headline figure is quoted over. Committed money
+// only means something across a stated window: summing raw per-cycle amounts over mixed
+// cadences (a weekly 120 plus an annual 1200) is not a number anyone can act on.
+const COMMITTED_WINDOW_DAYS = 30;
+
 export function BillsSection() {
   const queryClient = useQueryClient();
-  // status=all so a paused or ended commitment stays visible and editable here; the
-  // committed-money figures the API returns count active bills only.
+  // Two reads of the same endpoint, deliberately. The table wants every status so a paused
+  // or ended commitment stays visible and editable; the headline wants the ACTIVE bills
+  // actually falling due inside the window, which is the number the section exists to
+  // produce. Each figure is then captioned with the set it was computed over.
   const { data, isLoading, isError } = useListFinanceBills({ status: 'all' });
+  const { data: dueSoon } = useListFinanceBills({
+    status: 'active',
+    within_days: COMMITTED_WINDOW_DAYS,
+  });
   const { data: accountsData } = useListFinanceAccounts();
   const accounts = accountsData?.accounts ?? [];
 
   const bills = data?.bills ?? [];
+  // monthly_equivalent from the status=all read already counts active bills only (the API
+  // keeps paused and ended out of the money), so this caption counts the same set.
+  const activeCount = bills.filter((b) => b.status === 'active').length;
 
   // null = closed, 'new' = create form, number = editing that bill id.
   const [editing, setEditing] = useState<number | 'new' | null>(null);
@@ -240,15 +254,20 @@ export function BillsSection() {
         </div>
       </header>
 
-      {/* Committed money: the figure the whole section exists to produce. */}
+      {/* Committed money: the figure the whole section exists to produce. Each number is
+          captioned with exactly the set it counts. */}
       <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 rounded-lg border border-slate-700 bg-deepsea/40 px-3 py-2.5">
         <span className="text-lg font-semibold tabular-nums text-citron">
-          {formatMoney(data?.committed_total ?? 0)}
+          {formatMoney(dueSoon?.committed_total ?? 0)}
         </span>
-        <span className="text-sm text-slate-300">committed per cycle</span>
+        <span className="text-sm text-slate-300">
+          committed over the next {COMMITTED_WINDOW_DAYS} days
+        </span>
         <span className="text-xs text-slate-400">
-          {formatMoney(data?.monthly_equivalent ?? 0)} a month across{' '}
-          {bills.length} {bills.length === 1 ? 'bill' : 'bills'}
+          {dueSoon?.count ?? 0} {dueSoon?.count === 1 ? 'bill' : 'bills'} due in
+          that window · {formatMoney(data?.monthly_equivalent ?? 0)} a month
+          across {activeCount} active{' '}
+          {activeCount === 1 ? 'commitment' : 'commitments'}
         </span>
       </div>
 
@@ -429,6 +448,13 @@ export function BillsSection() {
                       variable
                     </span>
                   ) : null}
+                  {/* No match pattern: nothing will ever link a cycle, so an empty
+                      "last paid" says nothing about whether it was paid. */}
+                  {!b.auto_matched ? (
+                    <span className="rounded-sm bg-white/5 px-1.5 py-0.5 text-xs text-slate-300">
+                      by hand
+                    </span>
+                  ) : null}
                 </div>
                 <span className="truncate text-xs text-slate-400">
                   Next {formatDate(b.next_due)} · {dueLabel(b.days_until)}
@@ -450,8 +476,10 @@ export function BillsSection() {
                         {formatMoney(b.last_paid_amount)}
                       </span>
                     </>
-                  ) : (
+                  ) : b.auto_matched ? (
                     'No payment matched yet'
+                  ) : (
+                    'Reconciled by hand, not matched automatically'
                   )}
                 </span>
               </div>

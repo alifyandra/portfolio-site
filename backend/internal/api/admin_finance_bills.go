@@ -100,9 +100,10 @@ type billIDInput struct {
 
 type reconcileBillsOutput struct {
 	Body struct {
-		BillsScanned   int `json:"bills_scanned" doc:"Bills with a match pattern and at least one cycle in range"`
-		CyclesChecked  int `json:"cycles_checked"`
-		PaymentsLinked int `json:"payments_linked" doc:"New links created; a re-run over unchanged data links nothing"`
+		BillsScanned       int `json:"bills_scanned" doc:"Bills with a match pattern and at least one cycle in range"`
+		CyclesChecked      int `json:"cycles_checked" doc:"Unsettled cycles the pass tried to fill; settled ones are skipped before any work"`
+		CandidatesCompared int `json:"candidates_compared" doc:"Posted rows the match rule was evaluated against; the pass's cost, bounded by the window rather than the ledger's age"`
+		PaymentsLinked     int `json:"payments_linked" doc:"New links created; a re-run over unchanged data links nothing"`
 	}
 }
 
@@ -110,7 +111,7 @@ type createBillPaymentInput struct {
 	ID   int `path:"id" doc:"Recurring bill ID"`
 	Body struct {
 		TransactionID  int    `json:"transaction_id" minimum:"1" doc:"Posted transaction that paid the cycle"`
-		OccurrenceDate string `json:"occurrence_date,omitempty" doc:"Cycle due date, YYYY-MM-DD; defaults to the cycle nearest the transaction's posted date"`
+		OccurrenceDate string `json:"occurrence_date,omitempty" doc:"Cycle due date, YYYY-MM-DD; must be one of the bill's derived occurrences. Defaults to the cycle nearest the transaction's posted date"`
 	}
 }
 
@@ -375,13 +376,16 @@ func (h *Handler) registerAdminFinanceBills(api huma.API) {
 		if h.deps.Ent == nil {
 			return nil, huma.Error503ServiceUnavailable("finance is not available")
 		}
-		sum, err := finance.ReconcileBills(ctx, h.deps.Ent)
+		// Both bounds open: the button exists for a full backfill after a pattern edit,
+		// unlike the post-ingest hook which passes the window it just ingested.
+		sum, err := finance.ReconcileBills(ctx, h.deps.Ent, finance.ReconcileOptions{})
 		if err != nil {
 			return nil, huma.Error500InternalServerError("failed to reconcile recurring bills", err)
 		}
 		out := &reconcileBillsOutput{}
 		out.Body.BillsScanned = sum.BillsScanned
 		out.Body.CyclesChecked = sum.CyclesChecked
+		out.Body.CandidatesCompared = sum.CandidatesCompared
 		out.Body.PaymentsLinked = sum.PaymentsLinked
 		return out, nil
 	})
@@ -408,6 +412,9 @@ func (h *Handler) registerAdminFinanceBills(api huma.API) {
 		p, err := finance.LinkBillPayment(ctx, h.deps.Ent, in.ID, in.Body.TransactionID, occ)
 		if ent.IsNotFound(err) {
 			return nil, huma.Error404NotFound("recurring bill or transaction not found")
+		}
+		if errors.Is(err, finance.ErrNotAnOccurrence) {
+			return nil, huma.Error422UnprocessableEntity(err.Error())
 		}
 		if errors.Is(err, finance.ErrCycleAlreadyLinked) {
 			return nil, huma.Error409Conflict(err.Error())

@@ -138,11 +138,12 @@ type FinanceBillDTO struct {
 	Notes              string   `json:"notes"`
 	AccountID          *int     `json:"account_id" doc:"Account the bill is paid from; null when unset (the edge is optional)"`
 	AccountName        string   `json:"account_name"`
-	NextDue            string   `json:"next_due" doc:"YYYY-MM-DD; the derived due date needing attention (the unsettled past cycle when overdue)"`
-	DaysUntil          int      `json:"days_until" doc:"Whole days from today to next_due; negative when overdue"`
+	NextDue            string   `json:"next_due" doc:"YYYY-MM-DD; the derived due date needing attention (the unsettled past cycle when overdue, the last expected cycle once ended)"`
+	DaysUntil          int      `json:"days_until" doc:"Whole days from today to next_due; negative when that date is in the past"`
 	LastPaidDate       *string  `json:"last_paid_date" doc:"YYYY-MM-DD the newest reconciled cycle actually posted; null until one matches"`
 	LastPaidAmount     *float64 `json:"last_paid_amount" doc:"Magnitude actually charged for that cycle; null until one matches"`
-	Overdue            bool     `json:"overdue" doc:"An active bill whose previous cycle is past its match window with no payment linked"`
+	Overdue            bool     `json:"overdue" doc:"An active, auto-matched bill whose previous covered cycle is past its match window with no payment linked"`
+	AutoMatched        bool     `json:"auto_matched" doc:"False when the bill has no match_pattern: it is reconciled by hand, so no absence is inferred and it is never reported overdue"`
 	ExpectedMonthly    float64  `json:"expected_monthly" doc:"expected_amount normalised to a per-month figure so mixed cadences can be summed"`
 	CreatedAt          string   `json:"created_at"`
 	UpdatedAt          string   `json:"updated_at"`
@@ -212,7 +213,7 @@ type listFinanceWishlistOutput struct {
 
 type listFinanceBillsInput struct {
 	Status     string `query:"status" default:"active" enum:"active,paused,ended,all" doc:"Which commitments to include; \"all\" spans every status"`
-	WithinDays int    `query:"within_days" doc:"Keep only bills due within this many days from today (overdue bills always pass); 0 (default) returns all"`
+	WithinDays int    `query:"within_days" doc:"Keep only bills due within this many days from today, plus anything overdue; 0 (default) returns all"`
 	AccountID  int    `query:"account_id" doc:"Filter to bills paid from one account; 0 (default) spans all, and bills with no account are then included"`
 }
 
@@ -527,6 +528,7 @@ func toFinanceBillDTOs(bills []finance.BillView) []FinanceBillDTO {
 			LastPaidDate:       dateOnlyPtr(b.LastPaidDate),
 			LastPaidAmount:     b.LastPaidAmount,
 			Overdue:            b.Overdue,
+			AutoMatched:        b.AutoMatched,
 			ExpectedMonthly:    b.ExpectedMonthly,
 			CreatedAt:          b.CreatedAt.UTC().Format(http.TimeFormat),
 			UpdatedAt:          b.UpdatedAt.UTC().Format(http.TimeFormat),
