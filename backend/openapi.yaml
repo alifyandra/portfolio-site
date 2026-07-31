@@ -270,11 +270,57 @@ components:
       additionalProperties: false
       properties:
         as_of:
-          description: RFC3339 reading time
+          description: RFC3339. The reading time on the raw series; the bucket START when a step is given
           type: string
         balance:
+          description: The bank's balance; equals close under basis=ledger
           format: double
           type: number
+        carried:
+          description: Present only when this bucket had no reading and repeats the previous close, so its absence means a real reading
+          type: boolean
+        close:
+          description: Closing balance for the bucket
+          format: double
+          type: number
+        drift:
+          description: Derived close minus a balance reading falling in this bucket; present only when there is one. Nonzero means a dropped or duplicated transaction
+          format: double
+          type: number
+        external_in:
+          description: Money in excluding transfers between the owner's own accounts
+          format: double
+          type: number
+        external_out:
+          description: Money out excluding internal transfers, as a positive magnitude
+          format: double
+          type: number
+        flow_mismatch:
+          description: Set when close - open does not equal net (a row is missing from the bucket) OR, on a running-balance account, when two consecutive rows' balance_after difference does not equal the intervening amount (a row is missing or duplicated between them, which can leave the bucket total intact). The offending row ids are logged for localisation
+          type: boolean
+        in:
+          description: Gross money in across every posted row in the bucket
+          format: double
+          type: number
+        net:
+          description: in - out
+          format: double
+          type: number
+        open:
+          description: The previous bucket's close
+          format: double
+          type: number
+        out:
+          description: Gross money out as a positive magnitude
+          format: double
+          type: number
+        source:
+          description: balance_after (the bank's own running balance), accumulated (arithmetic from the anchor reading), or carried
+          type: string
+        txns:
+          description: Posted rows in the bucket, internal legs included
+          format: int64
+          type: integer
       required:
         - as_of
         - balance
@@ -987,12 +1033,28 @@ components:
           format: uri
           readOnly: true
           type: string
+        basis:
+          description: Echoes the basis the series was computed on
+          type: string
+        drift_max:
+          description: Largest absolute per-bucket drift in the series
+          format: double
+          type: number
+        ledger_from:
+          description: "YYYY-MM-DD of the account's oldest posted row: the backward edge of what can be derived. Nothing older is emitted. Lets a caller tell a flat series from one whose ledger does not reach that far back"
+          type: string
+        note:
+          description: Why a series came back empty (an investment account, or no anchor reading to walk from)
+          type: string
         points:
           items:
             $ref: "#/components/schemas/BalancePointDTO"
           type:
             - array
             - "null"
+        start_unverified:
+          description: Set when the earliest bucket's opening had to be synthesized, so it is arithmetically right but only means the opening balance if the ledger truly starts there
+          type: boolean
       required:
         - points
       type: object
@@ -3997,6 +4059,20 @@ paths:
             description: Look-back window in days; 0 returns the full history
             format: int64
             type: integer
+        - description: "Bucket width: day, week or month, on Australia/Melbourne boundaries (a day is local midnight to local midnight, a week starts local Monday, a month the local 1st). Omit for the raw per-reading series. Each bucket reports its LAST reading (close-of-period); a bucket with no reading repeats the previous close and is flagged carried. With basis=ledger an omitted step means day, since open/close/flows need a period. An unknown value is a 400."
+          explode: false
+          in: query
+          name: step
+          schema:
+            description: "Bucket width: day, week or month, on Australia/Melbourne boundaries (a day is local midnight to local midnight, a week starts local Monday, a month the local 1st). Omit for the raw per-reading series. Each bucket reports its LAST reading (close-of-period); a bucket with no reading repeats the previous close and is flagged carried. With basis=ledger an omitted step means day, since open/close/flows need a period. An unknown value is a 400."
+            type: string
+        - description: snapshot (default) reads the bank's balance snapshots. ledger derives close, open and per-period in/out from posted transactions, using the bank's running balance where the ledger carries one and an incremental walk from the newest snapshot where it does not. An unknown value is a 400.
+          explode: false
+          in: query
+          name: basis
+          schema:
+            description: snapshot (default) reads the bank's balance snapshots. ledger derives close, open and per-period in/out from posted transactions, using the bank's running balance where the ledger carries one and an incremental walk from the newest snapshot where it does not. An unknown value is a 400.
+            type: string
       responses:
         "200":
           content:

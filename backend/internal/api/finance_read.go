@@ -57,9 +57,27 @@ type FinanceAccountDTO struct {
 }
 
 // BalancePointDTO is one point on a balance-history line.
+//
+// Only as_of and balance are always present. carried and the ledger fields below are
+// pointers with omitempty, so a raw or basis=snapshot response carries exactly the two
+// fields it always has and no consumer of that path changes.
 type BalancePointDTO struct {
-	AsOf    string  `json:"as_of" doc:"RFC3339 reading time"`
-	Balance float64 `json:"balance"`
+	AsOf    string  `json:"as_of" doc:"RFC3339. The reading time on the raw series; the bucket START when a step is given"`
+	Balance float64 `json:"balance" doc:"The bank's balance; equals close under basis=ledger"`
+	Carried *bool   `json:"carried,omitempty" doc:"Present only when this bucket had no reading and repeats the previous close, so its absence means a real reading"`
+
+	// basis=ledger only.
+	Open         *float64 `json:"open,omitempty" doc:"The previous bucket's close"`
+	Close        *float64 `json:"close,omitempty" doc:"Closing balance for the bucket"`
+	In           *float64 `json:"in,omitempty" doc:"Gross money in across every posted row in the bucket"`
+	Out          *float64 `json:"out,omitempty" doc:"Gross money out as a positive magnitude"`
+	Net          *float64 `json:"net,omitempty" doc:"in - out"`
+	ExternalIn   *float64 `json:"external_in,omitempty" doc:"Money in excluding transfers between the owner's own accounts"`
+	ExternalOut  *float64 `json:"external_out,omitempty" doc:"Money out excluding internal transfers, as a positive magnitude"`
+	Txns         *int     `json:"txns,omitempty" doc:"Posted rows in the bucket, internal legs included"`
+	Source       *string  `json:"source,omitempty" doc:"balance_after (the bank's own running balance), accumulated (arithmetic from the anchor reading), or carried"`
+	Drift        *float64 `json:"drift,omitempty" doc:"Derived close minus a balance reading falling in this bucket; present only when there is one. Nonzero means a dropped or duplicated transaction"`
+	FlowMismatch *bool    `json:"flow_mismatch,omitempty" doc:"Set when close - open does not equal net (a row is missing from the bucket) OR, on a running-balance account, when two consecutive rows' balance_after difference does not equal the intervening amount (a row is missing or duplicated between them, which can leave the bucket total intact). The offending row ids are logged for localisation"`
 }
 
 // FinanceTxnDTO is one posted transaction with its account joined in.
@@ -164,11 +182,22 @@ type listFinanceAccountsOutput struct {
 type financeBalanceHistoryInput struct {
 	ID   int `path:"id" doc:"Account id"`
 	Days int `query:"days" default:"90" doc:"Look-back window in days; 0 returns the full history"`
+	// step and basis are validated in the handler rather than through an enum tag, so an
+	// unknown value is a 400 carrying the allowed set instead of a schema 422.
+	Step  string `query:"step" doc:"Bucket width: day, week or month, on Australia/Melbourne boundaries (a day is local midnight to local midnight, a week starts local Monday, a month the local 1st). Omit for the raw per-reading series. Each bucket reports its LAST reading (close-of-period); a bucket with no reading repeats the previous close and is flagged carried. With basis=ledger an omitted step means day, since open/close/flows need a period. An unknown value is a 400."`
+	Basis string `query:"basis" doc:"snapshot (default) reads the bank's balance snapshots. ledger derives close, open and per-period in/out from posted transactions, using the bank's running balance where the ledger carries one and an incremental walk from the newest snapshot where it does not. An unknown value is a 400."`
 }
 
 type financeBalanceHistoryOutput struct {
 	Body struct {
 		Points []BalancePointDTO `json:"points"`
+		// Series-level ledger metadata. All omitempty and absent under basis=snapshot, so
+		// that response stays exactly the {points: [...]} shape it has always been.
+		Basis           *string  `json:"basis,omitempty" doc:"Echoes the basis the series was computed on"`
+		LedgerFrom      *string  `json:"ledger_from,omitempty" doc:"YYYY-MM-DD of the account's oldest posted row: the backward edge of what can be derived. Nothing older is emitted. Lets a caller tell a flat series from one whose ledger does not reach that far back"`
+		StartUnverified *bool    `json:"start_unverified,omitempty" doc:"Set when the earliest bucket's opening had to be synthesized, so it is arithmetically right but only means the opening balance if the ledger truly starts there"`
+		DriftMax        *float64 `json:"drift_max,omitempty" doc:"Largest absolute per-bucket drift in the series"`
+		Note            *string  `json:"note,omitempty" doc:"Why a series came back empty (an investment account, or no anchor reading to walk from)"`
 	}
 }
 
@@ -354,24 +383,112 @@ func (h *Handler) getFinanceBalanceHistory(ctx context.Context, in *financeBalan
 	if h.deps.Ent == nil {
 		return nil, huma.Error503ServiceUnavailable("finance is not available")
 	}
+	// An unknown step or basis is a 400 rather than a silent fall back to raw/snapshot: a
+	// caller that mistyped would otherwise read a differently-shaped series as the one it
+	// asked for.
+	step, err := finance.ParseBalanceStep(strings.TrimSpace(in.Step))
+	if err != nil {
+		return nil, huma.Error400BadRequest(err.Error())
+	}
+	basis, err := finance.ParseBalanceBasis(strings.TrimSpace(in.Basis))
+	if err != nil {
+		return nil, huma.Error400BadRequest(err.Error())
+	}
+
 	var from *time.Time
 	if in.Days > 0 {
 		f := time.Now().UTC().AddDate(0, 0, -in.Days)
 		from = &f
 	}
-	points, err := finance.BalanceHistory(ctx, h.deps.Ent, in.ID, from)
+
+	out := &financeBalanceHistoryOutput{}
+
+	// No step and the default basis is the original raw reading list, served by the original
+	// query so its output is unchanged.
+	if step == finance.StepRaw && basis == finance.BasisSnapshot {
+		points, err := finance.BalanceHistory(ctx, h.deps.Ent, in.ID, from)
+		if err != nil {
+			return nil, huma.Error500InternalServerError("failed to load balance history", err)
+		}
+		out.Body.Points = make([]BalancePointDTO, 0, len(points))
+		for _, p := range points {
+			// A raw point is the bank's intra-day reading instant, not a bucket label, so it
+			// keeps its UTC rendering and this response stays what it has always been.
+			out.Body.Points = append(out.Body.Points, toBalancePointDTO(p, p.AsOf.UTC()))
+		}
+		return out, nil
+	}
+
+	series, err := finance.BalanceSeries(ctx, h.deps.Ent, finance.BalanceSeriesFilter{
+		AccountID: in.ID,
+		From:      from,
+		Step:      step,
+		Basis:     basis,
+	})
 	if err != nil {
 		return nil, huma.Error500InternalServerError("failed to load balance history", err)
 	}
-	out := &financeBalanceHistoryOutput{}
-	out.Body.Points = make([]BalancePointDTO, 0, len(points))
-	for _, p := range points {
-		out.Body.Points = append(out.Body.Points, BalancePointDTO{
-			AsOf:    p.AsOf.UTC().Format(time.RFC3339),
-			Balance: p.Balance,
-		})
+	out.Body.Points = []BalancePointDTO{}
+	if len(series) == 0 {
+		return out, nil
+	}
+	// One account id resolves to at most one series.
+	s := series[0]
+	for _, p := range s.Points {
+		// A bucketed point's as_of is a bucket START, which is a local midnight. Rendering it
+		// in UTC would name the calendar period BEFORE the one it labels.
+		out.Body.Points = append(out.Body.Points, toBalancePointDTO(p, p.AsOf.In(finance.BucketZone())))
+	}
+	if basis == finance.BasisLedger {
+		b := string(s.Basis)
+		out.Body.Basis = &b
+		out.Body.LedgerFrom = dateOnlyPtr(s.LedgerFrom)
+		if s.StartUnverified {
+			t := true
+			out.Body.StartUnverified = &t
+		}
+		d := s.DriftMax
+		out.Body.DriftMax = &d
+		if s.Note != "" {
+			n := s.Note
+			out.Body.Note = &n
+		}
 	}
 	return out, nil
+}
+
+// toBalancePointDTO maps a read-service balance point to its wire DTO. The optional fields
+// stay nil (and so absent) unless the point actually carries them, which is what keeps a
+// raw or basis=snapshot response the shape it has always been. asOf is passed in already in
+// the zone it should be rendered in, since a raw reading instant and a bucket start want
+// different zones (see finance.BucketZone).
+func toBalancePointDTO(p finance.BalancePoint, asOf time.Time) BalancePointDTO {
+	d := BalancePointDTO{
+		AsOf:        asOf.Format(time.RFC3339),
+		Balance:     p.Balance,
+		Open:        p.Open,
+		Close:       p.Close,
+		In:          p.In,
+		Out:         p.Out,
+		Net:         p.Net,
+		ExternalIn:  p.ExternalIn,
+		ExternalOut: p.ExternalOut,
+		Txns:        p.Txns,
+		Drift:       p.Drift,
+	}
+	if p.Carried {
+		t := true
+		d.Carried = &t
+	}
+	if p.Source != "" {
+		s := p.Source
+		d.Source = &s
+	}
+	if p.FlowMismatch {
+		t := true
+		d.FlowMismatch = &t
+	}
+	return d
 }
 
 func (h *Handler) listFinanceTransactions(ctx context.Context, in *listFinanceTxnInput) (*listFinanceTxnOutput, error) {

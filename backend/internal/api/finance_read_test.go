@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -20,6 +21,7 @@ import (
 	"github.com/alifyandra/portfolio-site/backend/ent/user"
 	"github.com/alifyandra/portfolio-site/backend/ent/wishlistitem"
 	"github.com/alifyandra/portfolio-site/backend/internal/auth"
+	"github.com/alifyandra/portfolio-site/backend/internal/finance"
 )
 
 // newFinanceReadTestAPI wires the finance read endpoints with the real auth
@@ -271,6 +273,256 @@ func TestFinanceWishlist_Ordering(t *testing.T) {
 	if got.Items[1].Deadline != nil {
 		t.Errorf("no-deadline row rendered %v, want null", *got.Items[1].Deadline)
 	}
+}
+
+// TestFinanceBalanceHistory_UnknownStepAndBasisAre400: a mistyped step or basis is
+// rejected, never quietly served as the raw/snapshot default, so a caller cannot read a
+// differently-shaped series as the one it asked for.
+func TestFinanceBalanceHistory_UnknownStepAndBasisAre400(t *testing.T) {
+	api, client := newFinanceReadTestAPI(t)
+	ctx := context.Background()
+	admin := sessionCookieFor(t, ctx, client, user.RoleAdmin)
+	acc := client.Account.Create().SetSource("commbank").SetName("A").
+		SetType(account.TypeEveryday).SetClass(account.ClassAsset).SetCurrency("AUD").SaveX(ctx)
+
+	base := "/api/finance/accounts/" + strconv.Itoa(acc.ID) + "/balances"
+	for _, q := range []string{"?step=monthly", "?step=hour", "?basis=derived", "?basis=ledgers"} {
+		if resp := api.Get(base+q, admin); resp.Code != http.StatusBadRequest {
+			t.Errorf("%s = %d, want 400; body=%s", q, resp.Code, resp.Body.String())
+		}
+	}
+	// The known values are accepted.
+	for _, q := range []string{"", "?step=day", "?step=week", "?step=month", "?basis=snapshot", "?basis=ledger", "?step=month&basis=ledger"} {
+		if resp := api.Get(base+q, admin); resp.Code != http.StatusOK {
+			t.Errorf("%s = %d, want 200; body=%s", q, resp.Code, resp.Body.String())
+		}
+	}
+}
+
+// TestFinanceBalanceHistory_SnapshotResponseUnchanged: omitting step and basis returns the
+// raw reading list with exactly as_of and balance per point and no other keys, so nothing
+// consuming that path changes. Bucketing on the snapshot basis adds only `carried`.
+func TestFinanceBalanceHistory_SnapshotResponseUnchanged(t *testing.T) {
+	api, client := newFinanceReadTestAPI(t)
+	ctx := context.Background()
+	admin := sessionCookieFor(t, ctx, client, user.RoleAdmin)
+	acc := client.Account.Create().SetSource("commbank").SetName("A").
+		SetType(account.TypeEveryday).SetClass(account.ClassAsset).SetCurrency("AUD").SaveX(ctx)
+	// Two readings a day apart, both inside the default 90-day window.
+	now := time.Now().UTC()
+	client.BalanceSnapshot.Create().SetBalance(100).SetAsOf(now.AddDate(0, 0, -3)).SetAccountID(acc.ID).SaveX(ctx)
+	client.BalanceSnapshot.Create().SetBalance(300).SetAsOf(now.AddDate(0, 0, -1)).SetAccountID(acc.ID).SaveX(ctx)
+
+	base := "/api/finance/accounts/" + strconv.Itoa(acc.ID) + "/balances"
+
+	// Raw: exactly the two keys, on every point, and no series-level keys.
+	resp := api.Get(base, admin)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("raw = %d, want 200; body=%s", resp.Code, resp.Body.String())
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(raw) != 1 || raw["points"] == nil {
+		t.Errorf("raw body keys = %v, want only points", keysOf(raw))
+	}
+	pts, _ := raw["points"].([]any)
+	if len(pts) != 2 {
+		t.Fatalf("raw points = %d, want 2", len(pts))
+	}
+	for i, p := range pts {
+		pm := p.(map[string]any)
+		if len(pm) != 2 || pm["as_of"] == nil || pm["balance"] == nil {
+			t.Errorf("raw point %d keys = %v, want only as_of and balance", i, keysOf(pm))
+		}
+	}
+
+	// basis=snapshot with a step: still only as_of/balance plus carried where it applies,
+	// and no ledger fields anywhere.
+	resp = api.Get(base+"?step=day", admin)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("step=day = %d, want 200; body=%s", resp.Code, resp.Body.String())
+	}
+	var bucketed map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &bucketed); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(bucketed) != 1 {
+		t.Errorf("snapshot body keys = %v, want only points (ledger metadata must be absent)", keysOf(bucketed))
+	}
+	bpts, _ := bucketed["points"].([]any)
+	if len(bpts) != 3 {
+		t.Fatalf("day points = %d, want 3 (a reading, a carried gap, a reading)", len(bpts))
+	}
+	carried := 0
+	for i, p := range bpts {
+		pm := p.(map[string]any)
+		for _, banned := range []string{"open", "close", "in", "out", "net", "external_in", "external_out", "txns", "source", "drift", "flow_mismatch"} {
+			if _, ok := pm[banned]; ok {
+				t.Errorf("snapshot point %d leaked the ledger field %q", i, banned)
+			}
+		}
+		if c, ok := pm["carried"]; ok {
+			if c != true {
+				t.Errorf("point %d carried = %v, want true whenever the key is present", i, c)
+			}
+			carried++
+		}
+	}
+	if carried != 1 {
+		t.Errorf("carried points = %d, want 1 (the gap day)", carried)
+	}
+}
+
+// TestFinanceBalanceHistory_LedgerBasisDTO: basis=ledger carries the per-bucket flow fields
+// and the series-level metadata through the wire DTO.
+func TestFinanceBalanceHistory_LedgerBasisDTO(t *testing.T) {
+	api, client := newFinanceReadTestAPI(t)
+	ctx := context.Background()
+	admin := sessionCookieFor(t, ctx, client, user.RoleAdmin)
+	acc := client.Account.Create().SetSource("commbank").SetName("A").
+		SetType(account.TypeEveryday).SetClass(account.ClassAsset).SetCurrency("AUD").SaveX(ctx)
+
+	now := time.Now().UTC()
+	day := func(back int) time.Time {
+		d := now.AddDate(0, 0, -back)
+		return time.Date(d.Year(), d.Month(), d.Day(), 0, 0, 0, 0, time.UTC)
+	}
+	client.Transaction.Create().SetDedupHash("api-l1").SetPostedDate(day(3)).
+		SetAmount(-100).SetDescription("MERCHANT").SetBalanceAfter(900).SetAccountID(acc.ID).SaveX(ctx)
+	client.Transaction.Create().SetDedupHash("api-l2").SetPostedDate(day(2)).
+		SetAmount(-200).SetDescription("MERCHANT").SetBalanceAfter(700).SetAccountID(acc.ID).SaveX(ctx)
+
+	resp := api.Get("/api/finance/accounts/"+strconv.Itoa(acc.ID)+"/balances?step=day&basis=ledger", admin)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("ledger = %d, want 200; body=%s", resp.Code, resp.Body.String())
+	}
+	var body struct {
+		Points          []BalancePointDTO `json:"points"`
+		Basis           *string           `json:"basis"`
+		LedgerFrom      *string           `json:"ledger_from"`
+		StartUnverified *bool             `json:"start_unverified"`
+		DriftMax        *float64          `json:"drift_max"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v; body=%s", err, resp.Body.String())
+	}
+	if body.Basis == nil || *body.Basis != "ledger" {
+		t.Errorf("basis = %v, want ledger", body.Basis)
+	}
+	if body.LedgerFrom == nil || *body.LedgerFrom != day(3).Format(dateLayout) {
+		t.Errorf("ledger_from = %v, want %s", body.LedgerFrom, day(3).Format(dateLayout))
+	}
+	if body.StartUnverified == nil || !*body.StartUnverified {
+		t.Errorf("start_unverified = %v, want true", body.StartUnverified)
+	}
+	if body.DriftMax == nil {
+		t.Error("drift_max missing under basis=ledger")
+	}
+	if len(body.Points) != 2 {
+		t.Fatalf("points = %d, want 2", len(body.Points))
+	}
+	p := body.Points[0]
+	if p.Open == nil || *p.Open != 1000 {
+		t.Errorf("open = %v, want 1000", p.Open)
+	}
+	if p.Close == nil || *p.Close != 900 || p.Balance != 900 {
+		t.Errorf("close/balance = %v/%v, want 900/900", p.Close, p.Balance)
+	}
+	if p.Out == nil || *p.Out != 100 {
+		t.Errorf("out = %v, want 100 as a positive magnitude", p.Out)
+	}
+	if p.Net == nil || *p.Net != -100 {
+		t.Errorf("net = %v, want -100", p.Net)
+	}
+	if p.Txns == nil || *p.Txns != 1 {
+		t.Errorf("txns = %v, want 1", p.Txns)
+	}
+	if p.Source == nil || *p.Source != "balance_after" {
+		t.Errorf("source = %v, want balance_after", p.Source)
+	}
+	if p.FlowMismatch != nil {
+		t.Errorf("flow_mismatch = %v, want absent on a consistent bucket", p.FlowMismatch)
+	}
+}
+
+// TestFinanceBalanceHistory_BucketStartsRenderInLocalZone: a bucket start is a local
+// midnight, so rendering it in UTC names the calendar period BEFORE the bucket it labels
+// (the August month bucket becomes 2026-07-31T14:00:00Z, which reads as July). Bucketed
+// points must therefore carry the local offset. Raw points are reading instants, not bucket
+// labels, so they keep UTC.
+func TestFinanceBalanceHistory_BucketStartsRenderInLocalZone(t *testing.T) {
+	api, client := newFinanceReadTestAPI(t)
+	ctx := context.Background()
+	admin := sessionCookieFor(t, ctx, client, user.RoleAdmin)
+	acc := client.Account.Create().SetSource("commbank").SetName("A").
+		SetType(account.TypeEveryday).SetClass(account.ClassAsset).SetCurrency("AUD").SaveX(ctx)
+
+	mel := finance.BucketZone()
+	// 9am Melbourne on the local 1st of August is 23:00 UTC on 31 July, the exact case a
+	// UTC-rendered bucket start misattributes. The December reading covers daylight saving.
+	aug := time.Date(2026, 8, 1, 9, 0, 0, 0, mel).UTC()
+	dec := time.Date(2026, 12, 1, 9, 0, 0, 0, mel).UTC()
+	client.BalanceSnapshot.Create().SetBalance(100).SetAsOf(aug).SetAccountID(acc.ID).SaveX(ctx)
+	client.BalanceSnapshot.Create().SetBalance(200).SetAsOf(dec).SetAccountID(acc.ID).SaveX(ctx)
+
+	base := "/api/finance/accounts/" + strconv.Itoa(acc.ID) + "/balances"
+
+	// days=0 is the full history, so the window does not depend on the clock.
+	resp := api.Get(base+"?step=month&days=0", admin)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("step=month = %d, want 200; body=%s", resp.Code, resp.Body.String())
+	}
+	var body struct {
+		Points []BalancePointDTO `json:"points"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Points) != 5 {
+		t.Fatalf("points = %d, want 5 (Aug..Dec)", len(body.Points))
+	}
+	if got, want := body.Points[0].AsOf, "2026-08-01T00:00:00+10:00"; got != want {
+		t.Errorf("first bucket as_of = %q, want %q (a UTC rendering would name July)", got, want)
+	}
+	if got, want := body.Points[4].AsOf, "2026-12-01T00:00:00+11:00"; got != want {
+		t.Errorf("last bucket as_of = %q, want %q (+11 under daylight saving)", got, want)
+	}
+	// Every bucketed point must parse back to a local midnight on the local 1st.
+	for i, p := range body.Points {
+		ts, err := time.Parse(time.RFC3339, p.AsOf)
+		if err != nil {
+			t.Fatalf("point %d as_of %q is not RFC3339: %v", i, p.AsOf, err)
+		}
+		lt := ts.In(mel)
+		if lt.Day() != 1 || lt.Hour() != 0 {
+			t.Errorf("point %d as_of = %q, want a local-midnight 1st", i, p.AsOf)
+		}
+	}
+
+	// The raw series is unchanged: reading instants in UTC.
+	resp = api.Get(base+"?days=0", admin)
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode raw: %v", err)
+	}
+	if len(body.Points) != 2 {
+		t.Fatalf("raw points = %d, want 2", len(body.Points))
+	}
+	if got, want := body.Points[0].AsOf, "2026-07-31T23:00:00Z"; got != want {
+		t.Errorf("raw as_of = %q, want %q (a reading instant, still UTC)", got, want)
+	}
+}
+
+// keysOf lists a decoded object's keys, for asserting that a response carries no more than
+// the fields it is supposed to.
+func keysOf(m map[string]any) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // TestFinanceTransactions_BadDateIs422: a malformed from/to query is a 422, not a

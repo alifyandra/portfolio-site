@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
@@ -70,6 +72,14 @@ type billsArgs struct {
 	Status     string `json:"status"`
 	WithinDays int    `json:"within_days"`
 	AccountID  int    `json:"account_id"`
+}
+
+type balanceHistoryArgs struct {
+	AccountID int    `json:"account_id"`
+	Step      string `json:"step"`
+	From      string `json:"from"`
+	To        string `json:"to"`
+	Basis     string `json:"basis"`
 }
 
 // --- tool result shapes (dates rendered as strings for a readable payload) ---
@@ -172,6 +182,51 @@ type billResult struct {
 	LastPaidAmount  *float64 `json:"last_paid_amount"`
 	AccountID       *int     `json:"account_id"`
 	AccountName     string   `json:"account_name,omitempty"`
+}
+
+// balancePointResult is one bucket on a balance series. as_of is the bucket START. The
+// optional fields are omitempty so a basis=snapshot point stays the two numbers it is, and
+// a model is not handed eight nulls per point to read past.
+type balancePointResult struct {
+	AsOf    string  `json:"as_of"`
+	Balance float64 `json:"balance"`
+	Carried *bool   `json:"carried,omitempty"`
+
+	Open         *float64 `json:"open,omitempty"`
+	Close        *float64 `json:"close,omitempty"`
+	In           *float64 `json:"in,omitempty"`
+	Out          *float64 `json:"out,omitempty"`
+	Net          *float64 `json:"net,omitempty"`
+	ExternalIn   *float64 `json:"external_in,omitempty"`
+	ExternalOut  *float64 `json:"external_out,omitempty"`
+	Txns         *int     `json:"txns,omitempty"`
+	Source       *string  `json:"source,omitempty"`
+	Drift        *float64 `json:"drift,omitempty"`
+	FlowMismatch *bool    `json:"flow_mismatch,omitempty"`
+}
+
+// balanceSeriesResult is one account's balance series. first/last/change/change_pct answer
+// "is this going up or down" without the model doing arithmetic over the points, and they
+// always describe the full requested window even when points were truncated.
+type balanceSeriesResult struct {
+	AccountID   int    `json:"account_id"`
+	AccountName string `json:"account_name"`
+	Class       string `json:"class"`
+	Currency    string `json:"currency"`
+
+	First     *float64 `json:"first"`
+	Last      *float64 `json:"last"`
+	Change    *float64 `json:"change"`
+	ChangePct *float64 `json:"change_pct"`
+
+	// basis=ledger only.
+	Basis           *string  `json:"basis,omitempty"`
+	LedgerFrom      *string  `json:"ledger_from,omitempty"`
+	StartUnverified *bool    `json:"start_unverified,omitempty"`
+	DriftMax        *float64 `json:"drift_max,omitempty"`
+	Note            *string  `json:"note,omitempty"`
+
+	Points []balancePointResult `json:"points"`
 }
 
 // handleToolsCall executes a tools/call and wraps the result. A structural failure
@@ -303,6 +358,56 @@ func (s *server) callTool(ctx context.Context, name string, rawArgs json.RawMess
 		}
 		return map[string]any{"months": toMonthResults(buckets)}, nil
 
+	case "balance_history":
+		var a balanceHistoryArgs
+		if err := decodeArgs(rawArgs, &a); err != nil {
+			return nil, err
+		}
+		// Enums are policed here, in Go, with a tool error rather than in the JSON schema, so
+		// a mistyped value gets a message the model can act on.
+		step, err := parseToolStep(a.Step)
+		if err != nil {
+			return nil, err
+		}
+		basis, err := finance.ParseBalanceBasis(strings.TrimSpace(a.Basis))
+		if err != nil {
+			return nil, err
+		}
+		from, err := parseToolDate(a.From)
+		if err != nil {
+			return nil, err
+		}
+		to, err := parseToolDate(a.To)
+		if err != nil {
+			return nil, err
+		}
+		fromT, toT := balanceWindow(from, to)
+		series, err := finance.BalanceSeries(ctx, s.deps.Ent, finance.BalanceSeriesFilter{
+			AccountID: a.AccountID,
+			From:      &fromT,
+			To:        &toT,
+			Step:      step,
+			Basis:     basis,
+		})
+		if err != nil {
+			return nil, err
+		}
+		results, truncated := toBalanceSeriesResults(series, basis)
+		res := map[string]any{
+			"step":   string(step),
+			"basis":  string(basis),
+			"from":   fromT.UTC().Format(dateLayout),
+			"to":     toT.UTC().Format(dateLayout),
+			"series": results,
+		}
+		if truncated {
+			// Only present when the point budget actually dropped buckets, so its absence
+			// means a complete answer (no-silent-caps signal).
+			res["truncated"] = true
+			res["advice"] = "The point budget dropped the oldest buckets from at least one series. Coarsen step (day -> week -> month) or narrow the from/to window for a complete answer. first/last/change still describe the whole requested window."
+		}
+		return res, nil
+
 	case "list_pending":
 		pend, err := finance.Pending(ctx, s.deps.Ent, 0)
 		if err != nil {
@@ -427,6 +532,17 @@ func toolDefinitions() []map[string]any {
 				"from":       strProp("Inclusive window start, YYYY-MM-DD. Defaults to 30 days before `to`."),
 				"to":         strProp("Inclusive window end, YYYY-MM-DD. Defaults to today (UTC)."),
 				"account_id": intProp("Restrict to one account id; omit or 0 for all accounts."),
+			}, nil),
+		},
+		{
+			"name":        "balance_history",
+			"description": "Balance trend over time for one account or every account: the balance as the bank reported it, bucketed into day, week or month steps. Each point is the LAST reading in its bucket (close-of-period), because a balance is a level rather than a sum: points are never averaged or added together. Buckets align to Australia/Melbourne local boundaries, so a month bucket starts on the local 1st and a week bucket on the local Monday, and each point's as_of is the bucket START rendered in that local zone (e.g. 2026-08-01T00:00:00+10:00), so read the date off it directly rather than converting to UTC first. A bucket with no reading repeats the previous close and is marked \"carried\": true, so a missed sync does not read as a balance change; buckets before a series' start are omitted rather than back-filled. Each series also carries first, last, change and change_pct, so \"is this going up or down\" needs no arithmetic over the points. step defaults to \"month\" and the window to the last 12 months, which keeps a year of history cheap to read; ask for \"day\" only over a short window. Omit account_id to get every account as a separate series. Set basis=\"ledger\" to derive the same series from posted transactions instead, which adds per-bucket open, close, in, out, net, external_in, external_out and txns, and reaches back as far as the ledger does rather than as far as the balance readings do (the readings only started accumulating recently, so basis=\"ledger\" is where the depth is). Under basis=\"ledger\" every point carries \"source\": \"balance_after\" means the bank's own running balance at that bucket's last row and cannot drift, \"accumulated\" means arithmetic walked from the newest balance reading and is exact only if the ledger in between is complete, \"carried\" means a repeat of the previous close. Ledger flows use the SAME internal-transfer rule as spending_summary and monthly_summary: in/out are gross over every posted row, external_in/external_out exclude transfers between the owner's own accounts, card payments and StepPay repayments, out and external_out are positive figures, and txns counts every row including internal legs. Each series reports ledger_from (the oldest posted row, so a flat line is distinguishable from a ledger that does not reach that far back), start_unverified when the earliest bucket's opening had to be synthesized, per-bucket drift where a balance reading falls in the same bucket (nonzero means a dropped or duplicated transaction), flow_mismatch when either reconciliation check fails for that bucket (close - open not equalling net, meaning a row is missing from the bucket, OR two consecutive rows whose running balances differ by something other than the intervening amount, which catches offsetting errors that leave the bucket total intact; the offending row ids are logged), and drift_max for the series. investment accounts are excluded from basis=\"ledger\" because their balance moves with the market with no transaction behind it. If a request would exceed the point budget the response carries \"truncated\": true, in which case coarsen step or narrow the window. To ask how much was spent or earned in a period use spending_summary or monthly_summary; this tool answers where the balance stood.",
+			"inputSchema": objectSchema(map[string]any{
+				"account_id": intProp("Restrict to one account id; omit or 0 for every account as its own series."),
+				"step":       strProp("Bucket width: day, week or month. Defaults to month."),
+				"from":       strProp("Inclusive window start, YYYY-MM-DD. Defaults to 12 months before `to`."),
+				"to":         strProp("Inclusive window end, YYYY-MM-DD. Defaults to today (Australia/Melbourne)."),
+				"basis":      strProp("snapshot (default) for the bank's balance readings, or ledger to derive closes and per-period in/out from posted transactions."),
 			}, nil),
 		},
 		{
@@ -582,6 +698,163 @@ func toBillResults(bills []finance.BillView) []billResult {
 	return out
 }
 
+// balanceSnapshotPointBudget / balanceLedgerPointBudget bound how many buckets one
+// balance_history call hands a model. A year of DAILY points for six accounts is a couple
+// of thousand objects that mostly answer the same question a month-end close answers, so
+// the budget is what makes balance history affordable to expose to an LLM at all.
+//
+// The ledger budget is much lower because a ledger point carries roughly eight numbers
+// against a snapshot point's two. Going over is NOT silent: the oldest buckets are dropped
+// (keeping the newest, like externalScanCap), truncated:true comes back with the escape
+// hatch, and a slog.Warn fires. They are vars, not consts, so a test can lower them without
+// seeding hundreds of buckets.
+var (
+	balanceSnapshotPointBudget = 400
+	balanceLedgerPointBudget   = 150
+)
+
+// allotPoints shares the point budget across the series, water-filling from the shallowest
+// so a series is never trimmed below what it would have fitted on its own.
+//
+// An even budget/n split looks fair and is not: two series of 149 and 5 points against a
+// budget of 150 would drop 74 points to save 4, and report a truncation for a request only 3%
+// over. Filling the small ones first hands the whole remainder to the deep one, which drops
+// the 4 points actually over budget and nothing else.
+func allotPoints(series []finance.BalanceSeriesView, budget int) []int {
+	allot := make([]int, len(series))
+	total := 0
+	for i, s := range series {
+		allot[i] = len(s.Points)
+		total += len(s.Points)
+	}
+	if total <= budget || len(series) == 0 {
+		return allot
+	}
+
+	// Ascending by size, so each pass gives a series either all it wants or an equal share of
+	// what is left.
+	idx := make([]int, len(series))
+	for i := range idx {
+		idx[i] = i
+	}
+	sort.SliceStable(idx, func(a, b int) bool {
+		return len(series[idx[a]].Points) < len(series[idx[b]].Points)
+	})
+
+	remaining := budget
+	left := len(idx)
+	for _, i := range idx {
+		share := remaining / left
+		if share < 1 {
+			share = 1 // never starve a series out of the answer entirely
+		}
+		if n := len(series[i].Points); n < share {
+			share = n
+		}
+		allot[i] = share
+		remaining -= share
+		if remaining < 0 {
+			remaining = 0
+		}
+		left--
+	}
+	return allot
+}
+
+// toBalanceSeriesResults maps the read-service series to the tool payload, applying the
+// point budget (see allotPoints). Each series keeps its NEWEST buckets, mirroring how
+// externalScanCap truncates. The bool return is truncated: it is set only when a series was
+// actually trimmed, so its absence means a complete answer.
+func toBalanceSeriesResults(series []finance.BalanceSeriesView, basis finance.BalanceBasis) ([]balanceSeriesResult, bool) {
+	budget := balanceSnapshotPointBudget
+	if basis == finance.BasisLedger {
+		budget = balanceLedgerPointBudget
+	}
+	allot := allotPoints(series, budget)
+	computed := 0
+	for _, s := range series {
+		computed += len(s.Points)
+	}
+
+	truncated := false
+	out := make([]balanceSeriesResult, 0, len(series))
+	for i, s := range series {
+		pts := s.Points
+		if len(pts) > allot[i] {
+			pts = pts[len(pts)-allot[i]:]
+			truncated = true
+		}
+		r := balanceSeriesResult{
+			AccountID:   s.AccountID,
+			AccountName: s.AccountName,
+			Class:       s.Class,
+			Currency:    s.Currency,
+			First:       s.First,
+			Last:        s.Last,
+			Change:      s.Change,
+			ChangePct:   s.ChangePct,
+			Points:      make([]balancePointResult, 0, len(pts)),
+		}
+		if basis == finance.BasisLedger {
+			b := string(s.Basis)
+			r.Basis = &b
+			r.LedgerFrom = fmtDateOnlyPtr(s.LedgerFrom)
+			if s.StartUnverified {
+				t := true
+				r.StartUnverified = &t
+			}
+			d := s.DriftMax
+			r.DriftMax = &d
+		}
+		if s.Note != "" {
+			n := s.Note
+			r.Note = &n
+		}
+		for _, p := range pts {
+			r.Points = append(r.Points, toBalancePointResult(p))
+		}
+		out = append(out, r)
+	}
+	if truncated {
+		slog.Warn("finance: balance_history hit the point budget; the oldest buckets were dropped from at least one series",
+			"budget", budget, "basis", string(basis), "series", len(series), "points", computed)
+	}
+	return out, truncated
+}
+
+// toBalancePointResult maps one bucket to the tool payload. Every point the tool emits is a
+// bucket START (the tool has no raw mode), so as_of is rendered in the bucket zone: the UTC
+// form of a local midnight names the period BEFORE the bucket it labels, which would make a
+// model attribute every close and every in/out total to the wrong month or day.
+func toBalancePointResult(p finance.BalancePoint) balancePointResult {
+	r := balancePointResult{
+		AsOf:        p.AsOf.In(finance.BucketZone()).Format(time.RFC3339),
+		Balance:     p.Balance,
+		Open:        p.Open,
+		Close:       p.Close,
+		In:          p.In,
+		Out:         p.Out,
+		Net:         p.Net,
+		ExternalIn:  p.ExternalIn,
+		ExternalOut: p.ExternalOut,
+		Txns:        p.Txns,
+		Drift:       p.Drift,
+	}
+	if p.Carried {
+		t := true
+		r.Carried = &t
+	}
+	if p.Source != "" {
+		s := p.Source
+		r.Source = &s
+	}
+	if p.FlowMismatch {
+		t := true
+		r.FlowMismatch = &t
+	}
+	return r
+}
+
 func toSpendingResult(b finance.SpendBucket) spendingResult {
 	return spendingResult{
 		From:          b.From.UTC().Format(dateLayout),
@@ -633,6 +906,38 @@ func spendingWindow(from, to *time.Time) (time.Time, time.Time) {
 		toT = *to
 	}
 	fromT := toT.AddDate(0, 0, -30)
+	if from != nil {
+		fromT = *from
+	}
+	return fromT, toT
+}
+
+// parseToolStep resolves the balance_history step argument. Unlike the HTTP endpoint the
+// tool has no raw mode (a raw per-reading list is a token sink and answers nothing extra),
+// so an empty step means the month default, and an unrecognised value is a tool error
+// rather than a silent fall back.
+func parseToolStep(s string) (finance.BalanceStep, error) {
+	switch step := finance.BalanceStep(strings.TrimSpace(s)); step {
+	case "":
+		return finance.StepMonth, nil
+	case finance.StepDay, finance.StepWeek, finance.StepMonth:
+		return step, nil
+	default:
+		return "", fmt.Errorf("unknown step %q (want day, week or month)", s)
+	}
+}
+
+// balanceWindow resolves the balance_history window from optional parsed bounds: `to`
+// defaults to today in Australia/Melbourne (not UTC, which is the previous local day for
+// the first ten hours of every Melbourne day), and `from` to 12 months before the effective
+// `to`, so a bare call means "the last 12 months". Both bounds are inclusive dates read at
+// bucket granularity.
+func balanceWindow(from, to *time.Time) (time.Time, time.Time) {
+	toT := finance.LocalToday()
+	if to != nil {
+		toT = *to
+	}
+	fromT := toT.AddDate(0, -12, 0)
 	if from != nil {
 		fromT = *from
 	}

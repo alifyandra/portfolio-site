@@ -4,6 +4,17 @@
 // (the codebase hand-rolls SVG throughout, e.g. the WhatsApp glyphs). No chart
 // library is installed and none may be added. Theme-aware: strokes/fills use the
 // palette CSS vars (which flip per theme), text uses the slate utilities.
+//
+// Two robustness rules, because the series can now be bucketed:
+//
+// Unplottable points are dropped BEFORE the value domain is computed. A single
+// non-finite balance or unparseable timestamp anywhere in the array would
+// otherwise make min/max NaN and blank the entire chart, and a bucketed series
+// has more ways to carry one than a raw reading list did.
+//
+// The domain is found in a single pass rather than with Math.min(...balances).
+// The spread form passes one argument per point, which also breaks on a long
+// series, and a daily year across a deep account is a lot of arguments.
 
 import { useMemo, useState } from 'react';
 
@@ -23,17 +34,39 @@ interface Plotted {
   x: number; // viewBox x
   y: number; // viewBox y
   fx: number; // fraction 0..1 across the plot (for hover mapping)
+  carried: boolean; // bucket had no reading; repeats the previous close
 }
 
 export function BalanceChart({ points }: { points: BalancePointDTO[] }) {
   const [hover, setHover] = useState<number | null>(null);
 
   const model = useMemo(() => {
-    if (points.length === 0) return null;
+    const usable = (points ?? [])
+      .map((point) => ({ point, t: new Date(point?.as_of ?? '').getTime() }))
+      .filter(
+        ({ point, t }) => Number.isFinite(point?.balance) && Number.isFinite(t),
+      );
+    if (usable.length === 0) return null;
 
-    const balances = points.map((p) => p.balance);
-    let min = Math.min(...balances);
-    let max = Math.max(...balances);
+    let min = Infinity;
+    let max = -Infinity;
+    let tMin = Infinity;
+    let tMax = -Infinity;
+    let minIdx = 0;
+    let maxIdx = 0;
+    usable.forEach(({ point, t }, i) => {
+      if (point.balance < min) {
+        min = point.balance;
+        minIdx = i;
+      }
+      if (point.balance > max) {
+        max = point.balance;
+        maxIdx = i;
+      }
+      if (t < tMin) tMin = t;
+      if (t > tMax) tMax = t;
+    });
+
     if (min === max) {
       // Flat series: pad so the line sits mid-height rather than on an edge.
       const pad = Math.abs(min) * 0.05 || 1;
@@ -41,22 +74,33 @@ export function BalanceChart({ points }: { points: BalancePointDTO[] }) {
       max += pad;
     }
     const span = max - min;
-
-    const times = points.map((p) => new Date(p.as_of).getTime());
-    const tMin = Math.min(...times);
-    const tMax = Math.max(...times);
     const tSpan = tMax - tMin || 1;
 
-    const plotted: Plotted[] = points.map((p, i) => {
-      const fx = points.length === 1 ? 0.5 : (times[i] - tMin) / tSpan;
-      const x = PAD.left + fx * PLOT_W;
-      const y = PAD.top + (1 - (p.balance - min) / span) * PLOT_H;
-      return { point: p, x, y, fx };
+    const plotted: Plotted[] = usable.map(({ point, t }, i) => {
+      const fx = usable.length === 1 ? 0.5 : (t - tMin) / tSpan;
+      return {
+        point,
+        x: PAD.left + fx * PLOT_W,
+        y: PAD.top + (1 - (point.balance - min) / span) * PLOT_H,
+        fx,
+        carried: point.carried === true,
+      };
     });
 
-    const linePath = plotted
-      .map((pt, i) => `${i === 0 ? 'M' : 'L'} ${pt.x.toFixed(2)} ${pt.y.toFixed(2)}`)
-      .join(' ');
+    // The line is drawn as two overlaid paths so a carried stretch reads as "no
+    // reading" rather than "no change". Without this the carry-forward rule is
+    // invisible in the UI, which is the one real cost of carrying instead of
+    // emitting a gap. A segment is dashed when either end is carried.
+    const solid: string[] = [];
+    const dashed: string[] = [];
+    for (let i = 1; i < plotted.length; i++) {
+      const a = plotted[i - 1];
+      const b = plotted[i];
+      const seg = `M ${a.x.toFixed(2)} ${a.y.toFixed(2)} L ${b.x.toFixed(2)} ${b.y.toFixed(2)}`;
+      (a.carried || b.carried ? dashed : solid).push(seg);
+    }
+    // A single point has no segment, so it gets a dot to sit on instead.
+    const singleton = plotted.length === 1 ? plotted[0] : null;
 
     const baseY = PAD.top + PLOT_H;
     const areaPath =
@@ -66,30 +110,49 @@ export function BalanceChart({ points }: { points: BalancePointDTO[] }) {
 
     // A faint zero reference line, only when 0 falls inside the value range.
     const zeroY =
-      min < 0 && max > 0
-        ? PAD.top + (1 - (0 - min) / span) * PLOT_H
-        : null;
+      min < 0 && max > 0 ? PAD.top + (1 - (0 - min) / span) * PLOT_H : null;
 
-    const last = points[points.length - 1];
-    const minPoint = points[balances.indexOf(Math.min(...balances))];
-    const maxPoint = points[balances.indexOf(Math.max(...balances))];
-
-    return { plotted, linePath, areaPath, zeroY, last, minPoint, maxPoint };
+    return {
+      plotted,
+      solidPath: solid.join(' '),
+      dashedPath: dashed.join(' '),
+      singleton,
+      areaPath,
+      zeroY,
+      last: usable[usable.length - 1].point,
+      minPoint: usable[minIdx].point,
+      maxPoint: usable[maxIdx].point,
+      carriedCount: plotted.filter((pt) => pt.carried).length,
+      dropped: (points?.length ?? 0) - usable.length,
+    };
   }, [points]);
 
   if (!model) {
     return (
       <p className="py-8 text-center text-sm text-slate-400">
-        No balance snapshots for this account yet.
+        No balance history for this account yet.
       </p>
     );
   }
 
-  const { plotted, linePath, areaPath, zeroY, last, minPoint, maxPoint } = model;
-  const active = hover != null ? plotted[hover] : null;
+  const {
+    plotted,
+    solidPath,
+    dashedPath,
+    singleton,
+    areaPath,
+    zeroY,
+    last,
+    minPoint,
+    maxPoint,
+    carriedCount,
+    dropped,
+  } = model;
+  const active = hover != null ? (plotted[hover] ?? null) : null;
 
   const handleMove = (e: React.MouseEvent<SVGSVGElement>) => {
     const rect = e.currentTarget.getBoundingClientRect();
+    if (rect.width === 0) return;
     const frac = (e.clientX - rect.left) / rect.width;
     // Nearest point by horizontal fraction.
     let best = 0;
@@ -137,15 +200,55 @@ export function BalanceChart({ points }: { points: BalancePointDTO[] }) {
         )}
 
         <path d={areaPath} fill="url(#fin-area)" />
-        <path
-          d={linePath}
-          fill="none"
-          stroke="var(--color-sky)"
-          strokeWidth={2}
-          strokeLinejoin="round"
-          strokeLinecap="round"
-          vectorEffect="non-scaling-stroke"
-        />
+        {solidPath !== '' && (
+          <path
+            d={solidPath}
+            fill="none"
+            stroke="var(--color-sky)"
+            strokeWidth={2}
+            strokeLinejoin="round"
+            strokeLinecap="round"
+            vectorEffect="non-scaling-stroke"
+          />
+        )}
+        {dashedPath !== '' && (
+          <path
+            d={dashedPath}
+            fill="none"
+            stroke="var(--color-sky)"
+            strokeWidth={2}
+            strokeDasharray="4 4"
+            strokeLinejoin="round"
+            strokeLinecap="round"
+            vectorEffect="non-scaling-stroke"
+          />
+        )}
+        {singleton && (
+          <circle
+            cx={singleton.x}
+            cy={singleton.y}
+            r={3}
+            fill="var(--color-sky)"
+            vectorEffect="non-scaling-stroke"
+          />
+        )}
+
+        {/* Hollow markers on carried buckets, so a flat stretch is legible as
+            "no reading" without having to hover it. */}
+        {plotted
+          .filter((pt) => pt.carried)
+          .map((pt, i) => (
+            <circle
+              key={`carried-${i}`}
+              cx={pt.x}
+              cy={pt.y}
+              r={2.5}
+              fill="var(--canvas)"
+              stroke="var(--color-sky)"
+              strokeWidth={1.5}
+              vectorEffect="non-scaling-stroke"
+            />
+          ))}
 
         {active && (
           <>
@@ -162,8 +265,8 @@ export function BalanceChart({ points }: { points: BalancePointDTO[] }) {
               cx={active.x}
               cy={active.y}
               r={4}
-              fill="var(--color-sky)"
-              stroke="var(--canvas)"
+              fill={active.carried ? 'var(--canvas)' : 'var(--color-sky)'}
+              stroke={active.carried ? 'var(--color-sky)' : 'var(--canvas)'}
               strokeWidth={2}
               vectorEffect="non-scaling-stroke"
             />
@@ -180,6 +283,9 @@ export function BalanceChart({ points }: { points: BalancePointDTO[] }) {
             {formatMoney(active.point.balance)}
           </div>
           <div className="text-slate-400">{formatDate(active.point.as_of)}</div>
+          {active.carried && (
+            <div className="text-slate-500">carried forward</div>
+          )}
         </div>
       )}
 
@@ -207,6 +313,18 @@ export function BalanceChart({ points }: { points: BalancePointDTO[] }) {
           · {formatDate(maxPoint.as_of)}
         </span>
       </div>
+
+      {(carriedCount > 0 || dropped > 0) && (
+        <p className="mt-1 text-xs text-slate-500">
+          {carriedCount > 0 && (
+            <>
+              Dashed segments and hollow markers are buckets with no reading,
+              repeating the previous close ({carriedCount} of {plotted.length}).
+            </>
+          )}
+          {dropped > 0 && <> {dropped} unplottable point(s) skipped.</>}
+        </p>
+      )}
     </div>
   );
 }

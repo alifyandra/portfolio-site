@@ -19,6 +19,7 @@ import (
 	"github.com/alifyandra/portfolio-site/backend/ent/account"
 	"github.com/alifyandra/portfolio-site/backend/ent/wishlistitem"
 	"github.com/alifyandra/portfolio-site/backend/internal/auth"
+	"github.com/alifyandra/portfolio-site/backend/internal/finance"
 )
 
 // newMCPTestServer builds the MCP handler over an in-memory SQLite ledger with a real
@@ -167,14 +168,14 @@ func TestMCP_FullTranscript(t *testing.T) {
 		t.Errorf("notification body = %q, want empty", nrr.Body.String())
 	}
 
-	// 3) tools/list: all eight read tools present, each with a schema.
+	// 3) tools/list: all ten read tools present, each with a schema.
 	rr, out = rpc(t, h, raw, map[string]any{"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
 	if rr.Code != http.StatusOK {
 		t.Fatalf("tools/list = %d, want 200; body=%s", rr.Code, rr.Body.String())
 	}
 	tools, _ := out["result"].(map[string]any)["tools"].([]any)
-	if len(tools) != 9 {
-		t.Fatalf("tools = %d, want 9", len(tools))
+	if len(tools) != 10 {
+		t.Fatalf("tools = %d, want 10", len(tools))
 	}
 	names := map[string]bool{}
 	for _, tv := range tools {
@@ -184,7 +185,7 @@ func TestMCP_FullTranscript(t *testing.T) {
 			t.Errorf("tool %v missing inputSchema", tm["name"])
 		}
 	}
-	for _, want := range []string{"get_net_worth", "list_accounts", "list_transactions", "search_merchant", "monthly_summary", "spending_summary", "list_pending", "list_wishlist", "list_recurring_bills"} {
+	for _, want := range []string{"get_net_worth", "list_accounts", "list_transactions", "search_merchant", "monthly_summary", "spending_summary", "list_pending", "balance_history", "list_wishlist", "list_recurring_bills"} {
 		if !names[want] {
 			t.Errorf("tools/list missing %q", want)
 		}
@@ -540,5 +541,392 @@ func TestMCP_ListWishlist(t *testing.T) {
 	}
 	if mixed.KnownCostTotal != 400 || mixed.CurrencyMismatchCount != 1 {
 		t.Errorf("mixed currency = %+v, want known 400 / mismatch 1", mixed)
+	}
+}
+
+// balanceHistoryPayload is the decoded balance_history tool result.
+type balanceHistoryPayload struct {
+	Step   string `json:"step"`
+	Basis  string `json:"basis"`
+	Series []struct {
+		AccountID   int      `json:"account_id"`
+		AccountName string   `json:"account_name"`
+		Class       string   `json:"class"`
+		Currency    string   `json:"currency"`
+		First       *float64 `json:"first"`
+		Last        *float64 `json:"last"`
+		Change      *float64 `json:"change"`
+		ChangePct   *float64 `json:"change_pct"`
+		Basis       *string  `json:"basis"`
+		LedgerFrom  *string  `json:"ledger_from"`
+		DriftMax    *float64 `json:"drift_max"`
+		Points      []struct {
+			AsOf    string   `json:"as_of"`
+			Balance float64  `json:"balance"`
+			Carried *bool    `json:"carried"`
+			Open    *float64 `json:"open"`
+			Close   *float64 `json:"close"`
+			Out     *float64 `json:"out"`
+			Net     *float64 `json:"net"`
+			Txns    *int     `json:"txns"`
+			Source  *string  `json:"source"`
+		} `json:"points"`
+	} `json:"series"`
+	Truncated *bool   `json:"truncated"`
+	Advice    *string `json:"advice"`
+}
+
+// TestMCP_BalanceHistory_DefaultsAndFanOut: a bare call defaults to monthly buckets over the
+// last 12 months, and omitting account_id returns every account as its own series with the
+// first/last/change roll-up.
+func TestMCP_BalanceHistory_DefaultsAndFanOut(t *testing.T) {
+	h, svc, client := newMCPTestServer(t)
+	ctx := context.Background()
+	raw := mintToken(t, ctx, svc, client, []string{"finance.read"})
+
+	// A second account so the fan-out has something to fan out to.
+	other := client.Account.Create().SetSource("commbank").SetName("Zed Saver").
+		SetType(account.TypeSavings).SetClass(account.ClassAsset).SetCurrency("AUD").SaveX(ctx)
+	client.BalanceSnapshot.Create().SetBalance(2000.00).
+		SetAsOf(time.Now().UTC().AddDate(0, 0, -1)).SetAccountID(other.ID).SaveX(ctx)
+
+	_, out := rpc(t, h, raw, map[string]any{
+		"jsonrpc": "2.0", "id": 30, "method": "tools/call",
+		"params": map[string]any{"name": "balance_history", "arguments": map[string]any{}},
+	})
+	var bh balanceHistoryPayload
+	decodeToolText(t, out, &bh)
+
+	if bh.Step != "month" {
+		t.Errorf("step = %q, want the month default", bh.Step)
+	}
+	if bh.Basis != "snapshot" {
+		t.Errorf("basis = %q, want the snapshot default", bh.Basis)
+	}
+	if len(bh.Series) != 2 {
+		t.Fatalf("series = %d, want 2 (one per account)", len(bh.Series))
+	}
+	if bh.Truncated != nil {
+		t.Errorf("truncated = %v, want absent on a small answer", bh.Truncated)
+	}
+	for _, s := range bh.Series {
+		if s.Currency != "AUD" || s.Class != "asset" {
+			t.Errorf("series %d meta = %s/%s, want AUD/asset", s.AccountID, s.Currency, s.Class)
+		}
+		if s.First == nil || s.Last == nil || s.Change == nil {
+			t.Errorf("series %d missing the first/last/change roll-up", s.AccountID)
+		}
+		if len(s.Points) == 0 {
+			t.Errorf("series %d has no points", s.AccountID)
+		}
+		// The snapshot basis must not leak the ledger series metadata.
+		if s.Basis != nil || s.LedgerFrom != nil || s.DriftMax != nil {
+			t.Errorf("series %d leaked ledger metadata under basis=snapshot", s.AccountID)
+		}
+		for i, p := range s.Points {
+			if p.Open != nil || p.Close != nil || p.Net != nil || p.Source != nil {
+				t.Errorf("series %d point %d leaked ledger fields under basis=snapshot", s.AccountID, i)
+			}
+		}
+	}
+}
+
+// TestMCP_BalanceHistory_LedgerBasis: basis=ledger derives closes and per-bucket flows, and
+// carries source plus the series-level ledger metadata.
+func TestMCP_BalanceHistory_LedgerBasis(t *testing.T) {
+	h, svc, client := newMCPTestServer(t)
+	ctx := context.Background()
+	raw := mintToken(t, ctx, svc, client, []string{"finance.read"})
+	acc := client.Account.Query().OnlyX(ctx) // the seeded account
+
+	now := time.Now().UTC()
+	day := func(back int) time.Time {
+		d := now.AddDate(0, 0, -back)
+		return time.Date(d.Year(), d.Month(), d.Day(), 0, 0, 0, 0, time.UTC)
+	}
+	client.Transaction.Create().SetDedupHash("bh-1").SetPostedDate(day(2)).
+		SetAmount(-100).SetDescription("MERCHANT").SetBalanceAfter(900).SetAccountID(acc.ID).SaveX(ctx)
+	client.Transaction.Create().SetDedupHash("bh-2").SetPostedDate(day(1)).
+		SetAmount(-200).SetDescription("MERCHANT").SetBalanceAfter(700).SetAccountID(acc.ID).SaveX(ctx)
+
+	_, out := rpc(t, h, raw, map[string]any{
+		"jsonrpc": "2.0", "id": 31, "method": "tools/call",
+		"params": map[string]any{"name": "balance_history", "arguments": map[string]any{
+			"step": "day", "basis": "ledger", "account_id": acc.ID,
+		}},
+	})
+	var bh balanceHistoryPayload
+	decodeToolText(t, out, &bh)
+
+	if bh.Basis != "ledger" || bh.Step != "day" {
+		t.Fatalf("echoed step/basis = %q/%q, want day/ledger", bh.Step, bh.Basis)
+	}
+	if len(bh.Series) != 1 {
+		t.Fatalf("series = %d, want 1", len(bh.Series))
+	}
+	s := bh.Series[0]
+	if s.Basis == nil || *s.Basis != "ledger" || s.LedgerFrom == nil || s.DriftMax == nil {
+		t.Errorf("series ledger metadata = %v/%v/%v, want all present", s.Basis, s.LedgerFrom, s.DriftMax)
+	}
+	// The tool's window runs to today, so the two row days plus a carried today.
+	if len(s.Points) != 3 {
+		t.Fatalf("points = %d, want 3 (two row days plus a carried today)", len(s.Points))
+	}
+	p := s.Points[0]
+	if p.Open == nil || *p.Open != 1000 {
+		t.Errorf("open = %v, want 1000", deref(p.Open))
+	}
+	if p.Close == nil || *p.Close != 900 || p.Balance != 900 {
+		t.Errorf("close/balance = %v/%v, want 900/900", deref(p.Close), p.Balance)
+	}
+	if p.Out == nil || *p.Out != 100 {
+		t.Errorf("out = %v, want 100 as a positive magnitude", deref(p.Out))
+	}
+	if p.Source == nil || *p.Source != "balance_after" {
+		t.Errorf("source = %v, want balance_after", p.Source)
+	}
+	if p.Txns == nil || *p.Txns != 1 {
+		t.Errorf("txns = %v, want 1", p.Txns)
+	}
+	// Today has no rows, so it repeats the previous close with zero flows and says carried.
+	last := s.Points[2]
+	if last.Carried == nil || !*last.Carried {
+		t.Errorf("today carried = %v, want true", last.Carried)
+	}
+	if last.Source == nil || *last.Source != "carried" {
+		t.Errorf("today source = %v, want carried", last.Source)
+	}
+	if last.Close == nil || *last.Close != 700 {
+		t.Errorf("today close = %v, want the previous close 700", deref(last.Close))
+	}
+}
+
+// deref renders an optional float for a failure message (%v on a pointer prints an address).
+func deref(f *float64) any {
+	if f == nil {
+		return "nil"
+	}
+	return *f
+}
+
+// TestMCP_BalanceHistory_BucketStartsRenderInLocalZone: every point the tool emits is a
+// bucket start, which is a local midnight, so a UTC rendering would name the period BEFORE
+// the bucket it labels and a model would attribute the close and the flows to the wrong month.
+func TestMCP_BalanceHistory_BucketStartsRenderInLocalZone(t *testing.T) {
+	h, svc, client := newMCPTestServer(t)
+	ctx := context.Background()
+	raw := mintToken(t, ctx, svc, client, []string{"finance.read"})
+	acc := client.Account.Query().OnlyX(ctx)
+
+	mel := finance.BucketZone()
+	// 9am Melbourne on the local 1st, which is 23:00 UTC the previous month.
+	local := time.Date(2026, 8, 1, 9, 0, 0, 0, mel)
+	client.BalanceSnapshot.Create().SetBalance(500).SetAsOf(local.UTC()).SetAccountID(acc.ID).SaveX(ctx)
+
+	_, out := rpc(t, h, raw, map[string]any{
+		"jsonrpc": "2.0", "id": 60, "method": "tools/call",
+		"params": map[string]any{"name": "balance_history", "arguments": map[string]any{
+			"step": "month", "account_id": acc.ID, "from": "2026-08-01", "to": "2026-08-31",
+		}},
+	})
+	var bh balanceHistoryPayload
+	decodeToolText(t, out, &bh)
+	if len(bh.Series) != 1 || len(bh.Series[0].Points) != 1 {
+		t.Fatalf("want one series with one August bucket, got %d series", len(bh.Series))
+	}
+	got := bh.Series[0].Points[0].AsOf
+	if got != "2026-08-01T00:00:00+10:00" {
+		t.Errorf("as_of = %q, want 2026-08-01T00:00:00+10:00 (a UTC rendering would read as July)", got)
+	}
+	ts, err := time.Parse(time.RFC3339, got)
+	if err != nil {
+		t.Fatalf("as_of %q is not RFC3339: %v", got, err)
+	}
+	if lt := ts.In(mel); lt.Month() != time.August || lt.Day() != 1 || lt.Hour() != 0 {
+		t.Errorf("as_of %q resolves to %s, want the local-midnight 1st of August", got, lt)
+	}
+}
+
+// TestAllotPoints_WaterFillsFromTheShallowest: the budget must never trim a series below what
+// it would have fitted on its own. An even budget/n split looked fair but dropped 74 points
+// to save 4 on the reviewer's case, and reported a truncation for a request 3% over.
+func TestAllotPoints_WaterFillsFromTheShallowest(t *testing.T) {
+	mk := func(counts ...int) []finance.BalanceSeriesView {
+		out := make([]finance.BalanceSeriesView, 0, len(counts))
+		for _, n := range counts {
+			out = append(out, finance.BalanceSeriesView{Points: make([]finance.BalancePoint, n)})
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		name   string
+		counts []int
+		budget int
+		want   []int
+	}{
+		{"under budget leaves everything", []int{10, 5}, 150, []int{10, 5}},
+		{"exactly at budget leaves everything", []int{100, 50}, 150, []int{100, 50}},
+		{"deep plus shallow trims only the deep one", []int{149, 5}, 150, []int{145, 5}},
+		{"shallow first in the input order", []int{5, 149}, 150, []int{5, 145}},
+		{"one series takes the whole budget", []int{11}, 5, []int{5}},
+		{"equal series split evenly", []int{100, 100}, 150, []int{75, 75}},
+		{"more series than budget still keeps one point each", []int{3, 3, 3}, 2, []int{1, 1, 1}},
+	} {
+		got := allotPoints(mk(tc.counts...), tc.budget)
+		if len(got) != len(tc.want) {
+			t.Fatalf("%s: allot len = %d, want %d", tc.name, len(got), len(tc.want))
+		}
+		for i := range tc.want {
+			if got[i] != tc.want[i] {
+				t.Errorf("%s: allot = %v, want %v", tc.name, got, tc.want)
+				break
+			}
+		}
+	}
+}
+
+// TestMCP_BalanceHistory_ShallowSeriesNotStarvedByDeepOne is the end-to-end half of the
+// water-fill fix: the shallow series keeps every point it had, and only the deep one is cut.
+func TestMCP_BalanceHistory_ShallowSeriesNotStarvedByDeepOne(t *testing.T) {
+	h, svc, client := newMCPTestServer(t)
+	ctx := context.Background()
+	raw := mintToken(t, ctx, svc, client, []string{"finance.read"})
+
+	origSnap := balanceSnapshotPointBudget
+	balanceSnapshotPointBudget = 10
+	t.Cleanup(func() { balanceSnapshotPointBudget = origSnap })
+
+	// A fixed window so neither series' length depends on the clock, and a deep account plus
+	// a shallow one whose 3 points exceed an even 10/2 = 5 share only in aggregate.
+	deep := client.Account.Create().SetSource("commbank").SetName("Y deep").
+		SetType(account.TypeSavings).SetClass(account.ClassAsset).SetCurrency("AUD").SaveX(ctx)
+	shallow := client.Account.Create().SetSource("commbank").SetName("Z shallow").
+		SetType(account.TypeSavings).SetClass(account.ClassAsset).SetCurrency("AUD").SaveX(ctx)
+	mel := finance.BucketZone()
+	for d := 1; d <= 12; d++ {
+		client.BalanceSnapshot.Create().SetBalance(float64(100 * d)).
+			SetAsOf(time.Date(2026, 6, d, 9, 0, 0, 0, mel).UTC()).SetAccountID(deep.ID).SaveX(ctx)
+	}
+	for d := 10; d <= 12; d++ {
+		client.BalanceSnapshot.Create().SetBalance(float64(10 * d)).
+			SetAsOf(time.Date(2026, 6, d, 9, 0, 0, 0, mel).UTC()).SetAccountID(shallow.ID).SaveX(ctx)
+	}
+
+	_, out := rpc(t, h, raw, map[string]any{
+		"jsonrpc": "2.0", "id": 61, "method": "tools/call",
+		"params": map[string]any{"name": "balance_history", "arguments": map[string]any{
+			"step": "day", "from": "2026-06-01", "to": "2026-06-12",
+		}},
+	})
+	var bh balanceHistoryPayload
+	decodeToolText(t, out, &bh)
+	if bh.Truncated == nil || !*bh.Truncated {
+		t.Fatalf("truncated = %v, want true", bh.Truncated)
+	}
+	byID := map[int]int{}
+	for _, s := range bh.Series {
+		byID[s.AccountID] = len(s.Points)
+	}
+	if got := byID[shallow.ID]; got != 3 {
+		t.Errorf("shallow series kept %d points, want all 3: a deep series must not starve it", got)
+	}
+	if got := byID[deep.ID]; got >= 12 || got <= 3 {
+		t.Errorf("deep series kept %d points, want it trimmed but given the remaining budget", got)
+	}
+}
+
+// TestMCP_BalanceHistory_UnknownStepAndBasisAreToolErrors: a bad enum is a tool-error result
+// the model can read, not a protocol error and not a silent fall back.
+func TestMCP_BalanceHistory_UnknownStepAndBasisAreToolErrors(t *testing.T) {
+	h, svc, client := newMCPTestServer(t)
+	ctx := context.Background()
+	raw := mintToken(t, ctx, svc, client, []string{"finance.read"})
+
+	for i, args := range []map[string]any{{"step": "monthly"}, {"basis": "derived"}, {"step": ""}} {
+		_, out := rpc(t, h, raw, map[string]any{
+			"jsonrpc": "2.0", "id": 40 + i, "method": "tools/call",
+			"params": map[string]any{"name": "balance_history", "arguments": args},
+		})
+		res, _ := out["result"].(map[string]any)
+		if res == nil {
+			t.Fatalf("args %v: expected a tool result, got %v", args, out)
+		}
+		isErr, _ := res["isError"].(bool)
+		// An empty step is the month default, so only the first two must fail.
+		wantErr := i < 2
+		if isErr != wantErr {
+			t.Errorf("args %v: isError = %v, want %v", args, isErr, wantErr)
+		}
+	}
+}
+
+// TestMCP_BalanceHistory_TruncatedOnlyWhenPointsDropped: over budget the response says so
+// and keeps the NEWEST buckets; under budget the flag is absent. A trimmed answer is never
+// silent.
+func TestMCP_BalanceHistory_TruncatedOnlyWhenPointsDropped(t *testing.T) {
+	h, svc, client := newMCPTestServer(t)
+	ctx := context.Background()
+	raw := mintToken(t, ctx, svc, client, []string{"finance.read"})
+
+	// Lower the budget instead of seeding hundreds of buckets.
+	origSnap := balanceSnapshotPointBudget
+	balanceSnapshotPointBudget = 5
+	t.Cleanup(func() { balanceSnapshotPointBudget = origSnap })
+
+	// A dedicated account, so the harness's own pre-seeded reading does not extend the
+	// series and move the roll-up.
+	acc := client.Account.Create().SetSource("commbank").SetName("Zed Budget").
+		SetType(account.TypeSavings).SetClass(account.ClassAsset).SetCurrency("AUD").SaveX(ctx)
+
+	// Ten consecutive daily readings rising 100 to 1000, so a daily series over the window
+	// has those ten buckets plus a carried today.
+	now := time.Now().UTC()
+	for i := 10; i >= 1; i-- {
+		d := now.AddDate(0, 0, -i)
+		client.BalanceSnapshot.Create().SetBalance(float64(100 * (11 - i))).
+			SetAsOf(time.Date(d.Year(), d.Month(), d.Day(), 9, 0, 0, 0, time.UTC)).
+			SetAccountID(acc.ID).SaveX(ctx)
+	}
+
+	call := func(id int, args map[string]any) balanceHistoryPayload {
+		_, out := rpc(t, h, raw, map[string]any{
+			"jsonrpc": "2.0", "id": id, "method": "tools/call",
+			"params": map[string]any{"name": "balance_history", "arguments": args},
+		})
+		var bh balanceHistoryPayload
+		decodeToolText(t, out, &bh)
+		return bh
+	}
+
+	over := call(50, map[string]any{"step": "day", "account_id": acc.ID})
+	if over.Truncated == nil || !*over.Truncated {
+		t.Fatalf("truncated = %v, want true once the budget dropped buckets", over.Truncated)
+	}
+	if over.Advice == nil || !strings.Contains(*over.Advice, "step") {
+		t.Errorf("advice = %v, want the coarsen-step escape hatch", over.Advice)
+	}
+	if len(over.Series) != 1 {
+		t.Fatalf("series = %d, want 1", len(over.Series))
+	}
+	if got := len(over.Series[0].Points); got > 5 {
+		t.Errorf("points = %d, want at most the budget of 5", got)
+	}
+	// The roll-up still describes the whole requested window, and the kept buckets are the
+	// newest, so the last point carries the most recent level.
+	if over.Series[0].Last == nil || *over.Series[0].Last != 1000 {
+		t.Errorf("last = %v, want 1000 (the newest level kept)", deref(over.Series[0].Last))
+	}
+	if over.Series[0].First == nil || *over.Series[0].First != 100 {
+		t.Errorf("first = %v, want 100 (the roll-up covers the full window, not the trimmed points)", deref(over.Series[0].First))
+	}
+	if pts := over.Series[0].Points; len(pts) > 0 && pts[0].Balance == 100 {
+		t.Error("the oldest bucket survived the trim, so the newest buckets were dropped instead")
+	}
+
+	// A monthly step over the same data is well inside the budget, so nothing is dropped and
+	// the flag is absent.
+	under := call(51, map[string]any{"step": "month", "account_id": acc.ID})
+	if under.Truncated != nil {
+		t.Errorf("truncated = %v, want absent when nothing was dropped", under.Truncated)
 	}
 }

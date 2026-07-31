@@ -264,8 +264,52 @@ Transaction]. See ADR 15.
 ### Balance Snapshot
 A timestamped reading of a [Financial Account]'s balance from the source on each
 refresh (balance, available balance, and any credit limit). It is the authoritative
-balance and yields a balance-over-time series; balance is never derived by summing
+balance and yields a [Balance Series]; balance is never derived by summing
 transactions. See ADR 15.
+
+### Balance Series
+A [Financial Account]'s balance over time, bucketed to a **step** of day, week or
+month. A balance is a *stock* (a level at an instant), not a *flow* (a quantity
+accumulated over a period), so a bucket reports its **last** value, which is
+close-of-period: balances are never averaged and never summed. Buckets align to
+**Australia/Melbourne** local boundaries, since a bucket edge has to land on the
+owner's local day or a monthly series is wrong at the edges; a day runs local
+midnight to local midnight, a week starts local Monday, a month starts the local 1st.
+A bucket with no value repeats the previous close and is flagged **carried**, because
+for a stock "no reading" means "as far as we know the level did not change". Carry
+only ever runs forward: buckets before a series' start are omitted, never
+back-filled. Each series reports its own currency; there is no mixing and no
+conversion. See ADR 17.
+
+### Balance Basis
+Where a [Balance Series]' closes come from. **snapshot** (the default) reads
+[Balance Snapshot] rows, which are the bank's own figures. **ledger** derives the
+same series from [Posted Transaction]s and adds per-bucket **open** (which is by
+definition the previous bucket's close, never stored), gross **in**/**out**/**net**
+over every row, and **external in**/**out** that exclude moves between the owner's
+own accounts using the same rule as the spending roll-ups. The two bases live on one
+`step` grammar because only the source differs.
+
+Under the ledger basis the strategy is chosen **per account by measured coverage**,
+never by class: where the ledger carries the bank's running balance the bucket close
+IS that figure at the bucket's last row, which cannot drift; where it does not, the
+close is walked incrementally from the newest [Balance Snapshot], which is the only
+trustworthy level because the ledger supplies deltas and not levels. Each point
+therefore carries a **source** (`balance_after`, `accumulated`, `carried`) so a
+caller can tell how much to trust the number. An **investment** [Financial Account]
+is excluded from ledger derivation: its balance moves with the market with no
+transaction behind it. Nothing is emitted before the account's oldest posted row, and
+the series reports that edge as **ledger_from**. See ADR 17.
+
+### Balance Reconciliation
+Having two independent sources for the same quantity ([Balance Basis]) yields checks
+that are surfaced in the response rather than only logged: per-bucket **drift** (a
+derived close minus a reading falling in the same bucket, so a nonzero value means a
+dropped or duplicated [Posted Transaction]), **flow mismatch** (close minus open does
+not equal the bucket's net flow, so a row is missing from the bucket), and a
+series-level **drift max**. A number nobody can see is a number nobody acts on. The
+irony is worth writing down: reconciliation is weakest exactly where derivation is
+weakest, since a drift check needs a reading in the bucket. See ADR 17.
 
 ### Watermark
 The date through which a [Financial Account]'s [Posted Transaction]s are known
