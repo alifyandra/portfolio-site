@@ -136,7 +136,7 @@ var internalTransferRe = regexp.MustCompile(`(?i)\btransfer (?:to|from) x+(\d{4}
 var steppayRepaymentRe = regexp.MustCompile(`(?i)steppay (?:pymt|repayment)`)
 
 // trailingDigitsRe pulls the last run of four digits from a masked account number such as
-// "xxxx 1775".
+// "xxxx 4242".
 var trailingDigitsRe = regexp.MustCompile(`(\d{4})\D*$`)
 
 // ownAccountLast4 is the set of last-four-digit strings across the owner's accounts, used

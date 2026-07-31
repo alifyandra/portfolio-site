@@ -341,23 +341,23 @@ func TestMonthlySummary_ExcludesInternalTransfers(t *testing.T) {
 	client := newFinanceTestClient(t)
 	ctx := context.Background()
 	checking := client.Account.Create().SetSource("commbank").SetName("Smart Access").
-		SetMaskedNumber("xxxx 1775").SetType(account.TypeEveryday).SetClass(account.ClassAsset).SaveX(ctx)
+		SetMaskedNumber("xxxx 4242").SetType(account.TypeEveryday).SetClass(account.ClassAsset).SaveX(ctx)
 	saver := client.Account.Create().SetSource("commbank").SetName("NetBank Saver").
-		SetMaskedNumber("xxxx 2158").SetType(account.TypeSavings).SetClass(account.ClassAsset).SaveX(ctx)
+		SetMaskedNumber("xxxx 5353").SetType(account.TypeSavings).SetClass(account.ClassAsset).SaveX(ctx)
 	steppay := client.Account.Create().SetSource("commbank").SetName("StepPay").
-		SetMaskedNumber("xxxx 2218").SetType(account.TypeSteppay).SetClass(account.ClassLiability).SaveX(ctx)
+		SetMaskedNumber("xxxx 6464").SetType(account.TypeSteppay).SetClass(account.ClassLiability).SaveX(ctx)
 
 	now := time.Now().UTC()
 	d := time.Date(now.Year(), now.Month(), 15, 0, 0, 0, 0, time.UTC)
 
-	seedTxn(t, ctx, client, checking, "salary", d, 7200, "Salary Foundit Tech", "Foundit") // external in
-	seedTxn(t, ctx, client, checking, "rent", d, -2000, "RENT DIRECT DEBIT", "Landlord")   // external out
+	seedTxn(t, ctx, client, checking, "salary", d, 7200, "Salary Acme Pty Ltd", "Acme")  // external in
+	seedTxn(t, ctx, client, checking, "rent", d, -2000, "RENT DIRECT DEBIT", "Landlord") // external out
 	// Payment to another person is external and must stay as spend (the case pure
 	// amount-matching would get wrong).
 	seedTxn(t, ctx, client, checking, "friend", d, -300, "Transfer to Peter CommBank App", "")
 	// Internal transfer checking -> saver, matched by the owner's own last-4.
-	seedTxn(t, ctx, client, checking, "xfer-out", d, -5000, "Transfer to xx2158 CommBank App", "")
-	seedTxn(t, ctx, client, saver, "xfer-in", d, 5000, "Transfer from xx1775 CommBank App", "")
+	seedTxn(t, ctx, client, checking, "xfer-out", d, -5000, "Transfer to xx5353 CommBank App", "")
+	seedTxn(t, ctx, client, saver, "xfer-in", d, 5000, "Transfer from xx4242 CommBank App", "")
 	// StepPay repayment: funded from checking, lands on StepPay. Both legs internal.
 	seedTxn(t, ctx, client, checking, "sp-out", d, -120, "StepPay Repayment", "")
 	seedTxn(t, ctx, client, steppay, "sp-in", d, 120, "STEPPAY PYMT-THANK YOU", "")
@@ -409,15 +409,15 @@ func TestBalanceHistory_OrderedAndFiltered(t *testing.T) {
 }
 
 // seedOwnerAccounts creates the three CommBank accounts the internal-transfer classifier
-// keys off (checking xx1775, saver xx2158, StepPay xx2218), returned in that order.
+// keys off (checking xx4242, saver xx5353, StepPay xx6464), returned in that order.
 func seedOwnerAccounts(t *testing.T, ctx context.Context, client *ent.Client) (checking, saver, steppay *ent.Account) {
 	t.Helper()
 	checking = client.Account.Create().SetSource("commbank").SetName("Smart Access").
-		SetMaskedNumber("xxxx 1775").SetType(account.TypeEveryday).SetClass(account.ClassAsset).SaveX(ctx)
+		SetMaskedNumber("xxxx 4242").SetType(account.TypeEveryday).SetClass(account.ClassAsset).SaveX(ctx)
 	saver = client.Account.Create().SetSource("commbank").SetName("NetBank Saver").
-		SetMaskedNumber("xxxx 2158").SetType(account.TypeSavings).SetClass(account.ClassAsset).SaveX(ctx)
+		SetMaskedNumber("xxxx 5353").SetType(account.TypeSavings).SetClass(account.ClassAsset).SaveX(ctx)
 	steppay = client.Account.Create().SetSource("commbank").SetName("StepPay").
-		SetMaskedNumber("xxxx 2218").SetType(account.TypeSteppay).SetClass(account.ClassLiability).SaveX(ctx)
+		SetMaskedNumber("xxxx 6464").SetType(account.TypeSteppay).SetClass(account.ClassLiability).SaveX(ctx)
 	return checking, saver, steppay
 }
 
@@ -433,7 +433,7 @@ func TestListTransactions_ExternalOnly(t *testing.T) {
 	checking, _, _ := seedOwnerAccounts(t, ctx, client)
 
 	// Newest first: the two internal legs sit at the top of the page.
-	seedTxn(t, ctx, client, checking, "xfer", day(2026, 7, 6), -5000, "Transfer to xx2158 CommBank App", "") // internal
+	seedTxn(t, ctx, client, checking, "xfer", day(2026, 7, 6), -5000, "Transfer to xx5353 CommBank App", "") // internal
 	seedTxn(t, ctx, client, checking, "sp", day(2026, 7, 5), -300, "StepPay Repayment", "")                  // internal
 	seedTxn(t, ctx, client, checking, "rent", day(2026, 7, 4), -2000, "RENT DIRECT DEBIT", "Landlord")       // external
 	seedTxn(t, ctx, client, checking, "peter", day(2026, 7, 3), -300, "Transfer to Peter CommBank App", "")  // external (not own account)
@@ -578,11 +578,11 @@ func TestSpendingSummary_ExternalWindow(t *testing.T) {
 	ctx := context.Background()
 	checking, saver, steppay := seedOwnerAccounts(t, ctx, client)
 
-	seedTxn(t, ctx, client, checking, "salary", day(2026, 7, 10), 7200, "Salary Foundit Tech", "Foundit") // external in
-	seedTxn(t, ctx, client, checking, "rent", day(2026, 7, 11), -2000, "RENT DIRECT DEBIT", "Landlord")   // external out
+	seedTxn(t, ctx, client, checking, "salary", day(2026, 7, 10), 7200, "Salary Acme Pty Ltd", "Acme")  // external in
+	seedTxn(t, ctx, client, checking, "rent", day(2026, 7, 11), -2000, "RENT DIRECT DEBIT", "Landlord") // external out
 	seedTxn(t, ctx, client, checking, "peter", day(2026, 7, 12), -300, "Transfer to Peter CommBank App", "")
-	seedTxn(t, ctx, client, checking, "xfer-out", day(2026, 7, 13), -5000, "Transfer to xx2158 CommBank App", "") // internal
-	seedTxn(t, ctx, client, saver, "xfer-in", day(2026, 7, 13), 5000, "Transfer from xx1775 CommBank App", "")    // internal
+	seedTxn(t, ctx, client, checking, "xfer-out", day(2026, 7, 13), -5000, "Transfer to xx5353 CommBank App", "") // internal
+	seedTxn(t, ctx, client, saver, "xfer-in", day(2026, 7, 13), 5000, "Transfer from xx4242 CommBank App", "")    // internal
 	seedTxn(t, ctx, client, checking, "sp", day(2026, 7, 14), -120, "StepPay Repayment", "")                      // internal
 	seedTxn(t, ctx, client, steppay, "sp-in", day(2026, 7, 14), 120, "STEPPAY PYMT-THANK YOU", "")                // internal
 	// Outside the window (before from): must not count anywhere.

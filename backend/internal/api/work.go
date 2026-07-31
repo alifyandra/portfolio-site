@@ -113,7 +113,7 @@ type claimOutput struct {
 
 type completeInput struct {
 	Body struct {
-		Job         string `json:"job" minLength:"1" doc:"ScheduledJob key; must be in the token's scope"`
+		Job string `json:"job" minLength:"1" doc:"ScheduledJob key; must be in the token's scope"`
 		// JobRunID is optional at the schema level so the scope/auth gate (requireBearer)
 		// runs before shape validation and returns 401/403 rather than a 422 that would
 		// mask it; the handler enforces presence after the gate. See ADR 0014.
