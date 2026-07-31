@@ -11,12 +11,13 @@ import (
 	"github.com/alifyandra/portfolio-site/backend/internal/finance"
 )
 
-// The finance dashboard read API (ADR 0017). Six admin-only GET endpoints over the
-// finance ledger, each backed by the pure read service (internal/finance.read.go) so
-// the same query path serves the /admin dashboard and the remote MCP tools. Every
-// operation is cookie-gated and calls requireAdmin as its first line: finance is
-// single-tenant (Alif's) and never friend/member-visible. The write side stays the
-// token-authed ingest (ADR 0015); nothing here mutates.
+// The finance dashboard read API (ADR 0017). Seven admin-only GET endpoints over the
+// finance ledger, each backed by the pure read service (internal/finance.read.go, plus
+// bills.go for recurring commitments) so the same query path serves the /admin dashboard
+// and the remote MCP tools. Every operation is cookie-gated and calls requireAdmin as its
+// first line: finance is single-tenant (Alif's) and never friend/member-visible. The write
+// side stays the token-authed ingest (ADR 0015) and the admin bill endpoints
+// (admin_finance_bills.go); nothing here mutates.
 
 // financeReadTags groups the dashboard reads under the shared finance tag.
 var financeReadTags = []string{"finance"}
@@ -115,6 +116,38 @@ type FinanceWishlistTotalsDTO struct {
 	Currency              string  `json:"currency"`
 }
 
+// FinanceBillDTO is one declared recurring commitment (portfolio-site#125): the stored
+// columns plus the part derived on read. next_due is never stored, it is computed from
+// (cadence, anchor_date); days_until is negative when a cycle is past due with nothing
+// matched. last_paid_* come from the newest reconciled payment's transaction, so
+// last_paid_amount differing from expected_amount is the repricing signal, not an error.
+type FinanceBillDTO struct {
+	ID                 int      `json:"id"`
+	Name               string   `json:"name"`
+	Payee              string   `json:"payee"`
+	ExpectedAmount     float64  `json:"expected_amount" doc:"Expected charge per cycle as a positive magnitude (unlike the signed transaction amount)"`
+	Currency           string   `json:"currency"`
+	Cadence            string   `json:"cadence" enum:"weekly,fortnightly,monthly,quarterly,annual"`
+	AnchorDate         string   `json:"anchor_date" doc:"YYYY-MM-DD; every occurrence steps the cadence from here"`
+	AmountVariable     bool     `json:"amount_variable" doc:"True when the amount changes every cycle (utilities): the matcher skips the amount check and expected_amount is an estimate"`
+	AmountTolerancePct float64  `json:"amount_tolerance_pct"`
+	MatchPattern       string   `json:"match_pattern" doc:"Case-insensitive substring matched against a posted row's description or merchant; empty means never auto-matched"`
+	MatchWindowDays    int      `json:"match_window_days"`
+	Status             string   `json:"status" enum:"active,paused,ended"`
+	EndedOn            *string  `json:"ended_on" doc:"YYYY-MM-DD the commitment stopped; null while it runs"`
+	Notes              string   `json:"notes"`
+	AccountID          *int     `json:"account_id" doc:"Account the bill is paid from; null when unset (the edge is optional)"`
+	AccountName        string   `json:"account_name"`
+	NextDue            string   `json:"next_due" doc:"YYYY-MM-DD; the derived due date needing attention (the unsettled past cycle when overdue)"`
+	DaysUntil          int      `json:"days_until" doc:"Whole days from today to next_due; negative when overdue"`
+	LastPaidDate       *string  `json:"last_paid_date" doc:"YYYY-MM-DD the newest reconciled cycle actually posted; null until one matches"`
+	LastPaidAmount     *float64 `json:"last_paid_amount" doc:"Magnitude actually charged for that cycle; null until one matches"`
+	Overdue            bool     `json:"overdue" doc:"An active bill whose previous cycle is past its match window with no payment linked"`
+	ExpectedMonthly    float64  `json:"expected_monthly" doc:"expected_amount normalised to a per-month figure so mixed cadences can be summed"`
+	CreatedAt          string   `json:"created_at"`
+	UpdatedAt          string   `json:"updated_at"`
+}
+
 // --- inputs / outputs ---
 
 type financeSummaryOutput struct {
@@ -177,6 +210,23 @@ type listFinanceWishlistOutput struct {
 	}
 }
 
+type listFinanceBillsInput struct {
+	Status     string `query:"status" default:"active" enum:"active,paused,ended,all" doc:"Which commitments to include; \"all\" spans every status"`
+	WithinDays int    `query:"within_days" doc:"Keep only bills due within this many days from today (overdue bills always pass); 0 (default) returns all"`
+	AccountID  int    `query:"account_id" doc:"Filter to bills paid from one account; 0 (default) spans all, and bills with no account are then included"`
+}
+
+// listFinanceBillsOutput carries the committed-money roll-up beside the rows, since that
+// total is the number the whole feature exists to produce. It counts ACTIVE bills only.
+type listFinanceBillsOutput struct {
+	Body struct {
+		Bills             []FinanceBillDTO `json:"bills"`
+		CommittedTotal    float64          `json:"committed_total" doc:"Sum of the returned active bills' expected amounts"`
+		MonthlyEquivalent float64          `json:"monthly_equivalent" doc:"The same set normalised to a per-month figure"`
+		Count             int              `json:"count" doc:"Number of bills returned"`
+	}
+}
+
 func (h *Handler) registerFinanceRead(api huma.API) {
 	huma.Register(api, huma.Operation{
 		OperationID: "get-finance-summary",
@@ -231,6 +281,15 @@ func (h *Handler) registerFinanceRead(api huma.API) {
 		Tags:        financeReadTags,
 		Security:    cookieAuthSecurity,
 	}, h.listFinanceWishlist)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "list-finance-bills",
+		Method:      http.MethodGet,
+		Path:        "/api/finance/bills",
+		Summary:     "List recurring bills with derived due dates and committed money (admin)",
+		Tags:        financeReadTags,
+		Security:    cookieAuthSecurity,
+	}, h.listFinanceBills)
 }
 
 func (h *Handler) getFinanceSummary(ctx context.Context, _ *struct{}) (*financeSummaryOutput, error) {
@@ -414,6 +473,71 @@ func (h *Handler) listFinanceWishlist(ctx context.Context, in *listFinanceWishli
 		Currency:              totals.Currency,
 	}
 	return out, nil
+}
+
+// listFinanceBills serves the dashboard's recurring-bill section. The status/within_days/
+// account_id filter goes straight to the shared read service, so this endpoint and the
+// list_recurring_bills MCP tool return identical numbers.
+func (h *Handler) listFinanceBills(ctx context.Context, in *listFinanceBillsInput) (*listFinanceBillsOutput, error) {
+	if _, err := requireAdmin(ctx); err != nil {
+		return nil, err
+	}
+	if h.deps.Ent == nil {
+		return nil, huma.Error503ServiceUnavailable("finance is not available")
+	}
+	bills, totals, err := finance.ListRecurringBills(ctx, h.deps.Ent, finance.BillFilter{
+		Status:     in.Status,
+		WithinDays: in.WithinDays,
+		AccountID:  in.AccountID,
+	})
+	if err != nil {
+		return nil, huma.Error500InternalServerError("failed to load recurring bills", err)
+	}
+	out := &listFinanceBillsOutput{}
+	out.Body.Bills = toFinanceBillDTOs(bills)
+	out.Body.CommittedTotal = totals.CommittedTotal
+	out.Body.MonthlyEquivalent = totals.MonthlyEquivalent
+	out.Body.Count = totals.Count
+	return out, nil
+}
+
+// toFinanceBillDTOs maps the read service's bill views to their wire DTOs. Shared by the
+// dashboard read endpoint and the admin list, so both render the same derived figures.
+func toFinanceBillDTOs(bills []finance.BillView) []FinanceBillDTO {
+	out := make([]FinanceBillDTO, 0, len(bills))
+	for _, b := range bills {
+		dto := FinanceBillDTO{
+			ID:                 b.ID,
+			Name:               b.Name,
+			Payee:              b.Payee,
+			ExpectedAmount:     b.ExpectedAmount,
+			Currency:           b.Currency,
+			Cadence:            b.Cadence,
+			AnchorDate:         b.AnchorDate.UTC().Format(dateLayout),
+			AmountVariable:     b.AmountVariable,
+			AmountTolerancePct: b.AmountTolerancePct,
+			MatchPattern:       b.MatchPattern,
+			MatchWindowDays:    b.MatchWindowDays,
+			Status:             b.Status,
+			EndedOn:            dateOnlyPtr(b.EndedOn),
+			Notes:              b.Notes,
+			AccountName:        b.AccountName,
+			NextDue:            b.NextDue.UTC().Format(dateLayout),
+			DaysUntil:          b.DaysUntil,
+			LastPaidDate:       dateOnlyPtr(b.LastPaidDate),
+			LastPaidAmount:     b.LastPaidAmount,
+			Overdue:            b.Overdue,
+			ExpectedMonthly:    b.ExpectedMonthly,
+			CreatedAt:          b.CreatedAt.UTC().Format(http.TimeFormat),
+			UpdatedAt:          b.UpdatedAt.UTC().Format(http.TimeFormat),
+		}
+		if b.AccountID != 0 {
+			id := b.AccountID
+			dto.AccountID = &id
+		}
+		out = append(out, dto)
+	}
+	return out
 }
 
 // toFinanceTxnDTO maps a read-service TxnView to its wire DTO (dates to date-only

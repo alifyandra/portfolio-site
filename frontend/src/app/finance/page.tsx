@@ -13,6 +13,7 @@ import { AccountsSection } from '@/components/finance/AccountsSection';
 import { BalanceHistorySection } from '@/components/finance/BalanceHistorySection';
 import { TransactionsSection } from '@/components/finance/TransactionsSection';
 import { PendingSection } from '@/components/finance/PendingSection';
+import { BillsSection } from '@/components/finance/BillsSection';
 
 export default function FinancePage() {
   const { isLoading, isAuthenticated, isAdmin, signIn } = useAuth();
@@ -95,6 +96,7 @@ export default function FinancePage() {
           <BalanceHistorySection />
           <TransactionsSection />
           <PendingSection />
+          <BillsSection />
         </div>
       )}
     </main>

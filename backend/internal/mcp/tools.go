@@ -66,6 +66,12 @@ type wishlistArgs struct {
 	Limit  int    `json:"limit"`
 }
 
+type billsArgs struct {
+	Status     string `json:"status"`
+	WithinDays int    `json:"within_days"`
+	AccountID  int    `json:"account_id"`
+}
+
 // --- tool result shapes (dates rendered as strings for a readable payload) ---
 
 type summaryResult struct {
@@ -143,6 +149,28 @@ type spendingResult struct {
 	Net           float64 `json:"net"`
 	Transfers     float64 `json:"internal_transfers_excluded"`
 	TxnCount      int     `json:"txn_count"`
+}
+
+// billResult is one declared recurring commitment. expected_amount is the owner's
+// declaration for the cycle; last_paid_amount is what the matched posted row actually
+// charged, so the two differing is a repricing signal rather than an error.
+type billResult struct {
+	ID              int      `json:"id"`
+	Name            string   `json:"name"`
+	Payee           string   `json:"payee,omitempty"`
+	Status          string   `json:"status"`
+	Cadence         string   `json:"cadence"`
+	ExpectedAmount  float64  `json:"expected_amount"`
+	ExpectedMonthly float64  `json:"expected_monthly"`
+	Currency        string   `json:"currency"`
+	AmountVariable  bool     `json:"amount_variable"`
+	NextDue         string   `json:"next_due"`
+	DaysUntil       int      `json:"days_until"`
+	Overdue         bool     `json:"overdue"`
+	LastPaidDate    *string  `json:"last_paid_date"`
+	LastPaidAmount  *float64 `json:"last_paid_amount"`
+	AccountID       *int     `json:"account_id"`
+	AccountName     string   `json:"account_name,omitempty"`
 }
 
 // handleToolsCall executes a tools/call and wraps the result. A structural failure
@@ -311,6 +339,37 @@ func (s *server) callTool(ctx context.Context, name string, rawArgs json.RawMess
 		}
 		return res, nil
 
+	case "list_recurring_bills":
+		var a billsArgs
+		if err := decodeArgs(rawArgs, &a); err != nil {
+			return nil, err
+		}
+		// The status enum is policed here, in Go, with a tool error the model can read,
+		// rather than as a JSON-schema constraint (the read service rejects it too).
+		status := strings.ToLower(strings.TrimSpace(a.Status))
+		if status == "" {
+			status = "active"
+		}
+		switch status {
+		case "active", "paused", "ended", "all":
+		default:
+			return nil, fmt.Errorf("invalid status %q (want active, paused, ended or all)", a.Status)
+		}
+		bills, billTotals, err := finance.ListRecurringBills(ctx, s.deps.Ent, finance.BillFilter{
+			Status:     status,
+			WithinDays: a.WithinDays,
+			AccountID:  a.AccountID,
+		})
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"bills":              toBillResults(bills),
+			"committed_total":    billTotals.CommittedTotal,
+			"monthly_equivalent": billTotals.MonthlyEquivalent,
+			"count":              billTotals.Count,
+		}, nil
+
 	default:
 		return nil, fmt.Errorf("%w: %s", errUnknownTool, name)
 	}
@@ -380,6 +439,15 @@ func toolDefinitions() []map[string]any {
 			"inputSchema": objectSchema(map[string]any{
 				"status": strProp("Which items to return: \"wanted\" (default, still outstanding), \"bought\", \"abandoned\", or \"all\"."),
 				"limit":  intProp("Maximum rows to return (default 100, capped at 500)."),
+			}, nil),
+		},
+		{
+			"name":        "list_recurring_bills",
+			"description": "List the owner's known recurring commitments (rent, insurance, subscriptions, utilities) with each one's cadence, expected amount, the next date it falls due, and how many days away that is. Use this for any question about COMMITTED money rather than money already spent: what is due in the next N days, what is spoken for before any discretionary spending, or whether a one-off purchase is actually affordable. A recurring bill is a DECLARED commitment, not a ledger row: it is separate from transactions, so expected_amount is what is expected to leave the account each cycle, while the amount actually charged last cycle (matched to a posted transaction) is reported as last_paid_amount/last_paid_date, and those two differing is the signal a bill changed price. days_until is negative when a cycle is past due with no matching payment found. Pass within_days to keep only bills whose next occurrence falls inside that many days from today, and status (default \"active\") to include paused or ended commitments. committed_total sums the expected amounts of the returned bills, and monthly_equivalent normalises every cadence to a per-month figure so bills on different cadences are comparable: free money over a period is roughly that period's income minus committed_total minus the discretionary spend that spending_summary reports. Expected amounts are the owner's declarations, so treat a bill with amount_variable=true (utilities) as an estimate, not a fact.",
+			"inputSchema": objectSchema(map[string]any{
+				"status":      strProp(`Which commitments to include: "active" (default), "paused", "ended", or "all".`),
+				"within_days": intProp("Keep only bills whose next occurrence falls within this many days from today; omit or 0 for all bills."),
+				"account_id":  intProp("Restrict to bills paid from one account id; omit or 0 for all. Bills with no account set are excluded when this is given."),
 			}, nil),
 		},
 	}
@@ -479,6 +547,35 @@ func toMonthResults(buckets []finance.MonthBucket) []monthResult {
 	out := make([]monthResult, 0, len(buckets))
 	for _, b := range buckets {
 		out = append(out, monthResult{Month: b.Month, Income: b.Income, Spend: b.Spend, Net: b.Net, Transfers: b.Transfers})
+	}
+	return out
+}
+
+func toBillResults(bills []finance.BillView) []billResult {
+	out := make([]billResult, 0, len(bills))
+	for _, b := range bills {
+		br := billResult{
+			ID:              b.ID,
+			Name:            b.Name,
+			Payee:           b.Payee,
+			Status:          b.Status,
+			Cadence:         b.Cadence,
+			ExpectedAmount:  b.ExpectedAmount,
+			ExpectedMonthly: b.ExpectedMonthly,
+			Currency:        b.Currency,
+			AmountVariable:  b.AmountVariable,
+			NextDue:         b.NextDue.UTC().Format(dateLayout),
+			DaysUntil:       b.DaysUntil,
+			Overdue:         b.Overdue,
+			LastPaidDate:    fmtDateOnlyPtr(b.LastPaidDate),
+			LastPaidAmount:  b.LastPaidAmount,
+			AccountName:     b.AccountName,
+		}
+		if b.AccountID != 0 {
+			id := b.AccountID
+			br.AccountID = &id
+		}
+		out = append(out, br)
 	}
 	return out
 }

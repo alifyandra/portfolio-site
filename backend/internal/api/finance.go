@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -71,6 +72,19 @@ func (h *Handler) ingestFinance(ctx context.Context, in *ingestInput) (*ingestOu
 		}
 		return nil, huma.Error500InternalServerError("failed to ingest finance data", err)
 	}
+	// The ingest transaction has committed by now, so the bill matcher runs over rows that
+	// are already in the ledger (portfolio-site#125). Deliberately outside the ingest: a
+	// matcher bug must never reject a good window, and a fixed matcher must be re-runnable
+	// without a re-ingest. Best-effort, so a matcher failure is logged and the ingest still
+	// reports success; the admin reconcile endpoint re-runs it.
+	if !sum.DryRun {
+		if rec, rErr := finance.ReconcileBills(ctx, h.deps.Ent); rErr != nil {
+			slog.Warn("finance: post-ingest bill reconciliation failed", "error", rErr)
+		} else if rec.PaymentsLinked > 0 {
+			slog.Info("finance: linked bill payments after ingest", "linked", rec.PaymentsLinked)
+		}
+	}
+
 	out := &ingestOutput{}
 	out.Body = *sum
 	return out, nil

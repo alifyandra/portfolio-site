@@ -173,8 +173,8 @@ func TestMCP_FullTranscript(t *testing.T) {
 		t.Fatalf("tools/list = %d, want 200; body=%s", rr.Code, rr.Body.String())
 	}
 	tools, _ := out["result"].(map[string]any)["tools"].([]any)
-	if len(tools) != 8 {
-		t.Fatalf("tools = %d, want 8", len(tools))
+	if len(tools) != 9 {
+		t.Fatalf("tools = %d, want 9", len(tools))
 	}
 	names := map[string]bool{}
 	for _, tv := range tools {
@@ -184,7 +184,7 @@ func TestMCP_FullTranscript(t *testing.T) {
 			t.Errorf("tool %v missing inputSchema", tm["name"])
 		}
 	}
-	for _, want := range []string{"get_net_worth", "list_accounts", "list_transactions", "search_merchant", "monthly_summary", "spending_summary", "list_pending", "list_wishlist"} {
+	for _, want := range []string{"get_net_worth", "list_accounts", "list_transactions", "search_merchant", "monthly_summary", "spending_summary", "list_pending", "list_wishlist", "list_recurring_bills"} {
 		if !names[want] {
 			t.Errorf("tools/list missing %q", want)
 		}
@@ -228,6 +228,78 @@ func TestMCP_FullTranscript(t *testing.T) {
 	}
 	if nw.Currency != "AUD" || nw.AccountCount != 1 {
 		t.Errorf("summary meta = %+v, want AUD/1 account", nw)
+	}
+}
+
+// TestMCP_ListRecurringBills drives the committed-money tool over JSON-RPC: an active bill
+// comes back with its derived due date and the roll-up figures, within_days filters on the
+// derived date, and an out-of-range status is a tool error (the enum is policed in Go, not
+// in the JSON schema).
+func TestMCP_ListRecurringBills(t *testing.T) {
+	h, svc, client := newMCPTestServer(t)
+	ctx := context.Background()
+	raw := mintToken(t, ctx, svc, client, []string{"finance.read"})
+
+	now := time.Now().UTC()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	client.RecurringBill.Create().SetName("Housing").SetExpectedAmount(600).
+		SetCadence("fortnightly").SetAnchorDate(today.AddDate(0, 0, 4)).SaveX(ctx)
+	client.RecurringBill.Create().SetName("Annual thing").SetExpectedAmount(240).
+		SetCadence("annual").SetAnchorDate(today.AddDate(0, 0, 100)).SaveX(ctx)
+
+	var res struct {
+		Bills []struct {
+			Name           string   `json:"name"`
+			Cadence        string   `json:"cadence"`
+			ExpectedAmount float64  `json:"expected_amount"`
+			NextDue        string   `json:"next_due"`
+			DaysUntil      int      `json:"days_until"`
+			AmountVariable bool     `json:"amount_variable"`
+			LastPaidAmount *float64 `json:"last_paid_amount"`
+		} `json:"bills"`
+		CommittedTotal    float64 `json:"committed_total"`
+		MonthlyEquivalent float64 `json:"monthly_equivalent"`
+		Count             int     `json:"count"`
+	}
+	_, out := rpc(t, h, raw, map[string]any{
+		"jsonrpc": "2.0", "id": 30, "method": "tools/call",
+		"params": map[string]any{"name": "list_recurring_bills", "arguments": map[string]any{}},
+	})
+	decodeToolText(t, out, &res)
+	if res.Count != 2 || res.CommittedTotal != 840 {
+		t.Fatalf("default call = %+v, want 2 bills / 840 committed", res)
+	}
+	if res.Bills[0].Name != "Housing" || res.Bills[0].DaysUntil != 4 {
+		t.Errorf("first bill = %+v, want Housing 4 days out (most urgent first)", res.Bills[0])
+	}
+	if res.Bills[0].NextDue != today.AddDate(0, 0, 4).Format(dateLayout) {
+		t.Errorf("next_due = %q, want %q", res.Bills[0].NextDue, today.AddDate(0, 0, 4).Format(dateLayout))
+	}
+	if res.Bills[0].LastPaidAmount != nil {
+		t.Errorf("last_paid_amount = %v, want null before anything reconciles", res.Bills[0].LastPaidAmount)
+	}
+
+	// within_days filters on the derived date, which SQL cannot do.
+	_, out = rpc(t, h, raw, map[string]any{
+		"jsonrpc": "2.0", "id": 31, "method": "tools/call",
+		"params": map[string]any{"name": "list_recurring_bills", "arguments": map[string]any{"within_days": 14}},
+	})
+	decodeToolText(t, out, &res)
+	if res.Count != 1 || res.Bills[0].Name != "Housing" || res.CommittedTotal != 600 {
+		t.Errorf("within_days=14 = %+v, want only Housing / 600 committed", res)
+	}
+
+	// A bad status is a tool error the model can read, not a protocol error.
+	_, out = rpc(t, h, raw, map[string]any{
+		"jsonrpc": "2.0", "id": 32, "method": "tools/call",
+		"params": map[string]any{"name": "list_recurring_bills", "arguments": map[string]any{"status": "nope"}},
+	})
+	result, _ := out["result"].(map[string]any)
+	if result == nil {
+		t.Fatalf("expected a tool result, got %v", out)
+	}
+	if isErr, _ := result["isError"].(bool); !isErr {
+		t.Errorf("isError = false, want true for an out-of-range status")
 	}
 }
 
