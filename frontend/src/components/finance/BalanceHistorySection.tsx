@@ -1,9 +1,14 @@
 'use client';
 
 // Balance-over-time: an account selector (defaulting to the first asset account)
-// + a look-back range, feeding the hand-rolled BalanceChart. The accounts query
-// is shared with AccountsSection (React Query dedupes by key), so this adds no
-// extra round-trip for the account list.
+// + a look-back range + a bucket step, feeding the hand-rolled BalanceChart. The
+// accounts query is shared with AccountsSection (React Query dedupes by key), so
+// this adds no extra round-trip for the account list.
+//
+// Each range carries a default step, because a 1y view of raw readings plots
+// roughly 365 near-identical points into a few hundred pixels: wasted work and a
+// noisier line than the trend deserves. The step select overrides it, and "Raw"
+// asks for the unbucketed per-reading series.
 
 import { useState } from 'react';
 
@@ -14,11 +19,22 @@ import {
 import { citronCard, citronBadge, selectClass } from '@/components/admin/ui';
 import { BalanceChart } from './BalanceChart';
 
+// Default step per look-back window: fine over a short window, coarse over a long
+// one. Buckets align to Australia/Melbourne local boundaries server-side.
 const RANGES = [
-  { label: '30d', days: 30 },
-  { label: '90d', days: 90 },
-  { label: '1y', days: 365 },
-  { label: 'All', days: 0 },
+  { label: '30d', days: 30, step: 'day' },
+  { label: '90d', days: 90, step: 'day' },
+  { label: '1y', days: 365, step: 'week' },
+  { label: 'All', days: 0, step: 'month' },
+] as const;
+
+// '' is Auto (take the range's default). 'raw' asks for no step at all.
+const STEP_OPTIONS = [
+  { value: '', label: 'Auto step' },
+  { value: 'day', label: 'Daily' },
+  { value: 'week', label: 'Weekly' },
+  { value: 'month', label: 'Monthly' },
+  { value: 'raw', label: 'Raw readings' },
 ] as const;
 
 export function BalanceHistorySection() {
@@ -27,6 +43,7 @@ export function BalanceHistorySection() {
 
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [days, setDays] = useState<number>(90);
+  const [stepChoice, setStepChoice] = useState<string>('');
 
   // Default to the first asset account (fall back to the first account overall)
   // until the user picks one explicitly.
@@ -34,13 +51,23 @@ export function BalanceHistorySection() {
     accounts.find((a) => a.class === 'asset')?.id ?? accounts[0]?.id ?? null;
   const activeId = selectedId ?? defaultId;
 
+  const range = RANGES.find((r) => r.days === days) ?? RANGES[1];
+  // Auto resolves to the range's step; Raw omits the param, which is the original
+  // per-reading series.
+  const step =
+    stepChoice === 'raw'
+      ? undefined
+      : stepChoice === ''
+        ? range.step
+        : stepChoice;
+
   const {
     data: history,
     isLoading,
     isError,
   } = useGetFinanceBalanceHistory(
     activeId ?? 0,
-    { days },
+    { days, step },
     { query: { enabled: activeId != null } },
   );
 
@@ -63,7 +90,9 @@ export function BalanceHistorySection() {
             <h2 className="font-display text-lg font-bold text-white">
               Balance over time
             </h2>
-            <p className="text-sm text-slate-400">Snapshot history per account.</p>
+            <p className="text-sm text-slate-400">
+              Snapshot history per account. Each bucket shows its last reading.
+            </p>
           </div>
         </div>
 
@@ -77,6 +106,19 @@ export function BalanceHistorySection() {
             {accounts.map((a) => (
               <option key={a.id} value={a.id}>
                 {a.name}
+              </option>
+            ))}
+          </select>
+
+          <select
+            aria-label="Bucket step"
+            className={`${selectClass} w-auto`}
+            value={stepChoice}
+            onChange={(e) => setStepChoice(e.target.value)}
+          >
+            {STEP_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.value === '' ? `Auto (${range.step})` : o.label}
               </option>
             ))}
           </select>
