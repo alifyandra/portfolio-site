@@ -279,6 +279,13 @@ func nextBucketStart(start time.Time, step BalanceStep) time.Time {
 // start's Unix second, which is unique per bucket.
 func bucketKey(t time.Time) int64 { return t.Unix() }
 
+// queryBound converts a bucket edge to the UTC form every stored finance timestamp takes,
+// for use as a SQL bound. Bucket edges are local-zone instants, and the sqlite driver the
+// tests run on compares a time column against the bound's RENDERED form rather than its
+// instant, so handing it a +10:00/+11:00 offset silently drops the rows either side of the
+// edge. Same instant, comparable rendering.
+func queryBound(t time.Time) time.Time { return t.UTC() }
+
 // --- basis=snapshot ---
 
 // snapshotSeries buckets an account's BalanceSnapshot readings. The bucket close is the
@@ -293,7 +300,7 @@ func snapshotSeries(ctx context.Context, client *ent.Client, acc *ent.Account, f
 	// bucket.
 	var qFrom *time.Time
 	if f.From != nil {
-		s := bucketStart(*f.From, f.Step)
+		s := queryBound(bucketStart(*f.From, f.Step))
 		qFrom = &s
 	}
 	readings, err := BalanceHistory(ctx, client, acc.ID, qFrom)
@@ -517,8 +524,8 @@ func ledgerSeries(ctx context.Context, client *ent.Client, acc *ent.Account, f B
 	if lfb := bucketStart(ledgerFrom, f.Step); derivLo.Before(lfb) {
 		derivLo = lfb
 	}
-	rangeStart := derivLo
-	rangeEnd := nextBucketStart(derivHi, f.Step)
+	rangeStart := queryBound(derivLo)
+	rangeEnd := queryBound(nextBucketStart(derivHi, f.Step))
 
 	// Coverage probe. It is one Count, because coverage is all-or-nothing per account in
 	// practice: a covered account is covered from its very first row, so there is no
@@ -598,7 +605,8 @@ func ledgerSeries(ctx context.Context, client *ent.Client, acc *ent.Account, f B
 	// Snapshot readings in the emitted range, for the derived-close-vs-reading check. The
 	// bucket's own close-of-period reading is the one to compare against, so a bucket with
 	// several readings uses its last.
-	snaps, err := BalanceHistory(ctx, client, acc.ID, &lo)
+	snapFrom := queryBound(lo)
+	snaps, err := BalanceHistory(ctx, client, acc.ID, &snapFrom)
 	if err != nil {
 		return v, err
 	}
