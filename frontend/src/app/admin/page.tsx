@@ -1,8 +1,8 @@
 'use client';
 
 // The Admin Console (ADR 10 amendment + ADR 12): admin-only management for
-// Projects, Friends (AccessGrants) and Playlists. The gate here is UX only;
-// every /api/admin/* write is re-enforced by the server-side admin middleware,
+// Projects, Friends (AccessGrants), Playlists, Jobs and the Wishlist. The gate
+// here is UX only; every /api/admin/* write is re-enforced by the admin middleware,
 // so a non-admin who reaches this page still gets 403s. Mirrors the client-side
 // gate shape used by /whatsapp.
 
@@ -13,6 +13,7 @@ import { ProjectsSection } from '@/components/admin/ProjectsSection';
 import { FriendsSection } from '@/components/admin/FriendsSection';
 import { PlaylistsSection } from '@/components/admin/PlaylistsSection';
 import { JobsSection } from '@/components/admin/JobsSection';
+import { WishlistSection } from '@/components/admin/WishlistSection';
 import { citronCard, citronBadge } from '@/components/admin/ui';
 
 const tabs = [
@@ -20,6 +21,7 @@ const tabs = [
   { id: 'friends', label: 'Friends' },
   { id: 'playlists', label: 'Playlists' },
   { id: 'jobs', label: 'Jobs' },
+  { id: 'wishlist', label: 'Wishlist' },
 ] as const;
 
 type TabId = (typeof tabs)[number]['id'];
@@ -40,7 +42,7 @@ export default function AdminPage() {
         </h1>
         <p className="max-w-xl leading-relaxed text-slate-300">
           Manage portfolio projects, friend access grants, the curated Spotify
-          playlist set, and scheduled jobs.
+          playlist set, scheduled jobs, and the wishlist.
         </p>
       </header>
 
@@ -132,6 +134,7 @@ export default function AdminPage() {
           {tab === 'friends' && <FriendsSection />}
           {tab === 'playlists' && <PlaylistsSection />}
           {tab === 'jobs' && <JobsSection />}
+          {tab === 'wishlist' && <WishlistSection />}
         </div>
       )}
     </main>

@@ -39,4 +39,5 @@ func (h *Handler) registerAdmin(api huma.API) {
 	h.registerAdminUploads(api)
 	h.registerAdminPlaylists(api)
 	h.registerAdminJobs(api)
+	h.registerAdminWishlist(api)
 }

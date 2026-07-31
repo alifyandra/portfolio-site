@@ -110,7 +110,10 @@ write and an ingest token can never read. A bearer identity is invisible to
 **Tools** (each calls the read service in-process, returns one JSON text content block):
 `get_net_worth`, `list_accounts`, `list_transactions` (`account_id?`, `from?`, `to?`,
 `limit?`), `search_merchant` (`query` required, `limit?`), `monthly_summary`
-(`account_id?`, `months?`), `list_pending`. Structural failures (unknown tool, bad
+(`account_id?`, `months?`), `list_pending`, `list_wishlist` (`status?`, `limit?`:
+the one-off wants plus a known-cost total and a count of items whose price is
+unknown, so a purchase can be weighed against what is already queued, see
+portfolio-site#123). Structural failures (unknown tool, bad
 params) are JSON-RPC errors; a domain/validation failure (bad date, missing query) is a
 tool-error result (`isError: true`) so the model sees the message, per MCP convention.
 

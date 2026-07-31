@@ -17,6 +17,7 @@ import (
 	"github.com/alifyandra/portfolio-site/backend/ent"
 	"github.com/alifyandra/portfolio-site/backend/ent/account"
 	"github.com/alifyandra/portfolio-site/backend/ent/user"
+	"github.com/alifyandra/portfolio-site/backend/ent/wishlistitem"
 	"github.com/alifyandra/portfolio-site/backend/internal/auth"
 )
 
@@ -57,6 +58,7 @@ func TestFinanceRead_RequiresAdmin(t *testing.T) {
 		"/api/finance/accounts",
 		"/api/finance/transactions",
 		"/api/finance/pending",
+		"/api/finance/wishlist",
 	} {
 		if resp := api.Get(path); resp.Code != http.StatusUnauthorized {
 			t.Errorf("anon %s = %d, want 401", path, resp.Code)
@@ -102,6 +104,112 @@ func TestFinanceSummary_DTO(t *testing.T) {
 	}
 	if got.AsOf == nil || *got.AsOf != "2026-07-10T09:00:00Z" {
 		t.Errorf("as_of = %v, want 2026-07-10T09:00:00Z", got.AsOf)
+	}
+}
+
+// wishlistResponse is the wire shape of GET /api/finance/wishlist.
+type wishlistResponse struct {
+	Items  []FinanceWishlistItemDTO `json:"items"`
+	Totals FinanceWishlistTotalsDTO `json:"totals"`
+}
+
+// getWishlist calls the read endpoint and decodes it, failing the test on a non-200.
+func getWishlist(t *testing.T, api humatest.TestAPI, cookie, query string) wishlistResponse {
+	t.Helper()
+	resp := api.Get("/api/finance/wishlist"+query, cookie)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("wishlist%s = %d, want 200; body=%s", query, resp.Code, resp.Body.String())
+	}
+	var got wishlistResponse
+	if err := json.Unmarshal(resp.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v; body=%s", err, resp.Body.String())
+	}
+	return got
+}
+
+// TestFinanceWishlist_StatusFilterAndTotals: the default read is wanted-only, status=all
+// spans every state, a single status filters to it, and an item with no amount lands in
+// unknown_cost_count instead of being summed as zero.
+func TestFinanceWishlist_StatusFilterAndTotals(t *testing.T) {
+	api, client := newFinanceReadTestAPI(t)
+	ctx := context.Background()
+	admin := sessionCookieFor(t, ctx, client, user.RoleAdmin)
+
+	client.WishlistItem.Create().SetName("new glasses").SetAmount(400).SaveX(ctx)
+	client.WishlistItem.Create().SetName("camera bag").SaveX(ctx) // price unknown
+	client.WishlistItem.Create().SetName("desk lamp").SetAmount(100).
+		SetStatus(wishlistitem.StatusBought).SaveX(ctx)
+
+	def := getWishlist(t, api, admin, "")
+	if len(def.Items) != 2 || def.Totals.ItemCount != 2 {
+		t.Fatalf("default items = %d (count %d), want 2 wanted rows", len(def.Items), def.Totals.ItemCount)
+	}
+	if def.Totals.KnownCostTotal != 400 || def.Totals.UnknownCostCount != 1 {
+		t.Errorf("default totals = %+v, want known 400 / unknown 1", def.Totals)
+	}
+	if def.Totals.Currency != "AUD" {
+		t.Errorf("currency = %q, want AUD", def.Totals.Currency)
+	}
+	for _, it := range def.Items {
+		if it.Status != "wanted" {
+			t.Errorf("default read returned status %q, want wanted only", it.Status)
+		}
+	}
+
+	all := getWishlist(t, api, admin, "?status=all")
+	if len(all.Items) != 3 || all.Totals.KnownCostTotal != 500 || all.Totals.UnknownCostCount != 1 {
+		t.Errorf("status=all = %d items, totals %+v, want 3 items / known 500 / unknown 1", len(all.Items), all.Totals)
+	}
+
+	bought := getWishlist(t, api, admin, "?status=bought")
+	if len(bought.Items) != 1 || bought.Items[0].Name != "desk lamp" {
+		t.Errorf("status=bought = %+v, want just the bought row", bought.Items)
+	}
+	if bought.Items[0].Amount == nil || *bought.Items[0].Amount != 100 {
+		t.Errorf("bought amount = %v, want 100", bought.Items[0].Amount)
+	}
+
+	// The nil amount must survive to the wire as null, never as 0.
+	unknown := getWishlist(t, api, admin, "?status=wanted")
+	for _, it := range unknown.Items {
+		if it.Name == "camera bag" && it.Amount != nil {
+			t.Errorf("unknown-price amount = %v, want null", *it.Amount)
+		}
+	}
+}
+
+// TestFinanceWishlist_Ordering: priority high to low first, then the nearest deadline,
+// with a null deadline sorting last inside its priority band.
+func TestFinanceWishlist_Ordering(t *testing.T) {
+	api, client := newFinanceReadTestAPI(t)
+	ctx := context.Background()
+	admin := sessionCookieFor(t, ctx, client, user.RoleAdmin)
+
+	far := time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC)
+	near := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	client.WishlistItem.Create().SetName("high no deadline").
+		SetPriority(wishlistitem.PriorityHigh).SaveX(ctx)
+	client.WishlistItem.Create().SetName("low near deadline").
+		SetPriority(wishlistitem.PriorityLow).SetDeadline(near).SaveX(ctx)
+	client.WishlistItem.Create().SetName("high far deadline").
+		SetPriority(wishlistitem.PriorityHigh).SetDeadline(far).SaveX(ctx)
+	client.WishlistItem.Create().SetName("medium near deadline").
+		SetPriority(wishlistitem.PriorityMedium).SetDeadline(near).SaveX(ctx)
+
+	got := getWishlist(t, api, admin, "")
+	names := make([]string, 0, len(got.Items))
+	for _, it := range got.Items {
+		names = append(names, it.Name)
+	}
+	want := []string{"high far deadline", "high no deadline", "medium near deadline", "low near deadline"}
+	if strings.Join(names, "|") != strings.Join(want, "|") {
+		t.Errorf("order = %v, want %v", names, want)
+	}
+	if got.Items[0].Deadline == nil || *got.Items[0].Deadline != "2026-12-01" {
+		t.Errorf("deadline = %v, want the date-only 2026-12-01", got.Items[0].Deadline)
+	}
+	if got.Items[1].Deadline != nil {
+		t.Errorf("no-deadline row rendered %v, want null", *got.Items[1].Deadline)
 	}
 }
 

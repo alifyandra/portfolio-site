@@ -17,6 +17,7 @@ import (
 
 	"github.com/alifyandra/portfolio-site/backend/ent"
 	"github.com/alifyandra/portfolio-site/backend/ent/account"
+	"github.com/alifyandra/portfolio-site/backend/ent/wishlistitem"
 	"github.com/alifyandra/portfolio-site/backend/internal/auth"
 )
 
@@ -166,14 +167,14 @@ func TestMCP_FullTranscript(t *testing.T) {
 		t.Errorf("notification body = %q, want empty", nrr.Body.String())
 	}
 
-	// 3) tools/list: all seven read tools present, each with a schema.
+	// 3) tools/list: all eight read tools present, each with a schema.
 	rr, out = rpc(t, h, raw, map[string]any{"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
 	if rr.Code != http.StatusOK {
 		t.Fatalf("tools/list = %d, want 200; body=%s", rr.Code, rr.Body.String())
 	}
 	tools, _ := out["result"].(map[string]any)["tools"].([]any)
-	if len(tools) != 7 {
-		t.Fatalf("tools = %d, want 7", len(tools))
+	if len(tools) != 8 {
+		t.Fatalf("tools = %d, want 8", len(tools))
 	}
 	names := map[string]bool{}
 	for _, tv := range tools {
@@ -183,7 +184,7 @@ func TestMCP_FullTranscript(t *testing.T) {
 			t.Errorf("tool %v missing inputSchema", tm["name"])
 		}
 	}
-	for _, want := range []string{"get_net_worth", "list_accounts", "list_transactions", "search_merchant", "monthly_summary", "spending_summary", "list_pending"} {
+	for _, want := range []string{"get_net_worth", "list_accounts", "list_transactions", "search_merchant", "monthly_summary", "spending_summary", "list_pending", "list_wishlist"} {
 		if !names[want] {
 			t.Errorf("tools/list missing %q", want)
 		}
@@ -357,5 +358,78 @@ func TestMCP_SpendingSummaryAndExternalOnly(t *testing.T) {
 	}
 	if ss.Transfers != 500 || ss.TxnCount != 3 {
 		t.Errorf("spending_summary excl = %+v, want transfers 500 / txn_count 3", ss)
+	}
+}
+
+// TestMCP_ListWishlist: the tool defaults to the still-wanted rows, status=all spans
+// every state, an item with no amount is counted as unknown rather than summed as zero,
+// and an unrecognised status is a tool error the model can read (not a protocol error).
+func TestMCP_ListWishlist(t *testing.T) {
+	h, svc, client := newMCPTestServer(t)
+	ctx := context.Background()
+	raw := mintToken(t, ctx, svc, client, []string{"finance.read"})
+
+	client.WishlistItem.Create().SetName("new glasses").SetAmount(400).
+		SetPriority(wishlistitem.PriorityHigh).SaveX(ctx)
+	client.WishlistItem.Create().SetName("camera bag").SaveX(ctx) // price unknown
+	client.WishlistItem.Create().SetName("desk lamp").SetAmount(100).
+		SetStatus(wishlistitem.StatusBought).SaveX(ctx)
+
+	type wishlistPayload struct {
+		Items []struct {
+			Name   string   `json:"name"`
+			Amount *float64 `json:"amount"`
+			Status string   `json:"status"`
+		} `json:"items"`
+		ItemCount        int     `json:"item_count"`
+		KnownCostTotal   float64 `json:"known_cost_total"`
+		UnknownCostCount int     `json:"unknown_cost_count"`
+	}
+
+	_, out := rpc(t, h, raw, map[string]any{
+		"jsonrpc": "2.0", "id": 30, "method": "tools/call",
+		"params": map[string]any{"name": "list_wishlist", "arguments": map[string]any{}},
+	})
+	var def wishlistPayload
+	decodeToolText(t, out, &def)
+	if def.ItemCount != 2 || len(def.Items) != 2 {
+		t.Fatalf("default = %d items (count %d), want the 2 wanted rows", len(def.Items), def.ItemCount)
+	}
+	if def.KnownCostTotal != 400 || def.UnknownCostCount != 1 {
+		t.Errorf("default totals = %+v, want known 400 / unknown 1", def)
+	}
+	if def.Items[0].Name != "new glasses" {
+		t.Errorf("first item = %q, want the high-priority row first", def.Items[0].Name)
+	}
+	if def.Items[1].Amount != nil {
+		t.Errorf("unknown price = %v, want null so it cannot be read as free", *def.Items[1].Amount)
+	}
+
+	_, out = rpc(t, h, raw, map[string]any{
+		"jsonrpc": "2.0", "id": 31, "method": "tools/call",
+		"params": map[string]any{"name": "list_wishlist", "arguments": map[string]any{"status": "all"}},
+	})
+	var all wishlistPayload
+	decodeToolText(t, out, &all)
+	if all.ItemCount != 3 || all.KnownCostTotal != 500 || all.UnknownCostCount != 1 {
+		t.Errorf("status=all = %+v, want 3 items / known 500 / unknown 1", all)
+	}
+
+	rr, out := rpc(t, h, raw, map[string]any{
+		"jsonrpc": "2.0", "id": 32, "method": "tools/call",
+		"params": map[string]any{"name": "list_wishlist", "arguments": map[string]any{"status": "nonsense"}},
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("bad status = %d, want 200 with a tool error", rr.Code)
+	}
+	res, _ := out["result"].(map[string]any)
+	if res == nil {
+		t.Fatalf("bad status: result missing; body=%s", rr.Body.String())
+	}
+	if isErr, _ := res["isError"].(bool); !isErr {
+		t.Errorf("bad status isError = %v, want true (a domain error, not a protocol error)", res["isError"])
+	}
+	if _, isRPCErr := out["error"]; isRPCErr {
+		t.Errorf("bad status returned a JSON-RPC error, want a tool-error result")
 	}
 }
