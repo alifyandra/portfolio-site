@@ -73,9 +73,43 @@ type AccountView struct {
 }
 
 // BalancePoint is one point on an account's balance history line.
+//
+// Under the raw reading list (BalanceHistory) and under BasisSnapshot, AsOf/Balance and
+// Carried are the whole point: everything below stays nil so the wire shape is unchanged
+// from what the balances endpoint has always returned. See balance_series.go for the
+// bucketing and basis rules.
+//
+// Under BasisSnapshot AsOf is the bucket START (RFC3339) and Balance is the LAST reading in
+// that bucket, which is close-of-period. Carried marks a bucket that had no reading and so
+// repeats the previous close; its absence means the point is a real reading.
 type BalancePoint struct {
 	AsOf    time.Time
 	Balance float64
+	Carried bool
+
+	// BasisLedger only. Balance == *Close, so a caller that only plots a line needs no
+	// change. Open is the previous bucket's close. In/Out are gross across every posted row
+	// in the bucket and Out is a POSITIVE magnitude; Net is In - Out. ExternalIn/ExternalOut
+	// exclude transfers between the owner's own accounts (the same rule, through the same
+	// spendTally, that monthly_summary and spending_summary apply) and ExternalOut is also a
+	// positive magnitude. Txns counts every posted row including internal legs.
+	Open        *float64
+	Close       *float64
+	In          *float64
+	Out         *float64
+	Net         *float64
+	ExternalIn  *float64
+	ExternalOut *float64
+	Txns        *int
+	// Source is the per-point provenance (SourceBalanceAfter / SourceAccumulated /
+	// SourceCarried). Without it a ledger series looks uniformly authoritative and it is not.
+	Source string
+	// Drift is the derived close minus a BalanceSnapshot reading falling in the same bucket,
+	// present only when there is one. Nonzero means a dropped or duplicated transaction.
+	Drift *float64
+	// FlowMismatch is set when close - open does not equal the bucket's net flow, meaning a
+	// row is missing from the bucket.
+	FlowMismatch bool
 }
 
 // TxnView is one posted transaction with its owning account joined in.
