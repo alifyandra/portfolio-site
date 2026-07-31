@@ -381,9 +381,11 @@ func TestMCP_ListWishlist(t *testing.T) {
 			Amount *float64 `json:"amount"`
 			Status string   `json:"status"`
 		} `json:"items"`
-		ItemCount        int     `json:"item_count"`
-		KnownCostTotal   float64 `json:"known_cost_total"`
-		UnknownCostCount int     `json:"unknown_cost_count"`
+		ItemCount             int     `json:"item_count"`
+		KnownCostTotal        float64 `json:"known_cost_total"`
+		UnknownCostCount      int     `json:"unknown_cost_count"`
+		CurrencyMismatchCount int     `json:"currency_mismatch_count"`
+		Truncated             bool    `json:"truncated"`
 	}
 
 	_, out := rpc(t, h, raw, map[string]any{
@@ -403,6 +405,24 @@ func TestMCP_ListWishlist(t *testing.T) {
 	}
 	if def.Items[1].Amount != nil {
 		t.Errorf("unknown price = %v, want null so it cannot be read as free", *def.Items[1].Amount)
+	}
+	if def.Truncated {
+		t.Errorf("truncated = true on a 2-row list, want absent (a complete answer)")
+	}
+	if def.CurrencyMismatchCount != 0 {
+		t.Errorf("currency_mismatch_count = %d, want 0 (every row is AUD)", def.CurrencyMismatchCount)
+	}
+
+	// A limit below the row count is a real truncation, so the flag must fire and the
+	// roll-up must describe only the rows returned.
+	_, out = rpc(t, h, raw, map[string]any{
+		"jsonrpc": "2.0", "id": 33, "method": "tools/call",
+		"params": map[string]any{"name": "list_wishlist", "arguments": map[string]any{"limit": 1}},
+	})
+	var capped wishlistPayload
+	decodeToolText(t, out, &capped)
+	if !capped.Truncated || capped.ItemCount != 1 {
+		t.Errorf("limit=1 = %+v, want 1 item with truncated true", capped)
 	}
 
 	_, out = rpc(t, h, raw, map[string]any{
@@ -431,5 +451,22 @@ func TestMCP_ListWishlist(t *testing.T) {
 	}
 	if _, isRPCErr := out["error"]; isRPCErr {
 		t.Errorf("bad status returned a JSON-RPC error, want a tool-error result")
+	}
+
+	// A foreign-currency amount stays out of the AUD total and is counted instead, so the
+	// figure the model weighs a purchase against is never a mixed-currency sum.
+	client.WishlistItem.Create().SetName("imported item").SetAmount(1000).
+		SetCurrency("USD").SaveX(ctx)
+	_, out = rpc(t, h, raw, map[string]any{
+		"jsonrpc": "2.0", "id": 34, "method": "tools/call",
+		"params": map[string]any{"name": "list_wishlist", "arguments": map[string]any{}},
+	})
+	var mixed wishlistPayload
+	decodeToolText(t, out, &mixed)
+	if mixed.ItemCount != 3 {
+		t.Fatalf("item_count = %d, want 3 (the foreign row is still listed)", mixed.ItemCount)
+	}
+	if mixed.KnownCostTotal != 400 || mixed.CurrencyMismatchCount != 1 {
+		t.Errorf("mixed currency = %+v, want known 400 / mismatch 1", mixed)
 	}
 }

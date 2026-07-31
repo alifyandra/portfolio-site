@@ -103,13 +103,16 @@ type FinanceWishlistItemDTO struct {
 }
 
 // FinanceWishlistTotalsDTO rolls up the items in the same response. known_cost_total
-// sums only the non-null amounts, and unknown_cost_count reports how many rows had no
-// amount, so an unknown price is never counted as zero.
+// sums only the non-null amounts denominated in currency; unknown_cost_count reports how
+// many rows had no amount, so an unknown price is never counted as zero; and
+// currency_mismatch_count reports how many priced rows were excluded for carrying a
+// different currency, so a single-currency total never silently absorbs a foreign one.
 type FinanceWishlistTotalsDTO struct {
-	ItemCount        int     `json:"item_count"`
-	KnownCostTotal   float64 `json:"known_cost_total"`
-	UnknownCostCount int     `json:"unknown_cost_count"`
-	Currency         string  `json:"currency"`
+	ItemCount             int     `json:"item_count"`
+	KnownCostTotal        float64 `json:"known_cost_total"`
+	UnknownCostCount      int     `json:"unknown_cost_count"`
+	CurrencyMismatchCount int     `json:"currency_mismatch_count" doc:"Priced rows left out of known_cost_total because their currency differs from currency"`
+	Currency              string  `json:"currency"`
 }
 
 // --- inputs / outputs ---
@@ -168,6 +171,9 @@ type listFinanceWishlistOutput struct {
 	Body struct {
 		Items  []FinanceWishlistItemDTO `json:"items"`
 		Totals FinanceWishlistTotalsDTO `json:"totals"`
+		// Truncated is present only when the read-service row limit actually dropped
+		// rows, so its absence means the list and its totals are complete.
+		Truncated bool `json:"truncated,omitempty" doc:"True when the row limit dropped the lowest-priority items from this response and its totals"`
 	}
 }
 
@@ -377,11 +383,12 @@ func (h *Handler) listFinanceWishlist(ctx context.Context, in *listFinanceWishli
 	if h.deps.Ent == nil {
 		return nil, huma.Error503ServiceUnavailable("finance is not available")
 	}
-	items, totals, err := finance.Wishlist(ctx, h.deps.Ent, finance.WishlistFilter{Status: in.Status})
+	items, totals, truncated, err := finance.Wishlist(ctx, h.deps.Ent, finance.WishlistFilter{Status: in.Status})
 	if err != nil {
 		return nil, huma.Error500InternalServerError("failed to load wishlist", err)
 	}
 	out := &listFinanceWishlistOutput{}
+	out.Body.Truncated = truncated
 	out.Body.Items = make([]FinanceWishlistItemDTO, 0, len(items))
 	for _, w := range items {
 		out.Body.Items = append(out.Body.Items, FinanceWishlistItemDTO{
@@ -400,10 +407,11 @@ func (h *Handler) listFinanceWishlist(ctx context.Context, in *listFinanceWishli
 		})
 	}
 	out.Body.Totals = FinanceWishlistTotalsDTO{
-		ItemCount:        totals.ItemCount,
-		KnownCostTotal:   totals.KnownCostTotal,
-		UnknownCostCount: totals.UnknownCostCount,
-		Currency:         totals.Currency,
+		ItemCount:             totals.ItemCount,
+		KnownCostTotal:        totals.KnownCostTotal,
+		UnknownCostCount:      totals.UnknownCostCount,
+		CurrencyMismatchCount: totals.CurrencyMismatchCount,
+		Currency:              totals.Currency,
 	}
 	return out, nil
 }

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -109,8 +110,9 @@ func TestFinanceSummary_DTO(t *testing.T) {
 
 // wishlistResponse is the wire shape of GET /api/finance/wishlist.
 type wishlistResponse struct {
-	Items  []FinanceWishlistItemDTO `json:"items"`
-	Totals FinanceWishlistTotalsDTO `json:"totals"`
+	Items     []FinanceWishlistItemDTO `json:"items"`
+	Totals    FinanceWishlistTotalsDTO `json:"totals"`
+	Truncated bool                     `json:"truncated"`
 }
 
 // getWishlist calls the read endpoint and decodes it, failing the test on a non-200.
@@ -175,6 +177,64 @@ func TestFinanceWishlist_StatusFilterAndTotals(t *testing.T) {
 		if it.Name == "camera bag" && it.Amount != nil {
 			t.Errorf("unknown-price amount = %v, want null", *it.Amount)
 		}
+	}
+}
+
+// TestFinanceWishlist_ForeignCurrencyExcludedFromTotal: a priced row in another currency
+// is kept out of the single-currency cost total and counted instead, so the figure the
+// model weighs a purchase against is never a mixed-currency sum.
+func TestFinanceWishlist_ForeignCurrencyExcludedFromTotal(t *testing.T) {
+	api, client := newFinanceReadTestAPI(t)
+	ctx := context.Background()
+	admin := sessionCookieFor(t, ctx, client, user.RoleAdmin)
+
+	client.WishlistItem.Create().SetName("local item").SetAmount(400).SaveX(ctx)
+	client.WishlistItem.Create().SetName("imported item").SetAmount(1000).
+		SetCurrency("USD").SaveX(ctx)
+	client.WishlistItem.Create().SetName("no price").SetCurrency("USD").SaveX(ctx)
+
+	got := getWishlist(t, api, admin, "")
+	if got.Totals.ItemCount != 3 {
+		t.Fatalf("item_count = %d, want 3 (every row is still listed)", got.Totals.ItemCount)
+	}
+	if got.Totals.KnownCostTotal != 400 {
+		t.Errorf("known_cost_total = %v, want 400 (the foreign amount excluded)", got.Totals.KnownCostTotal)
+	}
+	if got.Totals.CurrencyMismatchCount != 1 {
+		t.Errorf("currency_mismatch_count = %d, want 1", got.Totals.CurrencyMismatchCount)
+	}
+	// A foreign row with no amount has no figure to convert, so it is only unknown.
+	if got.Totals.UnknownCostCount != 1 {
+		t.Errorf("unknown_cost_count = %d, want 1", got.Totals.UnknownCostCount)
+	}
+}
+
+// TestFinanceWishlist_TruncatedOnlyWhenRowsDropped: the read reports truncated only when
+// the row limit actually dropped items, so its absence means the roll-up is complete.
+func TestFinanceWishlist_TruncatedOnlyWhenRowsDropped(t *testing.T) {
+	api, client := newFinanceReadTestAPI(t)
+	ctx := context.Background()
+	admin := sessionCookieFor(t, ctx, client, user.RoleAdmin)
+
+	// The endpoint takes no limit, so the read-service default (100) is the cap here.
+	for i := 0; i < 100; i++ {
+		client.WishlistItem.Create().SetName("item " + strconv.Itoa(i)).SetAmount(10).SaveX(ctx)
+	}
+	full := getWishlist(t, api, admin, "")
+	if full.Truncated {
+		t.Errorf("truncated = true at exactly the cap, want false (no rows dropped)")
+	}
+	if full.Totals.ItemCount != 100 || full.Totals.KnownCostTotal != 1000 {
+		t.Errorf("totals = %+v, want 100 items / 1000", full.Totals)
+	}
+
+	client.WishlistItem.Create().SetName("one over the cap").SetAmount(10).SaveX(ctx)
+	over := getWishlist(t, api, admin, "")
+	if !over.Truncated {
+		t.Errorf("truncated = false past the cap, want true (rows were dropped)")
+	}
+	if over.Totals.ItemCount != 100 {
+		t.Errorf("item_count = %d, want the capped 100", over.Totals.ItemCount)
 	}
 }
 

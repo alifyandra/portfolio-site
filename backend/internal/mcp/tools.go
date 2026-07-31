@@ -288,19 +288,28 @@ func (s *server) callTool(ctx context.Context, name string, rawArgs json.RawMess
 		}
 		// An unknown status is rejected by the read service (a domain error the model
 		// sees), not by the input schema, so the allowed set lives in one place.
-		items, totals, err := finance.Wishlist(ctx, s.deps.Ent, finance.WishlistFilter{
+		items, totals, truncated, err := finance.Wishlist(ctx, s.deps.Ent, finance.WishlistFilter{
 			Status: a.Status,
 			Limit:  a.Limit,
 		})
 		if err != nil {
 			return nil, err
 		}
-		return map[string]any{
+		res := map[string]any{
 			"items":              toWishlistResults(items),
 			"item_count":         totals.ItemCount,
 			"known_cost_total":   totals.KnownCostTotal,
 			"unknown_cost_count": totals.UnknownCostCount,
-		}, nil
+			// Always present: it qualifies known_cost_total, so the model can see the
+			// total is single-currency rather than having to assume it.
+			"currency_mismatch_count": totals.CurrencyMismatchCount,
+		}
+		if truncated {
+			// Only present when the limit actually dropped rows, so its absence means a
+			// complete answer (no-silent-caps signal, as in list_transactions).
+			res["truncated"] = true
+		}
+		return res, nil
 
 	default:
 		return nil, fmt.Errorf("%w: %s", errUnknownTool, name)
@@ -367,7 +376,7 @@ func toolDefinitions() []map[string]any {
 		},
 		{
 			"name":        "list_wishlist",
-			"description": "The owner's wishlist: things he wants to buy or pay for once, such as a new computer, a bag, or a pending car service payment. Read this before answering whether a purchase is a good idea, what he is saving toward, or how one want compares in cost and urgency to everything already queued. Each item has a status (wanted, bought, abandoned), a priority (low, medium, high), an amount in AUD, an optional deadline (YYYY-MM-DD), an optional link, and a description. amount_is_estimate=true means the price is the owner's guess, not a quote, so treat it as approximate. amount is null when the cost is unknown: that means unknown, NOT free, so say the cost is unrecorded rather than assuming zero. Defaults to status=wanted, which is what is still outstanding; pass status=all to include bought and abandoned items, which is how you check whether something was already bought or already decided against. Items are ordered by priority, then nearest deadline, then newest. Also returns totals: item_count, known_cost_total (the sum of the non-null amounts in this response) and unknown_cost_count. This list is a set of intentions, not a budget and not a commitment: to judge affordability combine it with get_net_worth and spending_summary rather than reasoning from the wishlist alone.",
+			"description": "The owner's wishlist: things he wants to buy or pay for once, such as a new computer, a bag, or a pending car service payment. Read this before answering whether a purchase is a good idea, what he is saving toward, or how one want compares in cost and urgency to everything already queued. Each item has a status (wanted, bought, abandoned), a priority (low, medium, high), an amount in AUD, an optional deadline (YYYY-MM-DD), an optional link, and a description. amount_is_estimate=true means the price is the owner's guess, not a quote, so treat it as approximate. amount is null when the cost is unknown: that means unknown, NOT free, so say the cost is unrecorded rather than assuming zero. Defaults to status=wanted, which is what is still outstanding; pass status=all to include bought and abandoned items, which is how you check whether something was already bought or already decided against. Items are ordered by priority, then nearest deadline, then newest. Also returns totals: item_count, known_cost_total (the sum of the non-null amounts in this response) and unknown_cost_count. known_cost_total is AUD only, and currency_mismatch_count says how many priced items were left out of it for carrying another currency, so add those separately rather than assuming the total covers them. If the response carries \"truncated\": true the limit dropped the lowest-priority items from both the list and the totals; raise limit (up to 500) for a complete answer, and its absence means the answer is complete. This list is a set of intentions, not a budget and not a commitment: to judge affordability combine it with get_net_worth and spending_summary rather than reasoning from the wishlist alone.",
 			"inputSchema": objectSchema(map[string]any{
 				"status": strProp("Which items to return: \"wanted\" (default, still outstanding), \"bought\", \"abandoned\", or \"all\"."),
 				"limit":  intProp("Maximum rows to return (default 100, capped at 500)."),

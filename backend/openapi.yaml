@@ -659,14 +659,14 @@ components:
           readOnly: true
           type: string
         amount:
-          description: Expected cost; omit when the price is unknown (which is NOT free)
+          description: Expected cost, must be positive; omit when the price is unknown (which is NOT free)
           format: double
           type: number
         amount_is_estimate:
           description: Defaults to true (the amount is a guess, not a quote)
           type: boolean
         currency:
-          description: ISO currency code; defaults to AUD
+          description: ISO currency code, upper-cased; blank or omitted means AUD
           type: string
         deadline:
           description: Soft want-it-by date, YYYY-MM-DD; omit for no date
@@ -1112,6 +1112,10 @@ components:
       properties:
         currency:
           type: string
+        currency_mismatch_count:
+          description: Priced rows left out of known_cost_total because their currency differs from currency
+          format: int64
+          type: integer
         item_count:
           format: int64
           type: integer
@@ -1125,6 +1129,7 @@ components:
         - item_count
         - known_cost_total
         - unknown_cost_count
+        - currency_mismatch_count
         - currency
       type: object
     Item:
@@ -1453,6 +1458,9 @@ components:
             - "null"
         totals:
           $ref: "#/components/schemas/FinanceWishlistTotalsDTO"
+        truncated:
+          description: True when the row limit dropped the lowest-priority items from this response and its totals
+          type: boolean
       required:
         - items
         - totals
@@ -2390,7 +2398,7 @@ components:
           readOnly: true
           type: string
         amount:
-          description: Expected cost; ignored when amount_unknown is true
+          description: Expected cost, must be positive; ignored when amount_unknown is true
           format: double
           type: number
         amount_is_estimate:
@@ -2399,6 +2407,7 @@ components:
           description: Set true to move the price back to unknown; takes precedence over amount
           type: boolean
         currency:
+          description: ISO currency code, upper-cased; blank means AUD
           type: string
         deadline:
           description: YYYY-MM-DD; send an empty string to clear the deadline
@@ -2411,6 +2420,7 @@ components:
         link:
           type: string
         name:
+          description: Blank once trimmed is a 422
           maxLength: 200
           minLength: 1
           type: string

@@ -225,6 +225,100 @@ func TestAdminWishlist_AmountUnknownClears(t *testing.T) {
 	}
 }
 
+// TestAdminWishlist_BlankCurrencyFallsBackToDefault: a blank currency on either write
+// stores the default rather than an empty code that would render as bare digits and
+// reach an MCP client as "". A lower-case code is normalised, since the read layer
+// compares it against the report currency to build the cost total.
+func TestAdminWishlist_BlankCurrencyFallsBackToDefault(t *testing.T) {
+	api, client := newAdminWishlistTestAPI(t)
+	ctx := context.Background()
+	admin := sessionCookieFor(t, ctx, client, user.RoleAdmin)
+
+	created := api.Post("/api/admin/wishlist", map[string]any{
+		"name":     "new glasses",
+		"currency": "   ",
+		"amount":   400.0,
+	}, admin)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create = %d, want 201; body=%s", created.Code, created.Body.String())
+	}
+	item := decodeWishlistItem(t, created.Body.Bytes())
+	if item.Currency != "AUD" {
+		t.Errorf("created currency = %q, want AUD", item.Currency)
+	}
+
+	blanked := api.Patch("/api/admin/wishlist/"+strconv.Itoa(item.ID), map[string]any{
+		"currency": "",
+	}, admin)
+	if blanked.Code != http.StatusOK {
+		t.Fatalf("blank currency patch = %d, want 200; body=%s", blanked.Code, blanked.Body.String())
+	}
+	if got := decodeWishlistItem(t, blanked.Body.Bytes()).Currency; got != "AUD" {
+		t.Errorf("patched currency = %q, want AUD (never an empty code)", got)
+	}
+
+	lower := api.Patch("/api/admin/wishlist/"+strconv.Itoa(item.ID), map[string]any{
+		"currency": " usd ",
+	}, admin)
+	if got := decodeWishlistItem(t, lower.Body.Bytes()).Currency; got != "USD" {
+		t.Errorf("patched currency = %q, want the upper-cased USD", got)
+	}
+}
+
+// TestAdminWishlist_BlankNameIs422: a whitespace-only name passes Huma's minLength but is
+// empty once trimmed, so it must be a 422 naming the field, not a 500 carrying Ent's
+// validator text.
+func TestAdminWishlist_BlankNameIs422(t *testing.T) {
+	api, client := newAdminWishlistTestAPI(t)
+	ctx := context.Background()
+	admin := sessionCookieFor(t, ctx, client, user.RoleAdmin)
+	item := client.WishlistItem.Create().SetName("camera bag").SaveX(ctx)
+
+	if resp := api.Post("/api/admin/wishlist", map[string]any{"name": "   "}, admin); resp.Code != http.StatusUnprocessableEntity {
+		t.Errorf("blank create name = %d, want 422; body=%s", resp.Code, resp.Body.String())
+	}
+	resp := api.Patch("/api/admin/wishlist/"+strconv.Itoa(item.ID), map[string]any{"name": "  "}, admin)
+	if resp.Code != http.StatusUnprocessableEntity {
+		t.Errorf("blank patch name = %d, want 422; body=%s", resp.Code, resp.Body.String())
+	}
+	if client.WishlistItem.GetX(ctx, item.ID).Name != "camera bag" {
+		t.Errorf("name changed on a rejected patch")
+	}
+	if n := client.WishlistItem.Query().CountX(ctx); n != 1 {
+		t.Errorf("rows = %d, want 1 (the rejected create must not persist)", n)
+	}
+}
+
+// TestAdminWishlist_NonPositiveAmountIs422: a cost has to be positive, because a negative
+// one would subtract from the read side's known_cost_total and understate the list.
+func TestAdminWishlist_NonPositiveAmountIs422(t *testing.T) {
+	api, client := newAdminWishlistTestAPI(t)
+	ctx := context.Background()
+	admin := sessionCookieFor(t, ctx, client, user.RoleAdmin)
+	item := client.WishlistItem.Create().SetName("laptop").SetAmount(2000).SaveX(ctx)
+	path := "/api/admin/wishlist/" + strconv.Itoa(item.ID)
+
+	for _, bad := range []float64{-50, 0} {
+		if resp := api.Post("/api/admin/wishlist", map[string]any{"name": "x", "amount": bad}, admin); resp.Code != http.StatusUnprocessableEntity {
+			t.Errorf("create amount %v = %d, want 422; body=%s", bad, resp.Code, resp.Body.String())
+		}
+		if resp := api.Patch(path, map[string]any{"amount": bad}, admin); resp.Code != http.StatusUnprocessableEntity {
+			t.Errorf("patch amount %v = %d, want 422; body=%s", bad, resp.Code, resp.Body.String())
+		}
+	}
+	if a := client.WishlistItem.GetX(ctx, item.ID).Amount; a == nil || *a != 2000 {
+		t.Errorf("amount = %v, want the untouched 2000", a)
+	}
+	// amount_unknown still wins, and is not treated as a non-positive amount.
+	ok := api.Patch(path, map[string]any{"amount_unknown": true, "amount": -50.0}, admin)
+	if ok.Code != http.StatusOK {
+		t.Fatalf("amount_unknown with a negative amount = %d, want 200; body=%s", ok.Code, ok.Body.String())
+	}
+	if a := decodeWishlistItem(t, ok.Body.Bytes()).Amount; a != nil {
+		t.Errorf("amount = %v, want null", *a)
+	}
+}
+
 // TestAdminWishlist_DeleteAndNotFound: delete is a 204 and removes the row; a write
 // against an unknown id is a 404, not a 500.
 func TestAdminWishlist_DeleteAndNotFound(t *testing.T) {

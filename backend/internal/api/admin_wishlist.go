@@ -20,6 +20,46 @@ import (
 // The lifecycle is enforced here, not in the UI: moving status out of wanted stamps
 // resolved_at and moving it back clears it, so a client cannot forget. Rows are only
 // hard-deleted for mistakes; a bought or abandoned item stays for history.
+//
+// Field checks run BEFORE Ent so a bad value is a 422 naming the field, never a 500
+// carrying a raw validator string: a whitespace-only name is empty once trimmed (Huma's
+// minLength cannot see that), and an amount must be a positive cost, because a negative
+// one would subtract from the read side's known_cost_total.
+
+// defaultWishlistCurrency is the currency a blank input falls back to on both create and
+// update, so a cleared field can never store an empty code that would render as bare
+// digits in the console and as an empty string to the MCP client.
+const defaultWishlistCurrency = "AUD"
+
+// normalizeWishlistCurrency trims and upper-cases an ISO code, falling back to the
+// default when blank. Upper-casing matters: the read layer compares the code against its
+// report currency to decide what belongs in the cost total, so "aud" must not read as a
+// foreign currency.
+func normalizeWishlistCurrency(s string) string {
+	c := strings.ToUpper(strings.TrimSpace(s))
+	if c == "" {
+		return defaultWishlistCurrency
+	}
+	return c
+}
+
+// validateWishlistName trims the incoming name and rejects an empty result with a 422.
+func validateWishlistName(s string) (string, error) {
+	name := strings.TrimSpace(s)
+	if name == "" {
+		return "", huma.Error422UnprocessableEntity("name must not be blank")
+	}
+	return name, nil
+}
+
+// validateWishlistAmount rejects a non-positive cost with a 422. A nil amount is the
+// "price unknown" case and is always allowed.
+func validateWishlistAmount(amount *float64) error {
+	if amount != nil && *amount <= 0 {
+		return huma.Error422UnprocessableEntity("amount must be a positive cost; omit it (or set amount_unknown) when the price is unknown")
+	}
+	return nil
+}
 
 // AdminWishlistItemDTO is the management-facing shape of a WishlistItem: everything the
 // read DTO carries plus the timestamps the console shows.
@@ -67,9 +107,9 @@ type createWishlistItemInput struct {
 	Body struct {
 		Name             string   `json:"name" minLength:"1" maxLength:"200" doc:"What the thing is, short enough to scan in a list"`
 		Description      string   `json:"description,omitempty" doc:"Longer note: why it is wanted, which model, what was ruled out"`
-		Amount           *float64 `json:"amount,omitempty" doc:"Expected cost; omit when the price is unknown (which is NOT free)"`
+		Amount           *float64 `json:"amount,omitempty" doc:"Expected cost, must be positive; omit when the price is unknown (which is NOT free)"`
 		AmountIsEstimate *bool    `json:"amount_is_estimate,omitempty" doc:"Defaults to true (the amount is a guess, not a quote)"`
-		Currency         string   `json:"currency,omitempty" doc:"ISO currency code; defaults to AUD"`
+		Currency         string   `json:"currency,omitempty" doc:"ISO currency code, upper-cased; blank or omitted means AUD"`
 		Priority         string   `json:"priority,omitempty" enum:"low,medium,high" doc:"Defaults to medium"`
 		Status           string   `json:"status,omitempty" enum:"wanted,bought,abandoned" doc:"Defaults to wanted; creating straight into bought/abandoned stamps resolved_at"`
 		Deadline         string   `json:"deadline,omitempty" doc:"Soft want-it-by date, YYYY-MM-DD; omit for no date"`
@@ -86,12 +126,12 @@ type createWishlistItemInput struct {
 type updateWishlistItemInput struct {
 	ID   int `path:"id" doc:"Wishlist item ID"`
 	Body struct {
-		Name             *string  `json:"name,omitempty" minLength:"1" maxLength:"200"`
+		Name             *string  `json:"name,omitempty" minLength:"1" maxLength:"200" doc:"Blank once trimmed is a 422"`
 		Description      *string  `json:"description,omitempty"`
-		Amount           *float64 `json:"amount,omitempty" doc:"Expected cost; ignored when amount_unknown is true"`
+		Amount           *float64 `json:"amount,omitempty" doc:"Expected cost, must be positive; ignored when amount_unknown is true"`
 		AmountUnknown    *bool    `json:"amount_unknown,omitempty" doc:"Set true to move the price back to unknown; takes precedence over amount"`
 		AmountIsEstimate *bool    `json:"amount_is_estimate,omitempty"`
-		Currency         *string  `json:"currency,omitempty"`
+		Currency         *string  `json:"currency,omitempty" doc:"ISO currency code, upper-cased; blank means AUD"`
 		Priority         *string  `json:"priority,omitempty" enum:"low,medium,high"`
 		Status           *string  `json:"status,omitempty" enum:"wanted,bought,abandoned" doc:"Moving out of wanted stamps resolved_at; moving back to wanted clears it"`
 		Deadline         *string  `json:"deadline,omitempty" doc:"YYYY-MM-DD; send an empty string to clear the deadline"`
@@ -117,6 +157,13 @@ func (h *Handler) registerAdminWishlist(api huma.API) {
 		if _, err := requireAdmin(ctx); err != nil {
 			return nil, err
 		}
+		name, err := validateWishlistName(in.Body.Name)
+		if err != nil {
+			return nil, err
+		}
+		if err := validateWishlistAmount(in.Body.Amount); err != nil {
+			return nil, err
+		}
 		// parseQueryDate is the shared YYYY-MM-DD reader: empty means no date, malformed
 		// is a 422. A parsed date is already UTC midnight.
 		deadline, err := parseQueryDate(in.Body.Deadline)
@@ -124,17 +171,15 @@ func (h *Handler) registerAdminWishlist(api huma.API) {
 			return nil, err
 		}
 		create := h.deps.Ent.WishlistItem.Create().
-			SetName(strings.TrimSpace(in.Body.Name)).
+			SetName(name).
 			SetDescription(in.Body.Description).
 			SetLink(in.Body.Link).
 			SetImageKey(in.Body.ImageKey).
+			SetCurrency(normalizeWishlistCurrency(in.Body.Currency)).
 			SetNillableAmount(in.Body.Amount).
 			SetNillableDeadline(deadline)
 		if in.Body.AmountIsEstimate != nil {
 			create.SetAmountIsEstimate(*in.Body.AmountIsEstimate)
-		}
-		if c := strings.TrimSpace(in.Body.Currency); c != "" {
-			create.SetCurrency(c)
 		}
 		if in.Body.Priority != "" {
 			create.SetPriority(wishlistitem.Priority(in.Body.Priority))
@@ -166,6 +211,18 @@ func (h *Handler) registerAdminWishlist(api huma.API) {
 		if _, err := requireAdmin(ctx); err != nil {
 			return nil, err
 		}
+		var name string
+		if in.Body.Name != nil {
+			var err error
+			if name, err = validateWishlistName(*in.Body.Name); err != nil {
+				return nil, err
+			}
+		}
+		if in.Body.AmountUnknown == nil || !*in.Body.AmountUnknown {
+			if err := validateWishlistAmount(in.Body.Amount); err != nil {
+				return nil, err
+			}
+		}
 		// The current row decides whether this PATCH is an actual status MOVE, so a
 		// repeated "set bought" does not keep re-stamping resolved_at.
 		cur, err := h.deps.Ent.WishlistItem.Get(ctx, in.ID)
@@ -178,7 +235,7 @@ func (h *Handler) registerAdminWishlist(api huma.API) {
 
 		upd := h.deps.Ent.WishlistItem.UpdateOneID(in.ID)
 		if in.Body.Name != nil {
-			upd.SetName(strings.TrimSpace(*in.Body.Name))
+			upd.SetName(name)
 		}
 		if in.Body.Description != nil {
 			upd.SetDescription(*in.Body.Description)
@@ -193,7 +250,9 @@ func (h *Handler) registerAdminWishlist(api huma.API) {
 			upd.SetAmountIsEstimate(*in.Body.AmountIsEstimate)
 		}
 		if in.Body.Currency != nil {
-			upd.SetCurrency(strings.TrimSpace(*in.Body.Currency))
+			// Blank falls back to the default, exactly as create does: an empty code would
+			// render as bare digits and reach the MCP client as "".
+			upd.SetCurrency(normalizeWishlistCurrency(*in.Body.Currency))
 		}
 		if in.Body.Priority != nil {
 			upd.SetPriority(wishlistitem.Priority(*in.Body.Priority))

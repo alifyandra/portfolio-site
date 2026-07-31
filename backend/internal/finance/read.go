@@ -687,13 +687,18 @@ type WishlistView struct {
 }
 
 // WishlistTotals is the roll-up the model would otherwise have to compute (and get
-// wrong when amounts are null). KnownCostTotal sums non-nil amounts of the returned
-// rows; UnknownCostCount is how many rows had no amount at all.
+// wrong when amounts are null). KnownCostTotal sums the non-nil amounts of the returned
+// rows that are denominated in Currency; UnknownCostCount is how many rows had no amount
+// at all. CurrencyMismatchCount is how many priced rows were left OUT of KnownCostTotal
+// because they carry a different currency: the total is a single-currency figure, and a
+// foreign-currency item would otherwise be added to it as if the codes matched. A row
+// with no amount is only counted as unknown, since there is no figure to convert.
 type WishlistTotals struct {
-	ItemCount        int
-	KnownCostTotal   float64
-	UnknownCostCount int
-	Currency         string
+	ItemCount             int
+	KnownCostTotal        float64
+	UnknownCostCount      int
+	CurrencyMismatchCount int
+	Currency              string
 }
 
 // wishlistPriorityRank ranks the priority enum for ordering. The enum is stored as a
@@ -711,7 +716,13 @@ var wishlistPriorityRank = map[wishlistitem.Priority]int{
 // alphabetically and nulls-last differs per dialect. Totals describe the rows actually
 // returned, so a limited read never reports a cost total for rows the caller cannot
 // see. An unrecognised Status is an error rather than a silent full scan.
-func Wishlist(ctx context.Context, client *ent.Client, f WishlistFilter) ([]WishlistView, WishlistTotals, error) {
+//
+// The bool return is `truncated`: true only when the row limit actually dropped rows, so
+// its absence means the answer (and the roll-up) covers the whole list. Truncation drops
+// the tail of the read order, which is the lowest-priority end. A caller can raise Limit
+// (up to maxWishlistLimit) for a complete answer. Following the no-silent-caps rule the
+// external_only path set (see externalScanCap).
+func Wishlist(ctx context.Context, client *ent.Client, f WishlistFilter) ([]WishlistView, WishlistTotals, bool, error) {
 	q := client.WishlistItem.Query()
 	switch status := strings.ToLower(strings.TrimSpace(f.Status)); status {
 	case "":
@@ -721,12 +732,12 @@ func Wishlist(ctx context.Context, client *ent.Client, f WishlistFilter) ([]Wish
 	case string(wishlistitem.StatusWanted), string(wishlistitem.StatusBought), string(wishlistitem.StatusAbandoned):
 		q = q.Where(wishlistitem.StatusEQ(wishlistitem.Status(status)))
 	default:
-		return nil, WishlistTotals{}, fmt.Errorf("unknown status %q (want wanted, bought, abandoned or all)", f.Status)
+		return nil, WishlistTotals{}, false, fmt.Errorf("unknown status %q (want wanted, bought, abandoned or all)", f.Status)
 	}
 
 	rows, err := q.All(ctx)
 	if err != nil {
-		return nil, WishlistTotals{}, err
+		return nil, WishlistTotals{}, false, err
 	}
 
 	sort.SliceStable(rows, func(i, j int) bool { return lessWishlistItem(rows[i], rows[j]) })
@@ -738,7 +749,11 @@ func Wishlist(ctx context.Context, client *ent.Client, f WishlistFilter) ([]Wish
 	if limit > maxWishlistLimit {
 		limit = maxWishlistLimit
 	}
+	truncated := false
 	if len(rows) > limit {
+		truncated = true
+		slog.Warn("finance: wishlist read hit the row limit; the lowest-priority items are omitted from this page and from its totals",
+			"limit", limit, "matched", len(rows))
 		rows = rows[:limit]
 	}
 
@@ -763,9 +778,15 @@ func Wishlist(ctx context.Context, client *ent.Client, f WishlistFilter) ([]Wish
 			totals.UnknownCostCount++
 			continue
 		}
+		if w.Currency != totals.Currency {
+			// Keep a foreign-currency figure out of a single-currency total, and report
+			// how many were left out so the omission is visible rather than silent.
+			totals.CurrencyMismatchCount++
+			continue
+		}
 		totals.KnownCostTotal += *w.Amount
 	}
-	return views, totals, nil
+	return views, totals, truncated, nil
 }
 
 // lessWishlistItem is the wishlist read order: priority high to low, then deadline

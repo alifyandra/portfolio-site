@@ -101,6 +101,12 @@ const filters: ListFinanceWishlistStatus[] = [
   'abandoned',
 ];
 
+// A short fixed list rather than a free-text box: the cost roll-up is a
+// single-currency figure (AUD), so a typo'd or exotic code would silently drop an
+// item out of the total. Anything outside AUD is reported separately by the read
+// layer as currency_mismatch_count.
+const currencies = ['AUD', 'USD', 'EUR', 'GBP', 'JPY', 'SGD', 'IDR'];
+
 const allowedTypes = Object.values(PresignUploadInputBodyContentType) as string[];
 
 // Money is formatted here, never on the server (the read layer does not round).
@@ -160,18 +166,24 @@ export function WishlistSection() {
   const patch = <K extends keyof WishlistForm>(key: K, value: WishlistForm[K]) =>
     setForm((f) => ({ ...f, [key]: value }));
 
-  const parsedAmount = () => {
-    const raw = form.amount.trim();
-    if (raw === '') return null;
-    const n = Number.parseFloat(raw);
-    return Number.isFinite(n) ? n : null;
-  };
+  // A row already carrying a code outside the list keeps it as an option, so editing
+  // an unrelated field never silently rewrites its currency.
+  const currencyOptions = currencies.includes(form.currency)
+    ? currencies
+    : [...currencies, form.currency];
 
-  const canSave = form.name.trim().length > 0 && !saving;
+  // A blank amount is the "price unknown" case and is valid; anything typed has to be
+  // a positive cost, which the server also enforces with a 422.
+  const amountRaw = form.amount.trim();
+  const amountValue = amountRaw === '' ? null : Number.parseFloat(amountRaw);
+  const amountInvalid =
+    amountValue !== null && (!Number.isFinite(amountValue) || amountValue <= 0);
+
+  const canSave = form.name.trim().length > 0 && !amountInvalid && !saving;
 
   const save = () => {
     if (!canSave) return;
-    const amount = parsedAmount();
+    const amount = amountValue;
     const onSuccess = () => {
       invalidate();
       close();
@@ -332,14 +344,25 @@ export function WishlistSection() {
                 value={form.amount}
                 onChange={(e) => patch('amount', e.target.value)}
               />
+              {amountInvalid ? (
+                <span className="text-xs text-coral">
+                  Enter a positive cost, or leave it blank for an unknown price.
+                </span>
+              ) : null}
             </label>
             <label className={labelClass}>
               Currency
-              <input
-                className={inputClass}
+              <select
+                className={selectClass}
                 value={form.currency}
                 onChange={(e) => patch('currency', e.target.value)}
-              />
+              >
+                {currencyOptions.map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
+                ))}
+              </select>
             </label>
           </div>
 
@@ -497,9 +520,19 @@ export function WishlistSection() {
             {totals.unknown_cost_count > 0
               ? ` · ${totals.unknown_cost_count} with no price`
               : ''}
+            {totals.currency_mismatch_count > 0
+              ? ` · ${totals.currency_mismatch_count} in another currency, not in the total`
+              : ''}
           </p>
         ) : null}
       </div>
+
+      {data?.truncated ? (
+        <p className="text-sm text-coral">
+          The list is longer than the read limit, so the lowest-priority items and
+          their cost are missing from this view.
+        </p>
+      ) : null}
 
       {isLoading ? (
         <p className="text-sm text-slate-400">Loading…</p>

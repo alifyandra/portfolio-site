@@ -32,7 +32,8 @@ func (WishlistItem) Fields() []ent.Field {
 		field.Float("amount").
 			Optional().
 			Nillable().
-			Comment("Expected cost, positive. Nil means the price is unknown (NOT free): the read layer counts these separately instead of summing them as zero"),
+			Positive().
+			Comment("Expected cost, positive (a negative would subtract from the read side's cost total). Nil means the price is unknown (NOT free): the read layer counts these separately instead of summing them as zero"),
 		field.Bool("amount_is_estimate").
 			Default(true).
 			Comment("True while amount is a guess; flipped off once there is a real quoted price. Defaults true because most entries start as a rough number"),
