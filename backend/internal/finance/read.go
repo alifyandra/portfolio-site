@@ -58,6 +58,10 @@ type SummaryView struct {
 
 // AccountView is one account plus its latest balance snapshot (nil-safe: the balance
 // pointers stay nil when the account has no snapshot yet).
+//
+// Description and DrawdownPolicy are owner-authored (portfolio-site#122), never derived
+// from the ingest. Both are plain strings, not pointers: an unwritten description is the
+// empty string and an unlabelled policy is "unset".
 type AccountView struct {
 	ID              int
 	Name            string
@@ -65,6 +69,8 @@ type AccountView struct {
 	Type            string
 	Class           string
 	Currency        string
+	Description     string
+	DrawdownPolicy  string
 	Balance         *float64
 	Available       *float64
 	CreditLimit     *float64
@@ -325,6 +331,8 @@ func Accounts(ctx context.Context, client *ent.Client) ([]AccountView, error) {
 			Type:            string(acc.Type),
 			Class:           string(acc.Class),
 			Currency:        acc.Currency,
+			Description:     acc.Description,
+			DrawdownPolicy:  string(acc.DrawdownPolicy),
 			PostedWatermark: acc.PostedWatermark,
 		}
 		snap, err := latestSnapshot(ctx, client, acc.ID)

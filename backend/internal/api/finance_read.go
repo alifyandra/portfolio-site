@@ -41,7 +41,8 @@ type FinanceSummaryDTO struct {
 }
 
 // FinanceAccountDTO is one account plus its latest balance. The balance pointers are
-// null until the account carries a snapshot.
+// null until the account carries a snapshot. description and drawdown_policy are
+// owner-authored and only ever written through PATCH /api/admin/accounts/{id}.
 type FinanceAccountDTO struct {
 	ID              int      `json:"id"`
 	Name            string   `json:"name"`
@@ -49,6 +50,8 @@ type FinanceAccountDTO struct {
 	Type            string   `json:"type" enum:"everyday,savings,credit_card,steppay,investment"`
 	Class           string   `json:"class" enum:"asset,liability"`
 	Currency        string   `json:"currency"`
+	Description     string   `json:"description" doc:"Owner-authored note on what this account is for; empty when never written"`
+	DrawdownPolicy  string   `json:"drawdown_policy" enum:"unset,flexible,no_drawdown,emergency_only" doc:"Whether this balance is spendable. unset means never labelled, not flexible"`
 	Balance         *float64 `json:"balance" doc:"Latest snapshot balance; null when the account has no snapshot"`
 	Available       *float64 `json:"available"`
 	CreditLimit     *float64 `json:"credit_limit"`
@@ -359,21 +362,29 @@ func (h *Handler) listFinanceAccounts(ctx context.Context, _ *struct{}) (*listFi
 	out := &listFinanceAccountsOutput{}
 	out.Body.Accounts = make([]FinanceAccountDTO, 0, len(accs))
 	for _, a := range accs {
-		out.Body.Accounts = append(out.Body.Accounts, FinanceAccountDTO{
-			ID:              a.ID,
-			Name:            a.Name,
-			MaskedNumber:    a.MaskedNumber,
-			Type:            a.Type,
-			Class:           a.Class,
-			Currency:        a.Currency,
-			Balance:         a.Balance,
-			Available:       a.Available,
-			CreditLimit:     a.CreditLimit,
-			BalanceAsOf:     rfc3339Ptr(a.BalanceAsOf),
-			PostedWatermark: dateOnlyPtr(a.PostedWatermark),
-		})
+		out.Body.Accounts = append(out.Body.Accounts, toFinanceAccountDTO(a))
 	}
 	return out, nil
+}
+
+// toFinanceAccountDTO is the single account projection, shared with the admin PATCH
+// (admin_accounts.go) so the write response cannot drift from the list response.
+func toFinanceAccountDTO(a finance.AccountView) FinanceAccountDTO {
+	return FinanceAccountDTO{
+		ID:              a.ID,
+		Name:            a.Name,
+		MaskedNumber:    a.MaskedNumber,
+		Type:            a.Type,
+		Class:           a.Class,
+		Currency:        a.Currency,
+		Description:     a.Description,
+		DrawdownPolicy:  a.DrawdownPolicy,
+		Balance:         a.Balance,
+		Available:       a.Available,
+		CreditLimit:     a.CreditLimit,
+		BalanceAsOf:     rfc3339Ptr(a.BalanceAsOf),
+		PostedWatermark: dateOnlyPtr(a.PostedWatermark),
+	}
 }
 
 func (h *Handler) getFinanceBalanceHistory(ctx context.Context, in *financeBalanceHistoryInput) (*financeBalanceHistoryOutput, error) {

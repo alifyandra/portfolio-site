@@ -350,6 +350,12 @@ func upsertAccount(ctx context.Context, tx *ent.Tx, source string, a *Account) (
 		SetProductCode(a.ProductCode.String()).
 		SetGuessedType(a.GuessedType).
 		OnConflictColumns(account.FieldSource, account.FieldName).
+		// Keep this column list explicit. `description` and `drawdown_policy` are
+		// owner-authored (portfolio-site#122): they are typed in from the admin console
+		// and the bank has no idea about them, so the ingest must never set them.
+		// Collapsing this block to UpdateNewValues() would take the Create clause's
+		// values (empty description, drawdown_policy=unset) and wipe both columns on
+		// every scheduled sync, silently. Add a column here only if the bank owns it.
 		Update(func(u *ent.AccountUpsert) {
 			u.SetMaskedNumber(a.MaskedNumber.String())
 			u.SetType(account.Type(a.Type))

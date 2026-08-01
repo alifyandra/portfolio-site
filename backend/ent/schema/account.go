@@ -13,6 +13,12 @@ import (
 // is the stable identity key transaction rows join on and the ingest upserts by,
 // so a re-ingested window updates the same account instead of duplicating it. See
 // the ingest contract (portfolio-site#84) and CONTEXT.md ("finance ingest").
+//
+// Two fields are owner-authored and ingest-immutable: description and
+// drawdown_policy (portfolio-site#122). They exist only because the bank cannot
+// know them; they are typed in once from the admin console and the ingest must
+// never write them. The upsert conflict clause (internal/finance/ingest.go) sets an
+// explicit column list precisely so these two are left alone.
 type Account struct {
 	ent.Schema
 }
@@ -44,6 +50,14 @@ func (Account) Fields() []ent.Field {
 		field.Bool("guessed_type").
 			Default(false).
 			Comment("True when the classifier fell back or this row is an auto-created placeholder (a transaction-only run referenced an account not in accounts[]); a review flag"),
+		field.Text("description").
+			Optional().
+			MaxLen(2000).
+			Comment("Owner-authored note on what this account is FOR, in my own words; never written by the ingest. Surfaced to the MCP so an LLM can tell two structurally identical accounts apart"),
+		field.Enum("drawdown_policy").
+			Values("unset", "flexible", "no_drawdown", "emergency_only").
+			Default("unset").
+			Comment("Whether this balance is spendable: flexible => money moves in and out, no_drawdown => the balance must not fall, emergency_only => reachable but not for ordinary spend, unset => never labelled"),
 		field.Time("created_at").
 			Default(time.Now).
 			Immutable(),

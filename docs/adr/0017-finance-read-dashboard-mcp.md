@@ -142,6 +142,32 @@ committed-money read over declared repeating commitments, with `committed_total`
 `monthly_equivalent` so affordability can be answered against what is already spoken for
 rather than the raw balance (portfolio-site#125).
 
+### Amendment (portfolio-site#122): the account read model carries owner intent
+
+The account read model was purely descriptive: type, class, currency, masked number and a
+balance. That describes an account's shape, not its purpose, so two accounts identical in
+every structural field looked equally spendable to both the dashboard and the model.
+
+`AccountView` now also carries a free-text `description` and a `drawdown_policy` enum
+(`unset` / `flexible` / `no_drawdown` / `emergency_only`), threaded to both consumers as
+usual. Mostly prose, with exactly one structured field: the prose carries nuance no enum
+would capture, while "can this balance go down" changes an arithmetic answer rather than
+colouring it, and should not depend on a model reading prose carefully. The
+`list_accounts` tool description says as much, including that `unset` means not yet
+declared rather than flexible.
+
+Both fields are owner-authored, and this is the first thing on an account the ingest does
+not own. The write side stays off the MCP (still read-only) and off the ingest payload
+(the broker has no way to send a description). The single new endpoint is
+`PATCH /api/admin/accounts/{id}`, admin-gated, accepting those two keys and nothing else.
+The ingest's upsert conflict clause lists its columns explicitly so a re-sync cannot
+overwrite them, and that guarantee is pinned by a regression test on both account
+creation paths.
+
+Deliberately out of scope: nothing consumes the policy arithmetically yet. `get_net_worth`
+and the summaries are unchanged, and a spendable-versus-locked split waits until the
+fields are populated and their real-world reading is known.
+
 ## Consequences
 
 - One query path serves the dashboard and the LLM, so they cannot drift.
