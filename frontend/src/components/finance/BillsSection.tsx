@@ -35,7 +35,8 @@ import {
   dangerBtn,
   rowClass,
 } from '@/components/admin/ui';
-import { formatMoney, formatDate } from './format';
+import { formatDate } from './format';
+import { useMoney } from './censor';
 
 const CADENCES = [
   'weekly',
@@ -123,6 +124,7 @@ const COMMITTED_WINDOW_DAYS = 30;
 
 export function BillsSection() {
   const queryClient = useQueryClient();
+  const { money } = useMoney();
   // Two reads of the same endpoint, deliberately. The table wants every status so a paused
   // or ended commitment stays visible and editable; the headline wants the ACTIVE bills
   // actually falling due inside the window, which is the number the section exists to
@@ -258,14 +260,14 @@ export function BillsSection() {
           captioned with exactly the set it counts. */}
       <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 rounded-lg border border-slate-700 bg-deepsea/40 px-3 py-2.5">
         <span className="text-lg font-semibold tabular-nums text-citron">
-          {formatMoney(dueSoon?.committed_total ?? 0)}
+          {money(dueSoon?.committed_total ?? 0)}
         </span>
         <span className="text-sm text-slate-300">
           committed over the next {COMMITTED_WINDOW_DAYS} days
         </span>
         <span className="text-xs text-slate-400">
           {dueSoon?.count ?? 0} {dueSoon?.count === 1 ? 'bill' : 'bills'} due in
-          that window · {formatMoney(data?.monthly_equivalent ?? 0)} a month
+          that window · {money(data?.monthly_equivalent ?? 0)} a month
           across {activeCount} active{' '}
           {activeCount === 1 ? 'commitment' : 'commitments'}
         </span>
@@ -473,7 +475,7 @@ export function BillsSection() {
                             : undefined
                         }
                       >
-                        {formatMoney(b.last_paid_amount)}
+                        {money(b.last_paid_amount)}
                       </span>
                     </>
                   ) : b.auto_matched ? (
@@ -486,7 +488,7 @@ export function BillsSection() {
 
               <div className="flex shrink-0 flex-col items-end gap-1.5">
                 <span className="text-sm font-semibold tabular-nums text-white">
-                  {formatMoney(b.expected_amount)}
+                  {money(b.expected_amount)}
                 </span>
                 <div className="flex items-center gap-1.5">
                   <button

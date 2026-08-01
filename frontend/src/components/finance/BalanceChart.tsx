@@ -29,6 +29,13 @@
 // synthesized opening) stay out of the plot and live in the tooltip. Only
 // `carried` is drawn, as it already was. A legend covering every way a number
 // can be less trustworthy would be larger than the chart it annotates.
+//
+// Under the privacy censor every printed figure here is masked: the tooltip,
+// the low/latest/high readouts and the tallest-bar caption. The geometry is
+// not. A line and a bar strip carry shape and relative proportion, never
+// digits, and both are drawn against a domain whose endpoints are themselves
+// masked, so the censored chart still shows the trend without showing an
+// amount. That is the point of keeping it.
 
 import {
   useEffect,
@@ -39,7 +46,8 @@ import {
 } from 'react';
 
 import type { BalancePointDTO } from '@/lib/api/model';
-import { formatMoney, formatDate } from './format';
+import { formatDate } from './format';
+import { useMoney } from './censor';
 
 // The tooltip has to be measured before it is painted, else an edge one shows
 // for a frame at the position it is about to be moved away from. This page is
@@ -115,6 +123,7 @@ export function BalanceChart({
   points: BalancePointDTO[];
   basis?: string;
 }) {
+  const { money } = useMoney();
   const [hover, setHover] = useState<number | null>(null);
   const ledger = basis === 'ledger';
 
@@ -449,7 +458,7 @@ export function BalanceChart({
               <>
                 Per-bucket flow: <span className="text-mint">in</span> above the
                 line, <span className="text-coral">out</span> below. Tallest bar{' '}
-                {formatMoney(flow.peak)}.
+                {money(flow.peak)}.
               </>
             ) : (
               <>No money moved in or out over this window.</>
@@ -538,7 +547,7 @@ export function BalanceChart({
           }
         >
           <div className="font-semibold text-white">
-            {formatMoney(active.point.balance)}
+            {money(active.point.balance)}
           </div>
           <div className="text-slate-400">{formatDate(active.point.as_of)}</div>
           {active.carried && (
@@ -553,21 +562,21 @@ export function BalanceChart({
         <span className="text-slate-400">
           Low{' '}
           <span className="font-medium text-slate-200">
-            {formatMoney(minPoint.balance)}
+            {money(minPoint.balance)}
           </span>{' '}
           · {formatDate(minPoint.as_of)}
         </span>
         <span className="text-slate-400">
           Latest{' '}
           <span className="font-semibold text-sky">
-            {formatMoney(last.balance)}
+            {money(last.balance)}
           </span>{' '}
           · {formatDate(last.as_of)}
         </span>
         <span className="text-slate-400">
           High{' '}
           <span className="font-medium text-slate-200">
-            {formatMoney(maxPoint.balance)}
+            {money(maxPoint.balance)}
           </span>{' '}
           · {formatDate(maxPoint.as_of)}
         </span>
@@ -595,6 +604,7 @@ export function BalanceChart({
  * row only appears when the server actually sent the number.
  */
 function LedgerDetail({ point }: { point: BalancePointDTO }) {
+  const { money } = useMoney();
   const {
     open,
     close,
@@ -630,37 +640,37 @@ function LedgerDetail({ point }: { point: BalancePointDTO }) {
 
   return (
     <div className="mt-1 space-y-0.5 border-t border-slate-700 pt-1 text-left">
-      {isNum(open) && <TipRow label="Open" value={formatMoney(open)} />}
-      {isNum(close) && <TipRow label="Close" value={formatMoney(close)} />}
-      {/* Read through the same clamp the bars use. formatAbs would flip a stray
-          negative into a positive figure the strip did not draw, so the text
-          and the geometry would disagree about the same field. */}
+      {isNum(open) && <TipRow label="Open" value={money(open)} />}
+      {isNum(close) && <TipRow label="Close" value={money(close)} />}
+      {/* Read through the same clamp the bars use. An absolute value would
+          flip a stray negative into a positive figure the strip did not draw,
+          so the text and the geometry would disagree about the same field. */}
       {isNum(moneyIn) && (
         <TipRow
           label="In"
-          value={formatMoney(magnitude(moneyIn))}
+          value={money(magnitude(moneyIn))}
           tone="text-mint"
         />
       )}
       {isNum(out) && (
         <TipRow
           label="Out"
-          value={formatMoney(magnitude(out))}
+          value={money(magnitude(out))}
           tone="text-coral"
         />
       )}
-      {isNum(net) && <TipRow label="Net" value={formatMoney(net)} />}
+      {isNum(net) && <TipRow label="Net" value={money(net)} />}
       {externalDiffers && (
         <TipRow
           label="Excl. transfers"
-          value={`${formatMoney(magnitude(extIn))} in · ${formatMoney(magnitude(extOut))} out`}
+          value={`${money(magnitude(extIn))} in · ${money(magnitude(extOut))} out`}
         />
       )}
       {isNum(txns) && <TipRow label="Rows" value={String(txns)} />}
       {typeof source === 'string' && source !== '' && (
         <TipRow label="From" value={sourceLabel(source)} />
       )}
-      {isNum(drift) && <TipRow label="Drift" value={formatMoney(drift)} />}
+      {isNum(drift) && <TipRow label="Drift" value={money(drift)} />}
       {mismatch === true && (
         <div className="text-coral">flows do not reconcile</div>
       )}

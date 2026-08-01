@@ -23,7 +23,8 @@ import {
 } from '@/lib/api/generated';
 import { citronCard, citronBadge, selectClass } from '@/components/admin/ui';
 import { BalanceChart } from './BalanceChart';
-import { formatMoney, formatDate } from './format';
+import { formatDate } from './format';
+import { useMoney } from './censor';
 
 // Default step per look-back window: fine over a short window, coarse over a long
 // one. Buckets align to Australia/Melbourne local boundaries server-side.
@@ -49,6 +50,7 @@ const BASES = [
 ] as const;
 
 export function BalanceHistorySection() {
+  const { money } = useMoney();
   const { data: accountsData } = useListFinanceAccounts();
   const accounts = accountsData?.accounts ?? [];
 
@@ -115,7 +117,7 @@ export function BalanceHistorySection() {
       ? 'The earliest opening is synthesized, so the ledger may not truly start there'
       : undefined,
     history?.drift_max != null
-      ? `Largest drift against a reading ${formatMoney(history.drift_max)}`
+      ? `Largest drift against a reading ${money(history.drift_max)}`
       : undefined,
   ]
     .filter(Boolean)

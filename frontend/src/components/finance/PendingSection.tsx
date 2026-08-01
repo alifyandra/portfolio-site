@@ -8,7 +8,8 @@
 import { useListFinancePending } from '@/lib/api/generated';
 import type { FinancePendingDTO } from '@/lib/api/model';
 import { rowClass } from '@/components/admin/ui';
-import { formatMoney, formatDate } from './format';
+import { formatDate } from './format';
+import { useMoney } from './censor';
 
 const skyCard = {
   borderColor: 'color-mix(in srgb, var(--color-sky) 34%, transparent)',
@@ -55,7 +56,14 @@ export function PendingSection() {
 }
 
 function PendingRow({ item }: { item: FinancePendingDTO }) {
+  const { money, censored } = useMoney();
+  // Same sign-neutralisation as a posted row: no tint, no "+", no minus.
   const isOut = item.amount < 0;
+  const toneClass = censored
+    ? 'text-slate-200'
+    : isOut
+      ? 'text-coral'
+      : 'text-mint';
   const primary = item.merchant || item.description || '—';
 
   return (
@@ -67,12 +75,10 @@ function PendingRow({ item }: { item: FinancePendingDTO }) {
         </span>
       </div>
       <span
-        className={`shrink-0 text-sm font-semibold tabular-nums ${
-          isOut ? 'text-coral' : 'text-mint'
-        }`}
+        className={`shrink-0 text-sm font-semibold tabular-nums ${toneClass}`}
       >
-        {isOut ? '' : '+'}
-        {formatMoney(item.amount)}
+        {censored || isOut ? '' : '+'}
+        {money(item.amount)}
       </span>
     </>
   );

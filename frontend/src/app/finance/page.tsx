@@ -14,6 +14,7 @@ import { BalanceHistorySection } from '@/components/finance/BalanceHistorySectio
 import { TransactionsSection } from '@/components/finance/TransactionsSection';
 import { PendingSection } from '@/components/finance/PendingSection';
 import { BillsSection } from '@/components/finance/BillsSection';
+import { CensorToggle } from '@/components/finance/censor';
 
 export default function FinancePage() {
   const { isLoading, isAuthenticated, isAdmin, signIn } = useAuth();
@@ -21,9 +22,14 @@ export default function FinancePage() {
   return (
     <main className="mx-auto flex min-h-screen w-full max-w-4xl flex-col gap-8 px-6 pb-24 pt-12">
       <header className="flex flex-col gap-3">
-        <p className="font-mono text-sm lowercase tracking-wide text-citron">
-          aliflabs · finance
-        </p>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <p className="font-mono text-sm lowercase tracking-wide text-citron">
+            aliflabs · finance
+          </p>
+          {/* One click from the top of the page. Only meaningful once the
+              figures are on screen, so it follows the same gate. */}
+          {isAdmin && <CensorToggle />}
+        </div>
         <h1 className="font-display text-3xl font-bold sm:text-4xl">
           <span className="text-white">Finance </span>
           <span className="text-citron">Dashboard</span>
