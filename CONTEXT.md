@@ -246,7 +246,12 @@ An account tracked for the personal dashboard, with a `type` (transaction, savin
 credit, investment) and an asset-or-liability class so net worth aggregates
 correctly. An **investment** account is a portfolio (balance and holdings) rather
 than a cash ledger; v1 tracks its [Balance Snapshot] only, and holdings and trades
-are a later slice. See ADR 15.
+are a later slice. It also carries two **owner-authored** fields the source cannot
+know and the ingest never writes: a free-text **description** of what the account is
+for, and a **drawdown policy** (flexible, no drawdown, emergency only, or unset)
+saying whether the balance is spendable. Two accounts identical in type and class can
+mean completely different things, so the intent has to be declared rather than
+inferred; `unset` means not yet declared, not flexible. See ADR 15 and ADR 17.
 
 ### Posted Transaction
 A settled ledger entry on a [Financial Account]: date, amount, description, and

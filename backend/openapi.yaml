@@ -946,6 +946,13 @@ components:
     FinanceAccountDTO:
       additionalProperties: false
       properties:
+        $schema:
+          description: A URL to the JSON Schema for this object.
+          examples:
+            - https://example.com/schemas/FinanceAccountDTO.json
+          format: uri
+          readOnly: true
+          type: string
         available:
           format: double
           type:
@@ -974,6 +981,17 @@ components:
             - "null"
         currency:
           type: string
+        description:
+          description: Owner-authored note on what this account is for; empty when never written
+          type: string
+        drawdown_policy:
+          description: Whether this balance is spendable. unset means never labelled, not flexible
+          enum:
+            - unset
+            - flexible
+            - no_drawdown
+            - emergency_only
+          type: string
         id:
           format: int64
           type: integer
@@ -1001,6 +1019,8 @@ components:
         - type
         - class
         - currency
+        - description
+        - drawdown_policy
         - balance
         - available
         - credit_limit
@@ -2697,6 +2717,29 @@ components:
             - array
             - "null"
       type: object
+    UpdateAccountInputBody:
+      additionalProperties: false
+      properties:
+        $schema:
+          description: A URL to the JSON Schema for this object.
+          examples:
+            - https://example.com/schemas/UpdateAccountInputBody.json
+          format: uri
+          readOnly: true
+          type: string
+        description:
+          description: Owner-authored note on what this account is for, at most 2000 bytes (accented or emoji characters cost more than one); empty string clears it
+          maxLength: 2000
+          type: string
+        drawdown_policy:
+          description: Whether this balance is spendable; unset means not yet declared
+          enum:
+            - unset
+            - flexible
+            - no_drawdown
+            - emergency_only
+          type: string
+      type: object
     UpdateBillInputBody:
       additionalProperties: false
       properties:
@@ -3097,6 +3140,43 @@ paths:
       security:
         - cookieAuth: []
       summary: Revoke an access grant by email
+      tags:
+        - admin
+  /api/admin/accounts/{id}:
+    patch:
+      description: Partial update of the two owner-authored columns only. Name, type, class, source and watermark are ingest-owned and cannot be changed here.
+      operationId: update-account
+      parameters:
+        - description: Account ID
+          in: path
+          name: id
+          required: true
+          schema:
+            description: Account ID
+            format: int64
+            type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateAccountInputBody"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FinanceAccountDTO"
+          description: OK
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ErrorModel"
+          description: Error
+      security:
+        - cookieAuth: []
+      summary: Set an account's owner-authored description and drawdown policy
       tags:
         - admin
   /api/admin/finance/bills:

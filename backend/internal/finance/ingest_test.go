@@ -347,3 +347,127 @@ func accWM(a *ent.Account) any {
 	}
 	return *a.PostedWatermark
 }
+
+// TestIngest_DoesNotClobberOwnerAuthoredFields is the #122 regression: description and
+// drawdown_policy are typed in by the owner and the bank knows nothing about them, so a
+// re-ingest of the same (source, name) must leave them exactly as they were while still
+// refreshing every column the bank does own. The failure mode this guards is the upsert
+// conflict clause being simplified to UpdateNewValues(), which would take the Create
+// clause's empty description and unset policy and wipe both on every scheduled sync.
+func TestIngest_DoesNotClobberOwnerAuthoredFields(t *testing.T) {
+	client := newFinanceTestClient(t)
+	ctx := context.Background()
+	today := normalizeDate(time.Now())
+
+	if _, err := Ingest(ctx, client, basePayload(today.Format("2006-01-02"))); err != nil {
+		t.Fatalf("seed ingest: %v", err)
+	}
+
+	// The owner labels the account from the admin console. updated_at is aged so the
+	// re-ingest's advance is unambiguous rather than a sub-millisecond difference.
+	const note = "sinking fund for one specific thing; must not be raided"
+	stale := time.Now().Add(-time.Hour)
+	seeded := getAccount(t, client, "Smart Access")
+	client.Account.UpdateOne(seeded).
+		SetDescription(note).
+		SetDrawdownPolicy(account.DrawdownPolicyNoDrawdown).
+		SetUpdatedAt(stale).
+		SaveX(ctx)
+
+	// A later run where the bank reports different attributes for the same account.
+	p := basePayload(today.Format("2006-01-02"))
+	p.Accounts[0].MaskedNumber = ns("xxxx xxxx 4242")
+	p.Accounts[0].Type = "savings"
+	p.Accounts[0].ProductCode = ns("NEWCODE")
+	p.Accounts[0].GuessedType = true
+	if _, err := Ingest(ctx, client, p); err != nil {
+		t.Fatalf("re-ingest: %v", err)
+	}
+
+	got := getAccount(t, client, "Smart Access")
+	if got.Description != note {
+		t.Errorf("description = %q, want %q (owner-authored, ingest must not clobber)", got.Description, note)
+	}
+	if got.DrawdownPolicy != account.DrawdownPolicyNoDrawdown {
+		t.Errorf("drawdown_policy = %q, want %q (owner-authored, ingest must not clobber)", got.DrawdownPolicy, account.DrawdownPolicyNoDrawdown)
+	}
+	// The other half of the assertion: the conflict clause still does its job.
+	if got.MaskedNumber != "xxxx xxxx 4242" || got.Type != account.TypeSavings || got.ProductCode != "NEWCODE" || !got.GuessedType {
+		t.Errorf("bank-owned fields = %q/%q/%q/%v, want the re-ingested values", got.MaskedNumber, got.Type, got.ProductCode, got.GuessedType)
+	}
+	if !got.UpdatedAt.After(stale) {
+		t.Errorf("updated_at = %v, want it advanced past %v", got.UpdatedAt, stale)
+	}
+	if got.ID != seeded.ID {
+		t.Errorf("account id = %d, want the same row %d (upsert, not a duplicate)", got.ID, seeded.ID)
+	}
+}
+
+// TestIngest_PlaceholderDoesNotClobberOwnerAuthoredFields covers the other account
+// creation path: a transaction-only run naming an account that is not in accounts[].
+// placeholderAccount uses DO NOTHING, so an already-labelled account must come through
+// a later transaction-only run untouched.
+func TestIngest_PlaceholderDoesNotClobberOwnerAuthoredFields(t *testing.T) {
+	client := newFinanceTestClient(t)
+	ctx := context.Background()
+
+	// txnOnly names an account that accounts[] never declares, so the ingest creates it
+	// through placeholderAccount.
+	txnOnly := func(desc string) *Payload {
+		return &Payload{
+			Source:    "commbank",
+			ScrapedAt: "2026-07-11T09:00:00.000Z",
+			Transactions: Transactions{
+				Posted: []PostedRow{
+					{Account: "Undeclared Account", PostedDate: "2026-07-10", Amount: -9.00, AmountRaw: "$9.00", Description: desc},
+				},
+			},
+		}
+	}
+	if _, err := Ingest(ctx, client, txnOnly("FIRST ROW")); err != nil {
+		t.Fatalf("seed transaction-only ingest: %v", err)
+	}
+
+	const note = "everyday spending, replenished each pay"
+	seeded := getAccount(t, client, "Undeclared Account")
+	if !seeded.GuessedType {
+		t.Fatalf("guessed_type = false, want the placeholder flagged for review")
+	}
+	client.Account.UpdateOne(seeded).
+		SetDescription(note).
+		SetDrawdownPolicy(account.DrawdownPolicyFlexible).
+		SaveX(ctx)
+
+	if _, err := Ingest(ctx, client, txnOnly("SECOND ROW")); err != nil {
+		t.Fatalf("second transaction-only ingest: %v", err)
+	}
+
+	got := getAccount(t, client, "Undeclared Account")
+	if got.Description != note {
+		t.Errorf("description = %q, want %q (placeholder path must not clobber)", got.Description, note)
+	}
+	if got.DrawdownPolicy != account.DrawdownPolicyFlexible {
+		t.Errorf("drawdown_policy = %q, want %q (placeholder path must not clobber)", got.DrawdownPolicy, account.DrawdownPolicyFlexible)
+	}
+	if got.ID != seeded.ID {
+		t.Errorf("account id = %d, want the same row %d (DO NOTHING, not a duplicate)", got.ID, seeded.ID)
+	}
+}
+
+// TestIngest_NewAccountTakesOwnerFieldDefaults: a freshly ingested account is honest
+// about never having been labelled (empty description, drawdown_policy=unset) rather
+// than defaulting to something that reads as spendable.
+func TestIngest_NewAccountTakesOwnerFieldDefaults(t *testing.T) {
+	client := newFinanceTestClient(t)
+	ctx := context.Background()
+	if _, err := Ingest(ctx, client, basePayload("")); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	acc := getAccount(t, client, "Smart Access")
+	if acc.Description != "" {
+		t.Errorf("description = %q, want empty (never written)", acc.Description)
+	}
+	if acc.DrawdownPolicy != account.DrawdownPolicyUnset {
+		t.Errorf("drawdown_policy = %q, want unset", acc.DrawdownPolicy)
+	}
+}

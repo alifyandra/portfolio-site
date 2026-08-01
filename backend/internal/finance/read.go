@@ -58,6 +58,10 @@ type SummaryView struct {
 
 // AccountView is one account plus its latest balance snapshot (nil-safe: the balance
 // pointers stay nil when the account has no snapshot yet).
+//
+// Description and DrawdownPolicy are owner-authored (portfolio-site#122), never derived
+// from the ingest. Both are plain strings, not pointers: an unwritten description is the
+// empty string and an unlabelled policy is "unset".
 type AccountView struct {
 	ID              int
 	Name            string
@@ -65,6 +69,8 @@ type AccountView struct {
 	Type            string
 	Class           string
 	Currency        string
+	Description     string
+	DrawdownPolicy  string
 	Balance         *float64
 	Available       *float64
 	CreditLimit     *float64
@@ -318,30 +324,55 @@ func Accounts(ctx context.Context, client *ent.Client) ([]AccountView, error) {
 	}
 	views := make([]AccountView, 0, len(accs))
 	for _, acc := range accs {
-		av := AccountView{
-			ID:              acc.ID,
-			Name:            acc.Name,
-			MaskedNumber:    acc.MaskedNumber,
-			Type:            string(acc.Type),
-			Class:           string(acc.Class),
-			Currency:        acc.Currency,
-			PostedWatermark: acc.PostedWatermark,
-		}
-		snap, err := latestSnapshot(ctx, client, acc.ID)
+		av, err := accountView(ctx, client, acc)
 		if err != nil {
 			return nil, err
-		}
-		if snap != nil {
-			b := snap.Balance
-			av.Balance = &b
-			av.Available = snap.Available
-			av.CreditLimit = snap.CreditLimit
-			asOf := snap.AsOf
-			av.BalanceAsOf = &asOf
 		}
 		views = append(views, av)
 	}
 	return views, nil
+}
+
+// AccountByID is the single-account read, for a caller that already knows the id and
+// would otherwise pay for the whole list plus a snapshot query per row. It shares
+// accountView with Accounts, so one account read the same way whichever door it came
+// through. Returns an ent NotFound error when the id does not exist.
+func AccountByID(ctx context.Context, client *ent.Client, id int) (AccountView, error) {
+	acc, err := client.Account.Get(ctx, id)
+	if err != nil {
+		return AccountView{}, err
+	}
+	return accountView(ctx, client, acc)
+}
+
+// accountView projects one account row plus its latest snapshot. The balance pointers
+// stay nil when the account has never carried a snapshot, which is a real state (a
+// declared account the source has not priced yet), not an error.
+func accountView(ctx context.Context, client *ent.Client, acc *ent.Account) (AccountView, error) {
+	av := AccountView{
+		ID:              acc.ID,
+		Name:            acc.Name,
+		MaskedNumber:    acc.MaskedNumber,
+		Type:            string(acc.Type),
+		Class:           string(acc.Class),
+		Currency:        acc.Currency,
+		Description:     acc.Description,
+		DrawdownPolicy:  string(acc.DrawdownPolicy),
+		PostedWatermark: acc.PostedWatermark,
+	}
+	snap, err := latestSnapshot(ctx, client, acc.ID)
+	if err != nil {
+		return AccountView{}, err
+	}
+	if snap != nil {
+		b := snap.Balance
+		av.Balance = &b
+		av.Available = snap.Available
+		av.CreditLimit = snap.CreditLimit
+		asOf := snap.AsOf
+		av.BalanceAsOf = &asOf
+	}
+	return av, nil
 }
 
 // BalanceHistory returns an account's balance snapshots ordered by as_of ascending,

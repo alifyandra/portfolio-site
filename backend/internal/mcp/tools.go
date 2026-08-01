@@ -93,6 +93,10 @@ type summaryResult struct {
 	AsOf         *string `json:"as_of"`
 }
 
+// accountResult carries the owner-authored description and drawdown_policy alongside
+// the bank's own fields. description is omitempty so an unlabelled account does not
+// spend tokens on an empty string; drawdown_policy is always present because "unset" is
+// itself information (it means the owner has not declared one, NOT that it is flexible).
 type accountResult struct {
 	ID              int      `json:"id"`
 	Name            string   `json:"name"`
@@ -100,6 +104,8 @@ type accountResult struct {
 	Type            string   `json:"type"`
 	Class           string   `json:"class"`
 	Currency        string   `json:"currency"`
+	Description     string   `json:"description,omitempty"`
+	DrawdownPolicy  string   `json:"drawdown_policy"`
 	Balance         *float64 `json:"balance"`
 	Available       *float64 `json:"available"`
 	CreditLimit     *float64 `json:"credit_limit"`
@@ -493,7 +499,7 @@ func toolDefinitions() []map[string]any {
 		},
 		{
 			"name":        "list_accounts",
-			"description": "List every finance account with its type, class (asset or liability), currency, and latest balance/available/credit-limit snapshot.",
+			"description": "List every finance account with its type, class (asset or liability), currency, and latest balance/available/credit-limit snapshot, plus two owner-authored fields. `description` is a free-text note on what the account is actually for. `drawdown_policy` is one of flexible (money moves in and out), no_drawdown (the balance must not fall), emergency_only (reachable, but not for ordinary spending) or unset. Two accounts of the same type can serve completely different purposes, so read the description before treating a balance as spendable, and never count a no_drawdown balance as available for new spending. `unset` means the owner has not labelled that account yet, NOT that it is flexible: say so rather than assuming. A missing `description` likewise means unwritten.",
 			"inputSchema": objectSchema(nil, nil),
 		},
 		{
@@ -593,6 +599,8 @@ func toAccountResults(accs []finance.AccountView) []accountResult {
 			Type:            a.Type,
 			Class:           a.Class,
 			Currency:        a.Currency,
+			Description:     a.Description,
+			DrawdownPolicy:  a.DrawdownPolicy,
 			Balance:         a.Balance,
 			Available:       a.Available,
 			CreditLimit:     a.CreditLimit,

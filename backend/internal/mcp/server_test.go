@@ -304,6 +304,60 @@ func TestMCP_ListRecurringBills(t *testing.T) {
 	}
 }
 
+// TestMCP_ListAccountsCarriesOwnerMetadata: the owner-authored description and
+// drawdown_policy reach the model (portfolio-site#122). An unlabelled account still
+// reports its policy, because "unset" means not yet declared rather than flexible, but
+// omits description entirely so an empty string does not cost tokens.
+func TestMCP_ListAccountsCarriesOwnerMetadata(t *testing.T) {
+	h, svc, client := newMCPTestServer(t)
+	ctx := context.Background()
+	raw := mintToken(t, ctx, svc, client, []string{"finance.read"})
+
+	const note = "sinking fund for one specific thing, not spending money"
+	labelled := client.Account.Create().
+		SetSource("commbank").
+		SetName("Aaa Labelled").
+		SetType(account.TypeSavings).
+		SetClass(account.ClassAsset).
+		SetDescription(note).
+		SetDrawdownPolicy(account.DrawdownPolicyNoDrawdown).
+		SaveX(ctx)
+
+	var res struct {
+		Accounts []struct {
+			ID             int     `json:"id"`
+			Name           string  `json:"name"`
+			Description    *string `json:"description"`
+			DrawdownPolicy string  `json:"drawdown_policy"`
+		} `json:"accounts"`
+	}
+	_, out := rpc(t, h, raw, map[string]any{
+		"jsonrpc": "2.0", "id": 40, "method": "tools/call",
+		"params": map[string]any{"name": "list_accounts", "arguments": map[string]any{}},
+	})
+	decodeToolText(t, out, &res)
+	if len(res.Accounts) != 2 {
+		t.Fatalf("accounts = %d, want 2 (the seeded one plus the labelled one)", len(res.Accounts))
+	}
+	for _, a := range res.Accounts {
+		if a.ID == labelled.ID {
+			if a.Description == nil || *a.Description != note {
+				t.Errorf("labelled description = %v, want %q", a.Description, note)
+			}
+			if a.DrawdownPolicy != "no_drawdown" {
+				t.Errorf("labelled drawdown_policy = %q, want no_drawdown", a.DrawdownPolicy)
+			}
+			continue
+		}
+		if a.Description != nil {
+			t.Errorf("unlabelled description = %q, want the key omitted entirely", *a.Description)
+		}
+		if a.DrawdownPolicy != "unset" {
+			t.Errorf("unlabelled drawdown_policy = %q, want unset (always present)", a.DrawdownPolicy)
+		}
+	}
+}
+
 // TestMCP_UnknownMethod: an unknown JSON-RPC method returns -32601.
 func TestMCP_UnknownMethod(t *testing.T) {
 	h, svc, client := newMCPTestServer(t)
