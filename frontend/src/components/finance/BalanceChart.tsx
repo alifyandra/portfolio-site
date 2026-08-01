@@ -47,7 +47,7 @@ import {
 
 import type { BalancePointDTO } from '@/lib/api/model';
 import { formatDate } from './format';
-import { useMoney } from './censor';
+import { FigureSlot, useMoney } from './censor';
 
 // The tooltip has to be measured before it is painted, else an edge one shows
 // for a frame at the position it is about to be moved away from. This page is
@@ -561,23 +561,23 @@ export function BalanceChart({
       <div className="mt-3 flex flex-wrap justify-between gap-3 text-xs">
         <span className="text-slate-400">
           Low{' '}
-          <span className="font-medium text-slate-200">
+          <FigureSlot className="font-medium text-slate-200">
             {money(minPoint.balance)}
-          </span>{' '}
+          </FigureSlot>{' '}
           · {formatDate(minPoint.as_of)}
         </span>
         <span className="text-slate-400">
           Latest{' '}
-          <span className="font-semibold text-sky">
+          <FigureSlot className="font-semibold text-sky">
             {money(last.balance)}
-          </span>{' '}
+          </FigureSlot>{' '}
           · {formatDate(last.as_of)}
         </span>
         <span className="text-slate-400">
           High{' '}
-          <span className="font-medium text-slate-200">
+          <FigureSlot className="font-medium text-slate-200">
             {money(maxPoint.balance)}
-          </span>{' '}
+          </FigureSlot>{' '}
           · {formatDate(maxPoint.as_of)}
         </span>
       </div>

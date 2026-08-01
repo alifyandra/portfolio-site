@@ -32,7 +32,7 @@ import {
   rowClass,
 } from '@/components/admin/ui';
 import { formatDate, accountTypeLabel } from './format';
-import { useMoney } from './censor';
+import { FigureSlot, useMoney } from './censor';
 
 type DrawdownPolicy = FinanceAccountDTO['drawdown_policy'];
 
@@ -170,11 +170,15 @@ function AccountRow({
         {(account.available != null || account.credit_limit != null) && (
           <span className="text-xs text-slate-400">
             {account.available != null && (
-              <>Available {money(account.available)}</>
+              <>
+                Available <FigureSlot>{money(account.available)}</FigureSlot>
+              </>
             )}
             {account.available != null && account.credit_limit != null && ' · '}
             {account.credit_limit != null && (
-              <>Limit {money(account.credit_limit)}</>
+              <>
+                Limit <FigureSlot>{money(account.credit_limit)}</FigureSlot>
+              </>
             )}
           </span>
         )}
