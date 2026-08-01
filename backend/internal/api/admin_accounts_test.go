@@ -200,9 +200,57 @@ func TestAdminAccounts_UnknownIDIs404(t *testing.T) {
 	}
 }
 
+// TestAdminAccounts_OverlongDescriptionIs422 pins the rune-versus-byte gap. Huma's
+// maxLength tag counts runes and Ent's MaxLen counts bytes, so a description of exactly
+// 2000 multibyte characters clears the schema and would fail the Ent validator on save,
+// which used to surface as a 500 echoing the raw validator text. All three cases are
+// asserted together because the boundary is only meaningful against the ones either side
+// of it: 2000 ASCII bytes must still succeed.
+func TestAdminAccounts_OverlongDescriptionIs422(t *testing.T) {
+	api, client, acc := newAdminAccountsTestAPI(t)
+	ctx := context.Background()
+	admin := sessionCookieFor(t, ctx, client, user.RoleAdmin)
+	path := "/api/admin/accounts/" + strconv.Itoa(acc.ID)
+
+	// Over the limit in runes as well as bytes: caught by the schema.
+	tooManyRunes := strings.Repeat("a", 5000)
+	if resp := api.Patch(path, map[string]any{"description": tooManyRunes}, admin); resp.Code != http.StatusUnprocessableEntity {
+		t.Errorf("5000 ascii = %d, want 422", resp.Code)
+	}
+
+	// Exactly at the rune limit but double it in bytes: the schema passes this, so only
+	// the handler's byte pre-check stands between it and the Ent validator.
+	multibyte := strings.Repeat("é", 2000) // 2000 runes, 4000 bytes
+	if got := len([]rune(multibyte)); got != 2000 {
+		t.Fatalf("fixture runes = %d, want exactly the rune limit", got)
+	}
+	if got := len(multibyte); got != 4000 {
+		t.Fatalf("fixture bytes = %d, want twice the byte limit", got)
+	}
+	resp := api.Patch(path, map[string]any{"description": multibyte}, admin)
+	if resp.Code != http.StatusUnprocessableEntity {
+		t.Errorf("2000 multibyte runes = %d, want 422 (not a 500 from the Ent validator); body=%s", resp.Code, resp.Body.String())
+	}
+	// A 500 used to echo the validator's internal field path. Nothing about Ent's
+	// internals belongs in a client response, whatever the status.
+	if strings.Contains(resp.Body.String(), "validator failed") || strings.Contains(resp.Body.String(), "ent:") {
+		t.Errorf("body leaks internal validator text: %s", resp.Body.String())
+	}
+
+	// Exactly at the byte limit in ASCII: still a normal, accepted note.
+	atLimit := strings.Repeat("a", 2000)
+	if resp := api.Patch(path, map[string]any{"description": atLimit}, admin); resp.Code != http.StatusOK {
+		t.Fatalf("2000 ascii = %d, want 200; body=%s", resp.Code, resp.Body.String())
+	}
+	row := client.Account.GetX(ctx, acc.ID)
+	if row.Description != atLimit {
+		t.Errorf("description length = %d, want the 2000-byte note stored whole", len(row.Description))
+	}
+}
+
 // TestAdminAccounts_InvalidPolicyIs422: an unknown enum value is rejected rather than
-// coerced. SQLite would happily store it in a test and Postgres would then reject it
-// against the check constraint in prod, so it has to fail at the edge.
+// coerced. Neither SQLite nor Postgres constrains the column (it is a plain varchar with
+// a default), so this pre-check and Ent's validator are the only guards.
 func TestAdminAccounts_InvalidPolicyIs422(t *testing.T) {
 	api, client, acc := newAdminAccountsTestAPI(t)
 	ctx := context.Background()

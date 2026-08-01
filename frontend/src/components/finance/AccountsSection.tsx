@@ -35,6 +35,10 @@ import { formatMoney, formatAbs, formatDate, accountTypeLabel } from './format';
 
 type DrawdownPolicy = FinanceAccountDTO['drawdown_policy'];
 
+// Mirrors the schema's MaxLen(2000), which the backend measures in BYTES (see
+// descriptionMaxBytes in backend/internal/api/admin_accounts.go).
+const DESCRIPTION_MAX_BYTES = 2000;
+
 // Order runs least to most restricted, so the select reads as a scale.
 const POLICIES: DrawdownPolicy[] = [
   'unset',
@@ -59,6 +63,18 @@ export function AccountsSection() {
   const [editing, setEditing] = useState<number | null>(null);
   const update = useUpdateAccount();
 
+  // One mutation drives every row, and React Query holds onto the last error until the
+  // next call. Reset on both open and cancel so a failed save cannot leave a stale
+  // banner hanging over a different account, or over the same one after a retry.
+  const openEdit = (id: number) => {
+    update.reset();
+    setEditing(id);
+  };
+  const cancelEdit = () => {
+    update.reset();
+    setEditing(null);
+  };
+
   const save = (id: number, description: string, policy: DrawdownPolicy) =>
     update.mutate(
       { id, data: { description, drawdown_policy: policy } },
@@ -67,7 +83,9 @@ export function AccountsSection() {
           queryClient.invalidateQueries({
             queryKey: getListFinanceAccountsQueryKey(),
           });
-          setEditing(null);
+          // Guarded, so an in-flight save that lands after the user has opened a
+          // different row does not close that row's editor underneath them.
+          setEditing((cur) => (cur === id ? null : cur));
         },
       },
     );
@@ -81,10 +99,6 @@ export function AccountsSection() {
         title="Accounts"
         subtitle="Latest snapshot balance per account."
       />
-
-      {update.error && (
-        <p className="text-sm text-coral">Could not save that account.</p>
-      )}
 
       {isError ? (
         <p className="text-sm text-coral">Could not load accounts.</p>
@@ -103,7 +117,8 @@ export function AccountsSection() {
                 <AccountEditor
                   account={acct}
                   saving={update.isPending}
-                  onCancel={() => setEditing(null)}
+                  failed={update.error != null}
+                  onCancel={cancelEdit}
                   onSave={(description, policy) =>
                     save(acct.id, description, policy)
                   }
@@ -111,11 +126,7 @@ export function AccountsSection() {
               </li>
             ) : (
               <li key={acct.id} className={rowClass}>
-                <AccountRow
-                  account={acct}
-                  onEdit={() => setEditing(acct.id)}
-                  disabled={update.isPending}
-                />
+                <AccountRow account={acct} onEdit={() => openEdit(acct.id)} />
               </li>
             ),
           )}
@@ -128,11 +139,9 @@ export function AccountsSection() {
 function AccountRow({
   account,
   onEdit,
-  disabled,
 }: {
   account: FinanceAccountDTO;
   onEdit: () => void;
-  disabled: boolean;
 }) {
   const isLiability = account.class === 'liability';
 
@@ -185,12 +194,7 @@ function AccountRow({
             {formatDate(account.balance_as_of)}
           </span>
         )}
-        <button
-          type="button"
-          className={editBtn}
-          onClick={onEdit}
-          disabled={disabled}
-        >
+        <button type="button" className={editBtn} onClick={onEdit}>
           Edit
         </button>
       </div>
@@ -204,11 +208,13 @@ function AccountRow({
 function AccountEditor({
   account,
   saving,
+  failed,
   onSave,
   onCancel,
 }: {
   account: FinanceAccountDTO;
   saving: boolean;
+  failed: boolean;
   onSave: (description: string, policy: DrawdownPolicy) => void;
   onCancel: () => void;
 }) {
@@ -216,6 +222,13 @@ function AccountEditor({
   const [policy, setPolicy] = useState<DrawdownPolicy>(
     account.drawdown_policy,
   );
+
+  // The API's limit is 2000 BYTES, so a textarea maxLength (which counts UTF-16 code
+  // units) would let an accented or emoji note compose a request the API then rejects.
+  // Measure what the server measures, and refuse to send rather than round-trip a 422.
+  const bytes = new TextEncoder().encode(description).length;
+  const overBy = bytes - DESCRIPTION_MAX_BYTES;
+  const tooLong = overBy > 0;
 
   return (
     <>
@@ -228,13 +241,27 @@ function AccountEditor({
         What this account is for
         <textarea
           rows={3}
-          maxLength={2000}
           className={inputClass}
           placeholder="In your own words. The MCP reads this before treating a balance as spendable."
           value={description}
           onChange={(e) => setDescription(e.target.value)}
         />
       </label>
+
+      {/* Quiet until it matters: the count appears only near the limit. */}
+      {bytes > DESCRIPTION_MAX_BYTES - 200 && (
+        <p className={`text-xs ${tooLong ? 'text-coral' : 'text-slate-400'}`}>
+          {tooLong
+            ? `Too long by ${overBy} of ${DESCRIPTION_MAX_BYTES} characters. Accents and emoji count as more than one.`
+            : `${bytes} of ${DESCRIPTION_MAX_BYTES} characters.`}
+        </p>
+      )}
+
+      {failed && (
+        <p className="text-sm text-coral">
+          Could not save this account. Nothing was changed.
+        </p>
+      )}
 
       <label className={labelClass}>
         Drawdown policy
@@ -255,7 +282,7 @@ function AccountEditor({
         <button
           type="button"
           className={primaryBtn}
-          disabled={saving}
+          disabled={saving || tooLong}
           onClick={() => onSave(description, policy)}
         >
           {saving ? 'Saving…' : 'Save'}

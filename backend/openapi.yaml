@@ -2728,7 +2728,7 @@ components:
           readOnly: true
           type: string
         description:
-          description: Owner-authored note on what this account is for; empty string clears it
+          description: Owner-authored note on what this account is for, at most 2000 bytes (accented or emoji characters cost more than one); empty string clears it
           maxLength: 2000
           type: string
         drawdown_policy:
