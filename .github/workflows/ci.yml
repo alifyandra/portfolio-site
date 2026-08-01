@@ -6,6 +6,15 @@ on:
   pull_request:
 
 jobs:
+  fixtures:
+    name: Fixture identifiers (public-repo guard)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check committed files for unreserved masked numbers
+        run: ./scripts/check-fixtures.sh
+
   backend:
     name: Backend (build, vet, test, spec)
     runs-on: ubuntu-latest

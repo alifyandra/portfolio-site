@@ -132,9 +132,59 @@ target without hurting general UX.
 | Secrets | Move `.env` → **AWS Secrets Manager / SSM Parameter Store** |
 | Transport | HTTPS only (Caddy ✓), HSTS (✓) |
 
+## Identifiers in committed files (public repo)
+
+This repo is public and real financial data flows through the finance code, so every
+committed file is published content. That includes test fixtures and doc comments, not
+just prose. A fixture is the easiest place for a real value to land unnoticed, because
+it looks like plumbing and gets skimmed in review.
+
+### The mechanical half: reserved masked numbers
+
+`scripts/check-fixtures.sh` runs in CI (`make check-fixtures` locally) and fails if a
+masked account number outside a reserved set appears in any committed file.
+
+It is an **allowlist, not a denylist**. A denylist would have to name the real values,
+and the check runs in public CI, so it would publish the thing it protects. Inverted,
+the check only needs to know which fakes are sanctioned:
+
+| Style | Values |
+|---|---|
+| Repeated digit | `0000` `1111` `2222` `3333` `4444` `5555` `6666` `7777` `8888` `9999` |
+| Repeated pair | `4242` `4343` `5353` `6464` |
+| Sequential (wire payloads) | `1234` |
+
+Any of the masked forms is matched: `xxxx 4242`, `xxxx xxxx 1234`, `****1234`, and the
+inline `xx5353` that CommBank transfer descriptions use. Bare four-digit numbers are out
+of scope, because they are ubiquitous and carry no account semantics on their own.
+
+Need a value the set does not have? Add an obviously-synthetic one to the list in the
+same commit. That diff line is deliberate friction. It is the moment a reviewer asks
+whether the number was invented or copied.
+
+### The half a regex cannot check
+
+These stay a review concern, because a regex that caught them would either miss
+constantly or leak the patterns it matches on:
+
+- employer, merchant and payee names
+- exact row counts, coverage percentages, precise date spans
+- anything transcribed from a real statement rather than made up
+
+**The pairing rule:** a name that is fine alone is not fine sitting next to finance
+figures. The site's own résumé data names an employer deliberately and that is correct;
+the same name beside a salary-shaped amount is a leak. It is the combination that
+discloses, not either half.
+
+This applies to issues, PR titles and bodies, and commit messages as much as to code.
+Note that **`gh issue edit` does not redact**. GitHub keeps prior bodies in
+`userContentEdits`, publicly readable via GraphQL, so delete and re-file instead.
+
 ## Ongoing hygiene
 
 - Review **Dependabot** PRs; let CI gate them.
 - `govulncheck` runs in CI — treat failures as release blockers.
 - Rotate any credentials that ever touch a non-instance-role path.
 - Keep the résumé / PII **out of git** (`*.pdf` is gitignored; history was scrubbed).
+- Keep real identifiers out of committed files (see the section above). CI enforces the
+  mechanical half.

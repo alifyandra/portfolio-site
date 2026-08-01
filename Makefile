@@ -84,3 +84,9 @@ test: ## Run Go tests
 .PHONY: tidy
 tidy: ## go mod tidy
 	$(GO_RUN) sh -c "go mod tidy"
+
+# Runs on the host, not in Docker: it reads the git index to find the committed
+# (i.e. published) files.
+.PHONY: check-fixtures
+check-fixtures: ## Fail if a masked account number outside the reserved set is committed
+	./scripts/check-fixtures.sh
