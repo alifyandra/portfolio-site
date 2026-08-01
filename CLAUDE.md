@@ -74,6 +74,23 @@ make fe-dev    # Next.js at :3000 (separate terminal)
   every bucket edge. The balance series does this via `queryBound()`
   (`backend/internal/finance/balance_series.go`); any new local-zone bound needs the
   same treatment.
+- **Ent emits no Postgres check constraint for an `enum`, and no length enforcement
+  for `MaxLen`.** Verified against real Postgres 16: an enum field lands as a plain
+  `character varying NOT NULL DEFAULT '<default>'` (confirmed via `\d accounts`) and
+  a raw SQL write of a garbage value outside the set was accepted; a `MaxLen(2000)`
+  field accepted a 2001-character raw write. Application-level validation is the
+  **only** guard on every Ent enum and every length cap in this codebase (concretely
+  `drawdown_policy` and `description` on `Account`), so validate in the handler and
+  never treat the database as a backstop.
+- **Huma's `maxLength` counts runes; Ent's `MaxLen` counts bytes.** A string at
+  exactly the advertised limit containing multibyte characters (accents, emoji)
+  passes Huma's validation, reaches Ent as up to four times as many bytes, fails the
+  Ent validator, and surfaces as a **500 that leaks raw Ent validator text** to the
+  client. Every Huma + Ent string field with a length cap carries this bug latently.
+  Add an
+  explicit byte pre-check in the handler returning 422 (pattern:
+  `descriptionMaxBytes` in `backend/internal/api/admin_accounts.go`) and count bytes
+  in the UI too.
 
 ## State (as of last session)
 
