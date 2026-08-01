@@ -31,7 +31,8 @@ import {
   editBtn,
   rowClass,
 } from '@/components/admin/ui';
-import { formatMoney, formatAbs, formatDate, accountTypeLabel } from './format';
+import { formatDate, accountTypeLabel } from './format';
+import { FigureSlot, useMoney } from './censor';
 
 type DrawdownPolicy = FinanceAccountDTO['drawdown_policy'];
 
@@ -143,6 +144,9 @@ function AccountRow({
   account: FinanceAccountDTO;
   onEdit: () => void;
 }) {
+  const { money, abs } = useMoney();
+  // Coral + "owed" comes from account.class, not from the sign of the hidden
+  // number, so the tint stays on while censored without leaking anything.
   const isLiability = account.class === 'liability';
 
   return (
@@ -166,11 +170,15 @@ function AccountRow({
         {(account.available != null || account.credit_limit != null) && (
           <span className="text-xs text-slate-400">
             {account.available != null && (
-              <>Available {formatMoney(account.available)}</>
+              <>
+                Available <FigureSlot>{money(account.available)}</FigureSlot>
+              </>
             )}
             {account.available != null && account.credit_limit != null && ' · '}
             {account.credit_limit != null && (
-              <>Limit {formatMoney(account.credit_limit)}</>
+              <>
+                Limit <FigureSlot>{money(account.credit_limit)}</FigureSlot>
+              </>
             )}
           </span>
         )}
@@ -181,12 +189,12 @@ function AccountRow({
           <span className="text-sm text-slate-400">no snapshot</span>
         ) : isLiability ? (
           <span className="font-display text-lg font-semibold tabular-nums text-coral">
-            {formatAbs(account.balance)}
+            {abs(account.balance)}
             <span className="ml-1 text-xs font-normal text-slate-400">owed</span>
           </span>
         ) : (
           <span className="font-display text-lg font-semibold tabular-nums text-white">
-            {formatMoney(account.balance)}
+            {money(account.balance)}
           </span>
         )}
         {account.balance_as_of && (

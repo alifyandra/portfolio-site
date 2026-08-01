@@ -46,6 +46,13 @@ import {
   editBtn,
   dangerBtn,
 } from './ui';
+import {
+  AmountField,
+  CENSOR_MASK,
+  CensorToggle,
+  FigureSlot,
+  useCensor,
+} from '@/components/finance/censor';
 
 interface WishlistForm {
   name: string;
@@ -109,9 +116,21 @@ const currencies = ['AUD', 'USD', 'EUR', 'GBP', 'JPY', 'SGD', 'IDR'];
 
 const allowedTypes = Object.values(PresignUploadInputBodyContentType) as string[];
 
+// Wider than the finance default: a wishlist figure is prefixed with its
+// currency code, and the no-price case is a phrase rather than a number.
+const WISHLIST_FIGURE_CH = 13;
+
 // Money is formatted here, never on the server (the read layer does not round).
-function formatAmount(amount: number | null, currency: string): string {
+// `censored` is threaded in rather than read from context, because this is a
+// plain function and not a component. "price unknown" is not a figure, so it
+// still shows: it says an amount is absent, not what any amount is.
+function formatAmount(
+  amount: number | null,
+  currency: string,
+  censored: boolean,
+): string {
   if (amount === null) return 'price unknown';
+  if (censored) return CENSOR_MASK;
   return `${currency} ${amount.toLocaleString(undefined, {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
@@ -120,6 +139,10 @@ function formatAmount(amount: number | null, currency: string): string {
 
 export function WishlistSection() {
   const queryClient = useQueryClient();
+  // The wishlist is the one money surface outside /finance, so it shares the
+  // same censor state and carries its own copy of the toggle. Censoring an
+  // amount on a page with no way to reveal it would just be broken.
+  const { censored } = useCensor();
   // Defaults to every status: this is the management view, so nothing should be
   // hidden here. The read endpoint's own default (wanted only) still governs the
   // dashboard and the MCP tool.
@@ -297,15 +320,18 @@ export function WishlistSection() {
             </p>
           </div>
         </div>
-        {editing === null && (
-          <button
-            type="button"
-            onClick={openNew}
-            className="shrink-0 rounded-lg border border-slate-700 px-3 py-1.5 text-sm font-medium text-white transition hover:border-citron hover:text-citron"
-          >
-            New item
-          </button>
-        )}
+        <div className="flex shrink-0 items-center gap-2">
+          <CensorToggle />
+          {editing === null && (
+            <button
+              type="button"
+              onClick={openNew}
+              className="shrink-0 rounded-lg border border-slate-700 px-3 py-1.5 text-sm font-medium text-white transition hover:border-citron hover:text-citron"
+            >
+              New item
+            </button>
+          )}
+        </div>
       </header>
 
       {editing !== null && (
@@ -335,14 +361,14 @@ export function WishlistSection() {
           <div className="grid gap-3 sm:grid-cols-2">
             <label className={labelClass}>
               Amount (blank = price unknown)
-              <input
+              <AmountField
+                fieldLabel="amount"
                 className={inputClass}
-                type="number"
                 min="0"
                 step="0.01"
                 placeholder="unknown"
                 value={form.amount}
-                onChange={(e) => patch('amount', e.target.value)}
+                onChange={(next) => patch('amount', next)}
               />
               {amountInvalid ? (
                 <span className="text-xs text-coral">
@@ -516,7 +542,10 @@ export function WishlistSection() {
         {totals ? (
           <p className="text-sm text-slate-400">
             {totals.item_count} item{totals.item_count === 1 ? '' : 's'} ·{' '}
-            {formatAmount(totals.known_cost_total, totals.currency)} known
+            <FigureSlot ch={WISHLIST_FIGURE_CH}>
+              {formatAmount(totals.known_cost_total, totals.currency, censored)}
+            </FigureSlot>{' '}
+            known
             {totals.unknown_cost_count > 0
               ? ` · ${totals.unknown_cost_count} with no price`
               : ''}
@@ -555,7 +584,9 @@ export function WishlistSection() {
                   ) : null}
                 </p>
                 <p className="mt-0.5 truncate text-sm text-slate-400">
-                  {formatAmount(w.amount, w.currency)}
+                  <FigureSlot ch={WISHLIST_FIGURE_CH}>
+                    {formatAmount(w.amount, w.currency, censored)}
+                  </FigureSlot>
                   {w.amount !== null && w.amount_is_estimate ? ' (est.)' : ''}
                   {w.deadline ? ` · by ${w.deadline}` : ''}
                   {w.description ? ` · ${w.description}` : ''}

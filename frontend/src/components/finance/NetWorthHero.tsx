@@ -7,10 +7,15 @@
 
 import { useGetFinanceSummary } from '@/lib/api/generated';
 import { citronCard, citronBadge } from '@/components/admin/ui';
-import { formatMoney, formatAbs, formatDateTime } from './format';
+import { formatDateTime } from './format';
+import { useMoney } from './censor';
 
 export function NetWorthHero() {
   const { data, isLoading, isError } = useGetFinanceSummary();
+  // The headline is the figure the censor exists for, so it reads the masked
+  // formatters rather than the pure ones. The mask is constant width, which
+  // matters most here: a bullet-per-digit shape would announce the magnitude.
+  const { money, abs } = useMoney();
 
   return (
     <section
@@ -45,7 +50,7 @@ export function NetWorthHero() {
       ) : (
         <>
           <p className="font-display text-4xl font-bold tabular-nums text-white sm:text-5xl">
-            {isLoading || !data ? '—' : formatMoney(data.net_worth)}
+            {isLoading || !data ? '—' : money(data.net_worth)}
           </p>
 
           <div className="grid grid-cols-2 gap-4 sm:max-w-md">
@@ -54,7 +59,7 @@ export function NetWorthHero() {
                 assets
               </span>
               <span className="font-display text-xl font-semibold tabular-nums text-mint">
-                {isLoading || !data ? '—' : formatMoney(data.assets)}
+                {isLoading || !data ? '—' : money(data.assets)}
               </span>
             </div>
             <div className="flex flex-col gap-1">
@@ -62,7 +67,7 @@ export function NetWorthHero() {
                 liabilities
               </span>
               <span className="font-display text-xl font-semibold tabular-nums text-coral">
-                {isLoading || !data ? '—' : `${formatAbs(data.liabilities)} owed`}
+                {isLoading || !data ? '—' : `${abs(data.liabilities)} owed`}
               </span>
             </div>
           </div>

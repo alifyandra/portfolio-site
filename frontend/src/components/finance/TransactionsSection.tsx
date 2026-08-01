@@ -12,7 +12,8 @@ import {
 } from '@/lib/api/generated';
 import type { FinanceTxnDTO } from '@/lib/api/model';
 import { citronCard, citronBadge, selectClass } from '@/components/admin/ui';
-import { formatMoney, formatDate } from './format';
+import { formatDate } from './format';
+import { useMoney } from './censor';
 
 const LIMIT = 50;
 
@@ -92,7 +93,16 @@ export function TransactionsSection() {
 }
 
 function TransactionRow({ txn }: { txn: FinanceTxnDTO }) {
+  const { money, censored } = useMoney();
+  // Direction is encoded three ways here: the mint/coral tint, the leading "+",
+  // and the minus the formatter prints. All three are derived from the sign, so
+  // all three have to go while censored, or the mask is decorative.
   const isOut = txn.amount < 0;
+  const toneClass = censored
+    ? 'text-slate-200'
+    : isOut
+      ? 'text-coral'
+      : 'text-mint';
   const primary = txn.merchant || txn.description || '—';
   const secondary =
     txn.merchant && txn.description && txn.merchant !== txn.description
@@ -114,17 +124,13 @@ function TransactionRow({ txn }: { txn: FinanceTxnDTO }) {
       </div>
 
       <div className="flex shrink-0 flex-col items-end">
-        <span
-          className={`text-sm font-semibold tabular-nums ${
-            isOut ? 'text-coral' : 'text-mint'
-          }`}
-        >
-          {isOut ? '' : '+'}
-          {formatMoney(txn.amount)}
+        <span className={`text-sm font-semibold tabular-nums ${toneClass}`}>
+          {censored || isOut ? '' : '+'}
+          {money(txn.amount)}
         </span>
         {txn.balance_after != null && (
           <span className="text-[0.65rem] tabular-nums text-slate-400">
-            bal {formatMoney(txn.balance_after)}
+            bal {money(txn.balance_after)}
           </span>
         )}
       </div>
