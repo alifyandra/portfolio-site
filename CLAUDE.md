@@ -60,6 +60,20 @@ make fe-dev    # Next.js at :3000 (separate terminal)
 - Contact form has a honeypot (`website` field) + per-IP rate limit. SES/email and
   SQS degrade gracefully when unconfigured (message still stored).
 - Graceful-degradation pattern: Spotify/SES/queue all no-op cleanly without creds.
+- **The repo is PUBLIC and real finance data flows through it.** Fixtures and doc
+  comments are published content too. Masked account numbers must come from the
+  reserved set in `scripts/check-fixtures.sh` (CI fails otherwise; run `make
+  check-fixtures` locally). Names, row counts and date spans can't be checked
+  mechanically, so the rule to hold is that a name fine on its own is **not** fine
+  next to finance figures. Applies to issues/PRs/commits too, and `gh issue edit`
+  does **not** redact (GitHub keeps prior bodies). See
+  [`docs/security.md`](docs/security.md).
+- **Convert local-zone times to UTC before using them as an Ent/SQL bound.** The
+  SQLite test driver compares a time column against the bound's *rendered* form, not
+  its instant, so a `+10:00` (Melbourne) bound silently drops rows either side of
+  every bucket edge. The balance series does this via `queryBound()`
+  (`backend/internal/finance/balance_series.go`); any new local-zone bound needs the
+  same treatment.
 
 ## State (as of last session)
 
