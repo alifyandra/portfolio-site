@@ -24,13 +24,20 @@ type enqueuer interface {
 	Configured() bool
 }
 
-// notifier sends the finance refresh-handshake notification (ADR 0016) when an
-// ack-gated job is force-started from the admin console. *notify.Client satisfies it
-// (and no-ops gracefully when ntfy is unconfigured); a nil notifier is tolerated — the
-// forced run still sits awaiting_ack and can be acked directly. Mirrors the scheduler's
-// notifier seam, so "Run now" exercises the same handshake the cron does.
+// notifier sends the finance sync's ntfy messages (ADR 0016): the refresh-handshake
+// prompt when an ack-gated job is force-started from the admin console, and the
+// start/finish reports for a run the finance runner claims and closes.
+// *notify.Client satisfies it (and no-ops gracefully when ntfy is unconfigured); a
+// nil notifier is tolerated — the forced run still sits awaiting_ack and can be acked
+// directly. Mirrors the scheduler's notifier seam, so "Run now" exercises the same
+// handshake the cron does.
+//
+// Every call is best-effort: a notification that fails is logged and never fails the
+// run, because losing a message must not lose a sync.
 type notifier interface {
 	NotifyRefresh(ctx context.Context, runID int, jobName string) error
+	NotifyRunStarted(ctx context.Context, runID int, jobName, runner string) error
+	NotifyRunFinished(ctx context.Context, runID int, jobName, status, detail string) error
 }
 
 // Deps are the dependencies the API handlers need.

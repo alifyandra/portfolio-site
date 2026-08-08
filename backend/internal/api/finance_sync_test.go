@@ -34,6 +34,17 @@ func newFinanceSyncTestAPI(t *testing.T) (humatest.TestAPI, *auth.Service, *ent.
 // newFinanceSyncTestAPIWithToken is newFinanceSyncTestAPI with an explicit configured
 // ack token, so a test can exercise the fail-closed (empty token) path.
 func newFinanceSyncTestAPIWithToken(t *testing.T, ackToken string) (humatest.TestAPI, *auth.Service, *ent.Client) {
+	return newFinanceSyncTestAPIWith(t, ackToken, nil)
+}
+
+// newFinanceSyncTestAPIWithNotifier wires a stub notifier in, so the start/finish
+// reporting is observable. A nil notifier leaves Deps.Notifier nil, which is the
+// unconfigured shape every other test runs under.
+func newFinanceSyncTestAPIWithNotifier(t *testing.T, n *stubNotifier) (humatest.TestAPI, *auth.Service, *ent.Client) {
+	return newFinanceSyncTestAPIWith(t, testAckToken, n)
+}
+
+func newFinanceSyncTestAPIWith(t *testing.T, ackToken string, n *stubNotifier) (humatest.TestAPI, *auth.Service, *ent.Client) {
 	t.Helper()
 	dsn := "file:" + strings.ReplaceAll(t.Name(), "/", "_") + "?mode=memory&cache=shared&_pragma=foreign_keys(1)"
 	db, err := sql.Open("sqlite", dsn)
@@ -49,13 +60,19 @@ func newFinanceSyncTestAPIWithToken(t *testing.T, ackToken string) (humatest.Tes
 	svc := auth.New(client, auth.Config{})
 	_, api := humatest.New(t)
 	api.UseMiddleware(svc.Middleware)
-	h := New(Deps{
+	deps := Deps{
 		Auth:                   svc,
 		Ent:                    client,
 		FinanceSyncAckToken:    ackToken,
 		FinanceBackfillYears:   8,
 		FinanceSyncOverlapDays: 7,
-	})
+	}
+	// A typed nil in the interface field would defeat the handler's nil check, so only
+	// assign when there is a real stub.
+	if n != nil {
+		deps.Notifier = n
+	}
+	h := New(deps)
 	h.registerFinanceSync(api)
 	return api, svc, client
 }
@@ -394,5 +411,132 @@ func TestFinanceSyncComplete_Failed(t *testing.T) {
 	}
 	if after := client.JobRun.GetX(ctx, run.ID); after.Status != jobrun.StatusFailed {
 		t.Errorf("status = %q, want failed", after.Status)
+	}
+}
+
+// --- start/finish reporting -------------------------------------------------
+//
+// The approval prompt used to be the only message the system ever sent, so every way
+// a run could go wrong after approval was invisible. These cover the two ends the
+// runner itself reports; the sweeps that close a run nobody reported are covered in
+// internal/jobs.
+
+// TestFinanceSyncClaim_NotifiesStarted: leasing a run announces it, and does so only
+// on a real lease -- a poll that finds nothing claimable must stay silent, or an
+// all-day polling runner would push a notification every tick.
+func TestFinanceSyncClaim_NotifiesStarted(t *testing.T) {
+	n := &stubNotifier{}
+	api, svc, client := newFinanceSyncTestAPIWithNotifier(t, n)
+	ctx := context.Background()
+	raw := mintToken(t, ctx, svc, client, "home-finance", []string{"finance.sync"})
+
+	// Nothing claimable yet: silent.
+	if resp := api.Get("/api/finance/sync/claim", bearer(raw)); resp.Code != http.StatusOK {
+		t.Fatalf("claim with no run = %d, want 200", resp.Code)
+	}
+	if len(n.started) != 0 {
+		t.Fatalf("empty claim notified %v, want silence", n.started)
+	}
+
+	now := time.Now()
+	run := seedFinanceRun(t, ctx, client, jobrun.StatusAwaitingAck, &now)
+	if resp := api.Get("/api/finance/sync/claim", bearer(raw)); resp.Code != http.StatusOK {
+		t.Fatalf("claim = %d, want 200", resp.Code)
+	}
+	if len(n.started) != 1 || n.started[0] != run.ID {
+		t.Fatalf("started notifications = %v, want [%d]", n.started, run.ID)
+	}
+	if len(n.finished) != 0 {
+		t.Errorf("claim sent a finished notification %v, want none", n.finished)
+	}
+}
+
+// TestFinanceSyncComplete_NotifiesOutcome: both outcomes are reported, the failure
+// reason rides along and is stored, and an idempotent re-complete does NOT notify
+// twice (a retrying runner must not double-push).
+func TestFinanceSyncComplete_NotifiesOutcome(t *testing.T) {
+	n := &stubNotifier{}
+	api, svc, client := newFinanceSyncTestAPIWithNotifier(t, n)
+	ctx := context.Background()
+	raw := mintToken(t, ctx, svc, client, "home-finance", []string{"finance.sync"})
+
+	ok := seedFinanceRun(t, ctx, client, jobrun.StatusRunning, nil)
+	if resp := api.Post("/api/finance/sync/complete",
+		map[string]any{"run_id": ok.ID, "status": "succeeded"}, bearer(raw)); resp.Code != http.StatusOK {
+		t.Fatalf("complete succeeded = %d, want 200", resp.Code)
+	}
+	// Re-complete: idempotent, and must not produce a second notification.
+	if resp := api.Post("/api/finance/sync/complete",
+		map[string]any{"run_id": ok.ID, "status": "succeeded"}, bearer(raw)); resp.Code != http.StatusOK {
+		t.Fatalf("re-complete = %d, want 200", resp.Code)
+	}
+
+	bad := seedFinanceRun(t, ctx, client, jobrun.StatusRunning, nil)
+	const reason = "every claimed account failed to sync (no rows ingested)"
+	if resp := api.Post("/api/finance/sync/complete",
+		map[string]any{"run_id": bad.ID, "status": "failed", "error": reason}, bearer(raw)); resp.Code != http.StatusOK {
+		t.Fatalf("complete failed = %d, want 200", resp.Code)
+	}
+
+	if len(n.finished) != 2 {
+		t.Fatalf("finished notifications = %d (%v), want 2 (re-complete must not re-notify)", len(n.finished), n.finished)
+	}
+	if got := n.finished[0]; got.runID != ok.ID || got.status != "succeeded" || got.detail != "" {
+		t.Errorf("success notification = %+v, want run %d succeeded with no detail", got, ok.ID)
+	}
+	if got := n.finished[1]; got.runID != bad.ID || got.status != "failed" || got.detail != reason {
+		t.Errorf("failure notification = %+v, want run %d failed with the reason", got, bad.ID)
+	}
+	// The reason is persisted too, so the admin console shows it, not a blank failure.
+	if after := client.JobRun.GetX(ctx, bad.ID); after.Error != reason {
+		t.Errorf("stored error = %q, want %q", after.Error, reason)
+	}
+	// A success must not carry an error string even if one is sent.
+	if after := client.JobRun.GetX(ctx, ok.ID); after.Error != "" {
+		t.Errorf("succeeded run stored error %q, want empty", after.Error)
+	}
+}
+
+// TestFinanceSyncNotifyFailureIsNonFatal: losing the message must never lose the sync,
+// so a notifier that errors still leaves claim and complete succeeding and the run in
+// its correct state.
+func TestFinanceSyncNotifyFailureIsNonFatal(t *testing.T) {
+	n := &stubNotifier{fail: true}
+	api, svc, client := newFinanceSyncTestAPIWithNotifier(t, n)
+	ctx := context.Background()
+	raw := mintToken(t, ctx, svc, client, "home-finance", []string{"finance.sync"})
+	now := time.Now()
+	run := seedFinanceRun(t, ctx, client, jobrun.StatusAwaitingAck, &now)
+
+	if resp := api.Get("/api/finance/sync/claim", bearer(raw)); resp.Code != http.StatusOK {
+		t.Fatalf("claim with failing notifier = %d, want 200", resp.Code)
+	}
+	if after := client.JobRun.GetX(ctx, run.ID); after.Status != jobrun.StatusRunning {
+		t.Errorf("status after claim = %q, want running (the lease must survive a notify error)", after.Status)
+	}
+	if resp := api.Post("/api/finance/sync/complete",
+		map[string]any{"run_id": run.ID, "status": "succeeded"}, bearer(raw)); resp.Code != http.StatusOK {
+		t.Fatalf("complete with failing notifier = %d, want 200", resp.Code)
+	}
+	if after := client.JobRun.GetX(ctx, run.ID); after.Status != jobrun.StatusSucceeded {
+		t.Errorf("status after complete = %q, want succeeded", after.Status)
+	}
+}
+
+// TestFinanceSyncNilNotifierTolerated: the unconfigured shape (no ntfy wired) must
+// still claim and complete, not nil-panic.
+func TestFinanceSyncNilNotifierTolerated(t *testing.T) {
+	api, svc, client := newFinanceSyncTestAPI(t) // Deps.Notifier stays nil
+	ctx := context.Background()
+	raw := mintToken(t, ctx, svc, client, "home-finance", []string{"finance.sync"})
+	now := time.Now()
+	run := seedFinanceRun(t, ctx, client, jobrun.StatusAwaitingAck, &now)
+
+	if resp := api.Get("/api/finance/sync/claim", bearer(raw)); resp.Code != http.StatusOK {
+		t.Fatalf("claim with nil notifier = %d, want 200", resp.Code)
+	}
+	if resp := api.Post("/api/finance/sync/complete",
+		map[string]any{"run_id": run.ID, "status": "failed", "error": "boom"}, bearer(raw)); resp.Code != http.StatusOK {
+		t.Fatalf("complete with nil notifier = %d, want 200", resp.Code)
 	}
 }

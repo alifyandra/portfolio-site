@@ -1,7 +1,13 @@
-// Package notify sends the finance refresh-handshake notification (ADR 0016). A
-// scheduled finance sync pauses in awaiting_ack until a human approves the refresh;
-// this package delivers that prompt as an ntfy message carrying an action button
-// that calls the ack endpoint.
+// Package notify sends the finance sync's ntfy messages (ADR 0016). A scheduled
+// finance sync pauses in awaiting_ack until a human approves the refresh; this
+// package delivers that prompt as a message carrying an action button that calls the
+// ack endpoint, and then reports the run's start and its terminal outcome.
+//
+// The approval prompt was once the only message the system ever sent, which meant
+// every way a run could go wrong after approval was silent: a run nobody claimed, a
+// runner that died mid-scrape, a sync that reported failure. Since the broker became
+// unattended nobody is watching the logs either, so start/finish reporting is what
+// makes a broken night visible rather than showing up as a stale dashboard weeks on.
 //
 // It follows the SES/Spotify/queue graceful-degradation precedent: when the ntfy
 // base URL or topic is unconfigured the client logs and returns nil (no error), so
@@ -83,12 +89,23 @@ func (c *Client) Configured() bool {
 }
 
 // ntfyMessage is the JSON publish body ntfy accepts when POSTed to the server base.
+// Priority is ntfy's 1..5 (3 = default); omitted when zero. Tags render as emoji.
 type ntfyMessage struct {
-	Topic   string       `json:"topic"`
-	Title   string       `json:"title"`
-	Message string       `json:"message"`
-	Actions []ntfyAction `json:"actions,omitempty"`
+	Topic    string       `json:"topic"`
+	Title    string       `json:"title"`
+	Message  string       `json:"message"`
+	Priority int          `json:"priority,omitempty"`
+	Tags     []string     `json:"tags,omitempty"`
+	Actions  []ntfyAction `json:"actions,omitempty"`
 }
+
+// ntfy priorities used here. A failed sync is the only one worth interrupting for;
+// a start is deliberately quiet so the daily pair does not become noise to ignore.
+const (
+	prioLow     = 2
+	prioDefault = 3
+	prioHigh    = 4
+)
 
 // ntfyAction is one notification action button. "http" makes ntfy issue the request
 // when the button is tapped.
@@ -139,6 +156,86 @@ func (c *Client) NotifyRefresh(ctx context.Context, runID int, jobName string) e
 		}}
 	}
 
+	if err := c.post(ctx, msg); err != nil {
+		return err
+	}
+	c.log.Info("notify: sent refresh notification", "run", runID, "topic", c.cfg.Topic)
+	return nil
+}
+
+// NotifyRunStarted announces that a runner claimed an ack-gated run and is now
+// working. Together with NotifyRunFinished this closes the gap left by the approval
+// prompt being the only message the system ever sent: an approved run that never
+// started, or started and never came back, used to be indistinguishable from a
+// healthy one. Low priority on purpose — it is the finish that carries the news.
+func (c *Client) NotifyRunStarted(ctx context.Context, runID int, jobName, runner string) error {
+	if !c.Configured() {
+		c.log.Info("notify: not configured; skipping run-started notification", "run", runID)
+		return nil
+	}
+	label := jobName
+	if label == "" {
+		label = "Finance sync"
+	}
+	msg := "Run " + strconv.Itoa(runID) + " claimed and started."
+	if runner != "" {
+		msg += " Runner: " + runner + "."
+	}
+	if err := c.post(ctx, ntfyMessage{
+		Topic:    c.cfg.Topic,
+		Title:    label + ": started",
+		Message:  msg,
+		Priority: prioLow,
+		Tags:     []string{"hourglass_flowing_sand"},
+	}); err != nil {
+		return err
+	}
+	c.log.Info("notify: sent run-started notification", "run", runID, "topic", c.cfg.Topic)
+	return nil
+}
+
+// NotifyRunFinished announces a terminal outcome for an ack-gated run. status is the
+// JobRun status ("succeeded", "failed", "cancelled"); detail is the run's error text
+// where there is one, and is included verbatim so a failure says WHY without a trip
+// to the admin console. Only a failure raises the priority.
+func (c *Client) NotifyRunFinished(ctx context.Context, runID int, jobName, status, detail string) error {
+	if !c.Configured() {
+		c.log.Info("notify: not configured; skipping run-finished notification", "run", runID, "status", status)
+		return nil
+	}
+	label := jobName
+	if label == "" {
+		label = "Finance sync"
+	}
+
+	title, tag, prio := label+": "+status, "white_check_mark", prioDefault
+	switch status {
+	case "failed":
+		tag, prio = "rotating_light", prioHigh
+	case "cancelled":
+		tag, prio = "no_bell", prioDefault
+	}
+
+	msg := "Run " + strconv.Itoa(runID) + " finished: " + status + "."
+	if detail != "" {
+		msg += "\n" + detail
+	}
+	if err := c.post(ctx, ntfyMessage{
+		Topic:    c.cfg.Topic,
+		Title:    title,
+		Message:  msg,
+		Priority: prio,
+		Tags:     []string{tag},
+	}); err != nil {
+		return err
+	}
+	c.log.Info("notify: sent run-finished notification", "run", runID, "status", status, "topic", c.cfg.Topic)
+	return nil
+}
+
+// post marshals and publishes one message to ntfy. Shared by every Notify* method so
+// they cannot drift on transport, headers or error shape.
+func (c *Client) post(ctx context.Context, msg ntfyMessage) error {
 	body, err := json.Marshal(msg)
 	if err != nil {
 		return fmt.Errorf("notify: marshal message: %w", err)
@@ -157,6 +254,5 @@ func (c *Client) NotifyRefresh(ctx context.Context, runID int, jobName string) e
 	if resp.StatusCode >= 300 {
 		return fmt.Errorf("notify: ntfy returned status %d", resp.StatusCode)
 	}
-	c.log.Info("notify: sent refresh notification", "run", runID, "topic", c.cfg.Topic)
 	return nil
 }

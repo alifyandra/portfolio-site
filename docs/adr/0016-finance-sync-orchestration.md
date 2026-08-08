@@ -139,3 +139,55 @@ enqueue cannot auto-fail a run via errNoHandler. Its runner is `local`/`any`.
 5. **(separate, private repo)** teach the source runner to poll `claim`, honor the
    returned windows, and call `complete` (currently a manual one-off). Tracked outside
    this repo.
+
+## Amendment (2026-08-08): report the run's start and its outcome, not just the prompt
+
+**Context that changed.** This ADR shipped with exactly one notification: the
+approval prompt at fire time. That was sufficient while the runner was driven by hand
+and watched, but the home box now runs `--sync` unattended from a systemd timer, so
+nobody sees the logs. Every way a run could go wrong past approval was silent by
+construction:
+
+| Failure | Terminal state | Who decided it | Notification |
+|---|---|---|---|
+| Runner reports `failed` | `failed`, blank reason | `/sync/complete` | none |
+| Approved, never claimed | `cancelled` at +12h | `expireAwaitingAck` | none, log only |
+| Never approved | `cancelled` at +12h | `expireAwaitingAck` | none, log only |
+| Claimed, runner died | `failed` at +4h | `reapRunning` bucket b | none, log only |
+| Data goes stale | n/a | n/a | none, passive "as of" |
+
+A sync could fail every night for weeks and the only evidence would be a stale
+timestamp on the dashboard.
+
+**Decision.** `notify.Client` gains `NotifyRunStarted` and `NotifyRunFinished`
+alongside `NotifyRefresh`, and both `notifier` interfaces (API and scheduler) carry
+all three. A run is announced when it is claimed and again when it reaches a terminal
+state, whoever decided that state:
+
+- **claim** notifies after the transaction commits, so a rolled-back or lost-race
+  claim never announces a lease that does not exist. A poll that finds nothing stays
+  silent, which matters because the runner polls all day.
+- **complete** notifies only on the real transition; the idempotent re-complete path
+  returns before it, so a retrying runner cannot double-push.
+- **the sweeps** notify per swept run. This is the substantive part: they are the only
+  place those outcomes are ever decided, because no runner is left to report them.
+
+`/sync/complete` also accepts an optional `error`, stored on the run and carried
+(truncated) in the failure message, so a failure says why rather than arriving blank —
+the runner already had the reason and was throwing it away. It is optional on the
+wire, so an older runner stays compatible.
+
+**Consequences.**
+
+- Two extra messages on a healthy night. The start is deliberately low priority and
+  only a failure raises it, so the pair does not become noise to ignore.
+- Every notification is best-effort: failures are logged and never fail the run or
+  abandon a sweep. Losing a message must not lose a sync, and must not leave a job
+  blocked for its next tick.
+- The sweeps moved from one bulk `UPDATE` to a row-at-a-time write, because a message
+  has to name the run it is about and a bulk update yields only a count. Each write
+  re-asserts the source status, so a run that finished on its own in the gap is
+  neither overwritten nor reported. The matching set is normally empty.
+- Still unaddressed, and deliberately: there is no staleness alert independent of job
+  runs, and nothing notifies when the ntfy POST itself fails, so a dead ntfy is still
+  a silent failure. Both need a channel that does not depend on ntfy being up.

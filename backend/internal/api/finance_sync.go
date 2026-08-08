@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"crypto/subtle"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -72,7 +73,27 @@ type financeCompleteInput struct {
 		// requireBearer.
 		RunID  int    `json:"run_id,omitempty" doc:"the run returned by /claim, to close"`
 		Status string `json:"status,omitempty" enum:"succeeded,failed" doc:"terminal outcome of the sync"`
+		// Error is optional and only meaningful with status=failed. It is stored on the
+		// run verbatim and, truncated, carried in the failure notification, so a broken
+		// night says WHY without a trip to the admin console. Deliberately uncapped
+		// here: JobRun.error is a Text column chosen so it can hold a multi-KB API error
+		// body, and this endpoint is bearer-gated to the finance runner.
+		Error string `json:"error,omitempty" doc:"why the sync failed; ignored when status is succeeded"`
 	}
+}
+
+// notifyDetailMaxRunes bounds how much of a failure reason rides in the push message.
+// The column takes multi-KB bodies on purpose; a phone notification should not.
+const notifyDetailMaxRunes = 300
+
+// truncateRunes cuts s to at most n runes, appending an ellipsis when it cut. Counts
+// runes, not bytes, so a multibyte reason is not sliced mid-character.
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
 }
 
 type financeCompleteOutput struct {
@@ -141,6 +162,7 @@ func (h *Handler) claimFinanceSync(ctx context.Context, in *financeClaimInput) (
 			jobrun.StatusEQ(jobrun.StatusAwaitingAck),
 			jobrun.ClaimableAtNotNil(),
 		).
+		WithJob(). // for the start notification's job label
 		Order(ent.Asc(jobrun.FieldClaimableAt), ent.Asc(jobrun.FieldID)).
 		First(ctx)
 	if ent.IsNotFound(err) {
@@ -203,10 +225,45 @@ func (h *Handler) claimFinanceSync(ctx context.Context, in *financeClaimInput) (
 		return nil, huma.Error500InternalServerError("failed to commit claim", err)
 	}
 
+	// Announce the start only AFTER the commit, so a rolled-back claim never reports a
+	// run that is not actually leased. Best-effort: a failed notification is logged and
+	// the claim still succeeds — the runner has the work either way.
+	h.notifyRunStarted(ctx, run.ID, run.Edges.Job, id.Runner)
+
 	out.Body.Claimed = true
 	out.Body.RunID = run.ID
 	out.Body.Windows = windows
 	return out, nil
+}
+
+// jobDisplayName is the human label for a run's job, falling back to the finance sync
+// when the edge was not loaded.
+func jobDisplayName(job *ent.ScheduledJob) string {
+	if job == nil || job.Name == "" {
+		return "Finance sync"
+	}
+	return job.Name
+}
+
+// notifyRunStarted and notifyRunFinished wrap the notifier with the nil check and the
+// log-and-continue policy, so no call site can accidentally make a notification
+// failure fail a sync.
+func (h *Handler) notifyRunStarted(ctx context.Context, runID int, job *ent.ScheduledJob, runner string) {
+	if h.deps.Notifier == nil {
+		return
+	}
+	if err := h.deps.Notifier.NotifyRunStarted(ctx, runID, jobDisplayName(job), runner); err != nil {
+		slog.WarnContext(ctx, "finance sync: run-started notification failed", "run", runID, "err", err)
+	}
+}
+
+func (h *Handler) notifyRunFinished(ctx context.Context, runID int, job *ent.ScheduledJob, status, detail string) {
+	if h.deps.Notifier == nil {
+		return
+	}
+	if err := h.deps.Notifier.NotifyRunFinished(ctx, runID, jobDisplayName(job), status, detail); err != nil {
+		slog.WarnContext(ctx, "finance sync: run-finished notification failed", "run", runID, "status", status, "err", err)
+	}
 }
 
 // ackFinanceSync approves a scheduled refresh, flipping a run awaiting_ack ->
@@ -310,13 +367,26 @@ func (h *Handler) completeFinanceSync(ctx context.Context, in *financeCompleteIn
 		return nil, huma.Error409Conflict("run is not in a completable state (only a claimed, running run can be completed)")
 	}
 
-	if err := h.deps.Ent.JobRun.UpdateOneID(run.ID).
+	// A reason is recorded only for a failure; carrying one on a success would leave a
+	// misleading error string on a run that went fine.
+	reason := ""
+	if target == jobrun.StatusFailed {
+		reason = strings.TrimSpace(in.Body.Error)
+	}
+	upd := h.deps.Ent.JobRun.UpdateOneID(run.ID).
 		SetStatus(target).
 		SetFinishedAt(time.Now()).
-		SetRunner(id.Runner).
-		Exec(ctx); err != nil {
+		SetRunner(id.Runner)
+	if reason != "" {
+		upd = upd.SetError(reason)
+	}
+	if err := upd.Exec(ctx); err != nil {
 		return nil, huma.Error500InternalServerError("failed to close run", err)
 	}
+
+	// Report the outcome. Only on the real transition — the idempotent re-complete path
+	// returned earlier, so a retrying runner cannot produce duplicate pushes.
+	h.notifyRunFinished(ctx, run.ID, run.Edges.Job, string(target), truncateRunes(reason, notifyDetailMaxRunes))
 
 	out.Body.Done = true
 	return out, nil

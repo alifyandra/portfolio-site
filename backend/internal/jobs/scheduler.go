@@ -74,13 +74,20 @@ type enqueuer interface {
 	Configured() bool
 }
 
-// notifier sends the refresh-handshake notification for an ack-gated run (ADR 0016)
-// after that run is committed in awaiting_ack. *notify.Client satisfies it (and
-// no-ops gracefully when unconfigured); a nil notifier is tolerated (tests, or a
+// notifier sends the ack-gated run's ntfy messages (ADR 0016): the refresh-handshake
+// prompt after a run is committed in awaiting_ack, and the terminal report when a
+// sweep here closes a run the runner never closed itself. *notify.Client satisfies it
+// (and no-ops gracefully when unconfigured); a nil notifier is tolerated (tests, or a
 // worker built without one) — the run still sits awaiting_ack and can be acked
 // directly.
+//
+// The sweeps are the only place some outcomes are ever decided: a runner that claimed
+// and died, or an approval that never came. Without a message here those stay silent
+// by construction, since no runner is left to report them.
 type notifier interface {
 	NotifyRefresh(ctx context.Context, runID int, jobName string) error
+	NotifyRunStarted(ctx context.Context, runID int, jobName, runner string) error
+	NotifyRunFinished(ctx context.Context, runID int, jobName, status, detail string) error
 }
 
 // Scheduler is the ticker that drives ScheduledJob rows. Construct it with
@@ -432,21 +439,64 @@ func (s *Scheduler) reapRunning(ctx context.Context, now time.Time) {
 		return
 	}
 	ackCutoff := now.Add(-ackGatedRunningLease)
-	an, aerr := s.ent.JobRun.Update().
+	stuck, aerr := s.ent.JobRun.Query().
 		Where(
 			jobrun.StatusEQ(jobrun.StatusRunning),
 			jobrun.StartedAtLT(ackCutoff),
 			jobrun.HasJobWith(scheduledjob.KeyIn(keys...)),
 		).
-		SetStatus(jobrun.StatusFailed).
-		SetError("reaped: ack-gated run exceeded extended running lease").
-		SetFinishedAt(now).
-		Save(ctx)
+		WithJob(). // for the notification's job label
+		All(ctx)
 	if aerr != nil {
 		s.log.Error("scheduler: reap ack-gated running", "err", aerr)
-	} else if an > 0 {
+		return
+	}
+	if an := s.closeStuck(ctx, stuck, jobrun.StatusRunning, jobrun.StatusFailed,
+		"reaped: ack-gated run exceeded extended running lease", now); an > 0 {
 		s.log.Warn("scheduler: reaped stuck ack-gated running runs", "count", an)
 	}
+}
+
+// closeStuck moves each run from -> to with reason, one row at a time, and reports the
+// outcome for each one it actually changed.
+//
+// Row-at-a-time rather than one bulk UPDATE because a notification has to name the run
+// it is about, and a bulk update yields only a count. Each write re-asserts the source
+// status, so a run that reached a terminal state on its own in the gap between the
+// query and the write is skipped — it is neither overwritten nor reported, which is the
+// property that keeps a runner finishing at the lease boundary from being told it
+// failed. The matching set is normally empty and never more than a handful.
+func (s *Scheduler) closeStuck(ctx context.Context, runs []*ent.JobRun, from, to jobrun.Status, reason string, now time.Time) int {
+	closed := 0
+	for _, r := range runs {
+		n, err := s.ent.JobRun.Update().
+			Where(jobrun.IDEQ(r.ID), jobrun.StatusEQ(from)).
+			SetStatus(to).
+			SetError(reason).
+			SetFinishedAt(now).
+			Save(ctx)
+		if err != nil {
+			s.log.Error("scheduler: close stuck run", "run", r.ID, "to", to, "err", err)
+			continue
+		}
+		if n == 0 {
+			continue // it finished on its own between the query and here
+		}
+		closed++
+		if s.notify == nil {
+			continue
+		}
+		name := ""
+		if r.Edges.Job != nil {
+			name = r.Edges.Job.Name
+		}
+		// Best-effort, exactly as on the fire path: losing the message must not stop
+		// the sweep, which is what keeps the job unblocked for its next tick.
+		if err := s.notify.NotifyRunFinished(ctx, r.ID, name, string(to), reason); err != nil {
+			s.log.Warn("scheduler: run-finished notification failed", "run", r.ID, "err", err)
+		}
+	}
+	return closed
 }
 
 // expireAwaitingAck expires ack-gated runs (ADR 0016) left `awaiting_ack` past
@@ -467,21 +517,24 @@ func (s *Scheduler) expireAwaitingAck(ctx context.Context, now time.Time) {
 		return
 	}
 	cutoff := now.Add(-awaitingAckTTL)
-	n, err := s.ent.JobRun.Update().
+	expired, err := s.ent.JobRun.Query().
 		Where(
 			jobrun.StatusEQ(jobrun.StatusAwaitingAck),
 			jobrun.CreatedAtLT(cutoff),
 			jobrun.HasJobWith(scheduledjob.KeyIn(keys...)),
 		).
-		SetStatus(jobrun.StatusCancelled).
-		SetError("expired: awaiting approval past TTL").
-		SetFinishedAt(now).
-		Save(ctx)
+		WithJob(). // for the notification's job label
+		All(ctx)
 	if err != nil {
 		s.log.Error("scheduler: expire awaiting-ack", "err", err)
 		return
 	}
-	if n > 0 {
+	// Reported, not silent: an expiry means the day's refresh did not happen at all,
+	// which looks identical to a healthy day from the outside. The message is what
+	// distinguishes "I chose not to approve" from "I never saw the prompt" — the
+	// second is the failure mode that hides a dead ntfy or a missed push.
+	if n := s.closeStuck(ctx, expired, jobrun.StatusAwaitingAck, jobrun.StatusCancelled,
+		"expired: awaiting approval past TTL", now); n > 0 {
 		s.log.Warn("scheduler: expired unapproved awaiting-ack runs", "count", n)
 	}
 }
