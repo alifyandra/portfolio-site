@@ -90,6 +90,15 @@ locals {
     "FRIEND_EMAILS",
     "WA_SIDECAR_SECRET", # backend<->sidecar shared bearer secret (see whatsapp.tf)
     "ANTHROPIC_API_KEY", # digest LLM key: injected into the Fargate task (submit) and on the box .env for the worker's inline digest.collect (ADR 13 Batch API amendment)
+    # Finance sync push notifications (ADR 16). The topic is effectively a bearer
+    # capability on ntfy (anyone holding it can read and post), so it is a secret
+    # slot rather than env_config even though the base URL alone is not sensitive.
+    # These three predate their codification: they were hand-seeded, so adopt them
+    # with `terraform import` before the first apply. See README, "Adopting a
+    # hand-seeded parameter".
+    "NTFY_BASE_URL",
+    "NTFY_TOPIC",
+    "FINANCE_SYNC_ACK_TOKEN", # gates POST /api/finance/sync/ack
   ]
 }
 

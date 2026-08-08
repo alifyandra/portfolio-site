@@ -142,6 +142,31 @@ gated `apply` on merge to main. App image deploys stay on the separate
   ```
 - CI runs `terraform fmt -check` and `validate` on every PR.
 
+### Adopting a hand-seeded parameter
+
+Most secret slots are declared here first and seeded afterwards, so Terraform
+creates them empty and nothing is at risk. A parameter that was seeded by hand
+*before* it was codified is the opposite case, and needs one extra step.
+
+`lifecycle { ignore_changes = [value] }` suppresses drift on a resource that is
+already in state. It does nothing at create time, so adding the name to
+`env_secrets` and applying would try to create a parameter that already holds a
+live value. Depending on the provider's create semantics that either fails with
+`ParameterAlreadyExists` or writes `CHANGE_ME` over the working value. Neither is
+worth finding out on a parameter something in prod depends on.
+
+Import each one first, then confirm the plan is clean before applying:
+
+```bash
+cd deploy/terraform
+terraform import 'aws_ssm_parameter.secret["NTFY_TOPIC"]' /portfolio/env/NTFY_TOPIC
+terraform plan   # must report no changes for that resource
+```
+
+If the plan after import wants to change the value, stop: the import did not take
+and applying would overwrite the real value. `NTFY_BASE_URL`, `NTFY_TOPIC` and
+`FINANCE_SYNC_ACK_TOKEN` were adopted this way.
+
 ## Cloudflare proxy cutover (origin lock)
 
 Putting `api.<domain>` behind the Cloudflare proxy and locking the origin to

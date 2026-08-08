@@ -133,9 +133,15 @@ enqueue cannot auto-fail a run via errNoHandler. Its runner is `local`/`any`.
    fail-closed, `complete` state-guarded) with `finance.sync` scope auth; handler + api
    tests; regen openapi.
 3. **(AFK) DONE** the ntfy client + config + graceful no-op; wired into the fire path.
-4. **(HITL, needs Alif)** create the `finance.sync` schedule row in /admin, set the
+4. **(HITL) DONE** create the `finance.sync` schedule row in /admin, set the
    ntfy topic + ack token in SSM, and verify one end-to-end refresh (notification ->
-   ack -> claim -> ingest -> complete) against the live source.
+   ack -> claim -> ingest -> complete) against the live source. Verified end to end
+   from the home box on 2026-08-07. `NTFY_BASE_URL`, `NTFY_TOPIC` and
+   `FINANCE_SYNC_ACK_TOKEN` were seeded by hand at the time and are now declared in
+   `deploy/terraform/ssm.tf`, so a rebuilt host gets the slots without anyone
+   remembering they exist. The values stay out of this repo: they are SecureString
+   placeholders with `ignore_changes`, adopted via `terraform import` (see
+   `deploy/terraform/README.md`, "Adopting a hand-seeded parameter").
 5. **(separate, private repo)** teach the source runner to poll `claim`, honor the
    returned windows, and call `complete` (currently a manual one-off). Tracked outside
    this repo.
