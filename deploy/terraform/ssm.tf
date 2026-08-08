@@ -73,6 +73,13 @@ locals {
     DIGEST_MODEL             = var.digest_model
     DIGEST_MAX_TOKENS        = var.digest_max_tokens
     DIGEST_RESULT_PREFIX     = var.digest_result_prefix
+
+    # Finance sync push notifications (ADR 16). The host is the public ntfy
+    # service and carries nothing sensitive; the topic is what must not leak, so
+    # it is a secret slot below. A blank base URL or topic makes the notify
+    # client a no-op, which is why these are declared at all: a rebuilt host
+    # would otherwise come up with sync notifications silently disabled.
+    NTFY_BASE_URL = "https://ntfy.sh"
   }
 
   # Secret slots. Seeded with a placeholder, then pushed out-of-band.
@@ -90,13 +97,11 @@ locals {
     "FRIEND_EMAILS",
     "WA_SIDECAR_SECRET", # backend<->sidecar shared bearer secret (see whatsapp.tf)
     "ANTHROPIC_API_KEY", # digest LLM key: injected into the Fargate task (submit) and on the box .env for the worker's inline digest.collect (ADR 13 Batch API amendment)
-    # Finance sync push notifications (ADR 16). The topic is effectively a bearer
-    # capability on ntfy (anyone holding it can read and post), so it is a secret
-    # slot rather than env_config even though the base URL alone is not sensitive.
-    # These three predate their codification: they were hand-seeded, so adopt them
-    # with `terraform import` before the first apply. See README, "Adopting a
-    # hand-seeded parameter".
-    "NTFY_BASE_URL",
+    # Finance sync (ADR 16). The ntfy topic is effectively a bearer capability
+    # (anyone holding it can read the messages and post to them), so it stays out
+    # of this public repo; the base URL is not sensitive and sits in env_config.
+    # Both predate their codification: they were hand-seeded, so they are adopted
+    # with `terraform import`. See README, "Adopting a hand-seeded parameter".
     "NTFY_TOPIC",
     "FINANCE_SYNC_ACK_TOKEN", # gates POST /api/finance/sync/ack
   ]

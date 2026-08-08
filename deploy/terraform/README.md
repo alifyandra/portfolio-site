@@ -160,12 +160,30 @@ Import each one first, then confirm the plan is clean before applying:
 ```bash
 cd deploy/terraform
 terraform import 'aws_ssm_parameter.secret["NTFY_TOPIC"]' /portfolio/env/NTFY_TOPIC
-terraform plan   # must report no changes for that resource
+terraform plan -target='aws_ssm_parameter.secret["NTFY_TOPIC"]'
 ```
 
-If the plan after import wants to change the value, stop: the import did not take
-and applying would overwrite the real value. `NTFY_BASE_URL`, `NTFY_TOPIC` and
-`FINANCE_SYNC_ACK_TOKEN` were adopted this way.
+A clean adoption shows `0 to add` and, at most, the two default tags being
+applied. If it wants to change `value` or `type`, stop. A `type` diff means the
+slot was declared in the wrong list: check what the parameter actually is with
+`aws ssm describe-parameters` before assuming it is a SecureString.
+`NTFY_TOPIC` and `FINANCE_SYNC_ACK_TOKEN` were adopted this way, and
+`NTFY_BASE_URL` the same way into `env_config` (it is a plain `String` holding
+the public ntfy host).
+
+**Import puts state ahead of `main`.** Between the import and the config landing
+on `main`, state holds resources the committed config does not, so an apply from
+`main` plans to *destroy* them. That is a live SSM parameter something depends
+on. Land the config change first, or keep the window short and do not apply from
+`main` while it is open.
+
+Terraform cannot read the credentials `aws login` writes (it does not understand
+the `login_session` key and falls through to IMDS). Bridge them with
+`eval "$(aws configure export-credentials --format env)"`. The Cloudflare
+provider also refuses to configure without a credential even for an AWS-only
+state operation; real CF creds live in GitHub Secrets, so set a placeholder
+`CLOUDFLARE_API_TOKEN` for SSM-only work. Anything that genuinely called
+Cloudflare would then fail loudly rather than act.
 
 ## Cloudflare proxy cutover (origin lock)
 
