@@ -460,9 +460,13 @@ func TestFinanceSyncComplete_NotifiesOutcome(t *testing.T) {
 	ctx := context.Background()
 	raw := mintToken(t, ctx, svc, client, "home-finance", []string{"finance.sync"})
 
+	// The success deliberately sends an error too: a runner that reports success is
+	// not trusted to have cleared the field, so the handler must drop it rather than
+	// store or announce a reason on a run that worked.
 	ok := seedFinanceRun(t, ctx, client, jobrun.StatusRunning, nil)
 	if resp := api.Post("/api/finance/sync/complete",
-		map[string]any{"run_id": ok.ID, "status": "succeeded"}, bearer(raw)); resp.Code != http.StatusOK {
+		map[string]any{"run_id": ok.ID, "status": "succeeded", "error": "ignored on success"},
+		bearer(raw)); resp.Code != http.StatusOK {
 		t.Fatalf("complete succeeded = %d, want 200", resp.Code)
 	}
 	// Re-complete: idempotent, and must not produce a second notification.
