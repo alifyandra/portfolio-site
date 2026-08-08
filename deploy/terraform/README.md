@@ -142,6 +142,49 @@ gated `apply` on merge to main. App image deploys stay on the separate
   ```
 - CI runs `terraform fmt -check` and `validate` on every PR.
 
+### Adopting a hand-seeded parameter
+
+Most secret slots are declared here first and seeded afterwards, so Terraform
+creates them empty and nothing is at risk. A parameter that was seeded by hand
+*before* it was codified is the opposite case, and needs one extra step.
+
+`lifecycle { ignore_changes = [value] }` suppresses drift on a resource that is
+already in state. It does nothing at create time, so adding the name to
+`env_secrets` and applying would try to create a parameter that already holds a
+live value. Depending on the provider's create semantics that either fails with
+`ParameterAlreadyExists` or writes `CHANGE_ME` over the working value. Neither is
+worth finding out on a parameter something in prod depends on.
+
+Import each one first, then confirm the plan is clean before applying:
+
+```bash
+cd deploy/terraform
+terraform import 'aws_ssm_parameter.secret["NTFY_TOPIC"]' /portfolio/env/NTFY_TOPIC
+terraform plan -target='aws_ssm_parameter.secret["NTFY_TOPIC"]'
+```
+
+A clean adoption shows `0 to add` and, at most, the two default tags being
+applied. If it wants to change `value` or `type`, stop. A `type` diff means the
+slot was declared in the wrong list: check what the parameter actually is with
+`aws ssm describe-parameters` before assuming it is a SecureString.
+`NTFY_TOPIC` and `FINANCE_SYNC_ACK_TOKEN` were adopted this way, and
+`NTFY_BASE_URL` the same way into `env_config` (it is a plain `String` holding
+the public ntfy host).
+
+**Import puts state ahead of `main`.** Between the import and the config landing
+on `main`, state holds resources the committed config does not, so an apply from
+`main` plans to *destroy* them. That is a live SSM parameter something depends
+on. Land the config change first, or keep the window short and do not apply from
+`main` while it is open.
+
+Terraform cannot read the credentials `aws login` writes (it does not understand
+the `login_session` key and falls through to IMDS). Bridge them with
+`eval "$(aws configure export-credentials --format env)"`. The Cloudflare
+provider also refuses to configure without a credential even for an AWS-only
+state operation; real CF creds live in GitHub Secrets, so set a placeholder
+`CLOUDFLARE_API_TOKEN` for SSM-only work. Anything that genuinely called
+Cloudflare would then fail loudly rather than act.
+
 ## Cloudflare proxy cutover (origin lock)
 
 Putting `api.<domain>` behind the Cloudflare proxy and locking the origin to
