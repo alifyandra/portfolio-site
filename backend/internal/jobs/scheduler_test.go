@@ -55,11 +55,38 @@ func (s *stubQueue) Enqueue(_ context.Context, job queue.Job) error {
 	return nil
 }
 
-// stubNotifier records refresh notifications so the ack-gated fire path is
-// observable (and can be told to fail, to prove a notification error is non-fatal).
+// stubNotifier records notifications so the ack-gated fire path and the sweeps'
+// terminal reports are observable (and can be told to fail, to prove a notification
+// error is non-fatal).
 type stubNotifier struct {
-	fail  bool
-	calls []int // run ids notified
+	fail     bool
+	calls    []int              // run ids notified via NotifyRefresh
+	started  []int              // run ids notified via NotifyRunStarted
+	finished []stubFinishedCall // terminal reports, in order
+}
+
+// stubFinishedCall is one NotifyRunFinished call, kept whole so a test can assert the
+// status and reason reached the notification and not merely that something fired.
+type stubFinishedCall struct {
+	runID  int
+	status string
+	detail string
+}
+
+func (n *stubNotifier) NotifyRunStarted(_ context.Context, runID int, _, _ string) error {
+	n.started = append(n.started, runID)
+	if n.fail {
+		return errors.New("notify boom")
+	}
+	return nil
+}
+
+func (n *stubNotifier) NotifyRunFinished(_ context.Context, runID int, _, status, detail string) error {
+	n.finished = append(n.finished, stubFinishedCall{runID: runID, status: status, detail: detail})
+	if n.fail {
+		return errors.New("notify boom")
+	}
+	return nil
 }
 
 func (n *stubNotifier) NotifyRefresh(_ context.Context, runID int, _ string) error {
@@ -691,5 +718,115 @@ func TestTick_NonAckGatedUnaffectedByNotifier(t *testing.T) {
 	}
 	if len(n.calls) != 0 {
 		t.Errorf("notifier calls = %v, want none for a non-ack-gated kind", n.calls)
+	}
+}
+
+// TestTick_SweepsNotifyTerminalOutcome: the sweeps are the ONLY place these outcomes
+// are ever decided — no runner is left to report a run it died during, and nobody
+// reports an approval that never came — so each one must announce itself. Without this
+// a broker that dies mid-scrape looks exactly like a healthy night.
+func TestTick_SweepsNotifyTerminalOutcome(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	ackJob := seedJob(t, client, "finance.sync", false, nil) // disabled: never fires on its own
+	now := time.Now()
+
+	// A run the runner claimed and never closed, past the extended lease.
+	stuck := client.JobRun.Create().
+		SetStatus(jobrun.StatusRunning).
+		SetTrigger(jobrun.TriggerSchedule).
+		SetScheduledFor(now).
+		SetStartedAt(now.Add(-ackGatedRunningLease - time.Minute)).
+		SetJobID(ackJob.ID).
+		SaveX(ctx).ID
+	// A run nobody ever approved, past the TTL.
+	unapproved := client.JobRun.Create().
+		SetStatus(jobrun.StatusAwaitingAck).
+		SetTrigger(jobrun.TriggerSchedule).
+		SetScheduledFor(now.Add(-time.Second)).
+		SetCreatedAt(now.Add(-awaitingAckTTL - time.Minute)).
+		SetJobID(ackJob.ID).
+		SaveX(ctx).ID
+	// A healthy in-flight run must stay silent: reporting it would train the alert away.
+	healthy := client.JobRun.Create().
+		SetStatus(jobrun.StatusRunning).
+		SetTrigger(jobrun.TriggerSchedule).
+		SetScheduledFor(now.Add(-2 * time.Second)).
+		SetStartedAt(now.Add(-time.Minute)).
+		SetJobID(ackJob.ID).
+		SaveX(ctx).ID
+
+	n := &stubNotifier{}
+	s := NewScheduler(client, &stubQueue{configured: true}, time.Minute, nil, n)
+	s.tick(ctx, now)
+
+	byRun := map[int]stubFinishedCall{}
+	for _, c := range n.finished {
+		byRun[c.runID] = c
+	}
+	if len(n.finished) != 2 {
+		t.Fatalf("finished notifications = %d (%v), want exactly 2", len(n.finished), n.finished)
+	}
+	if got, ok := byRun[stuck]; !ok || got.status != "failed" || got.detail == "" {
+		t.Errorf("stuck run notification = %+v (present=%v), want failed with a reason", got, ok)
+	}
+	if got, ok := byRun[unapproved]; !ok || got.status != "cancelled" || got.detail == "" {
+		t.Errorf("unapproved run notification = %+v (present=%v), want cancelled with a reason", got, ok)
+	}
+	if _, ok := byRun[healthy]; ok {
+		t.Error("healthy in-flight run was notified about; only swept runs may report")
+	}
+	if got := client.JobRun.GetX(ctx, healthy).Status; got != jobrun.StatusRunning {
+		t.Errorf("healthy run status = %q, want it left running", got)
+	}
+}
+
+// TestTick_SweepNotifyFailureIsNonFatal: a notifier that errors must not stop the
+// sweep. The sweep is what unblocks the job for its next tick (a run left
+// running/awaiting_ack 409s the next fire), so abandoning it over a lost push would
+// turn a missed message into a stuck job.
+func TestTick_SweepNotifyFailureIsNonFatal(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	ackJob := seedJob(t, client, "finance.sync", false, nil)
+	now := time.Now()
+
+	stuck := client.JobRun.Create().
+		SetStatus(jobrun.StatusRunning).
+		SetTrigger(jobrun.TriggerSchedule).
+		SetScheduledFor(now).
+		SetStartedAt(now.Add(-ackGatedRunningLease - time.Minute)).
+		SetJobID(ackJob.ID).
+		SaveX(ctx).ID
+
+	s := NewScheduler(client, &stubQueue{configured: true}, time.Minute, nil, &stubNotifier{fail: true})
+	s.tick(ctx, now)
+
+	if got := client.JobRun.GetX(ctx, stuck).Status; got != jobrun.StatusFailed {
+		t.Errorf("status = %q, want failed (the sweep must complete despite a notify error)", got)
+	}
+}
+
+// TestTick_SweepsToleratesNilNotifier is the unconfigured shape: no ntfy wired at all
+// must still sweep, not nil-panic.
+func TestTick_SweepsToleratesNilNotifier(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	ackJob := seedJob(t, client, "finance.sync", false, nil)
+	now := time.Now()
+
+	stuck := client.JobRun.Create().
+		SetStatus(jobrun.StatusRunning).
+		SetTrigger(jobrun.TriggerSchedule).
+		SetScheduledFor(now).
+		SetStartedAt(now.Add(-ackGatedRunningLease - time.Minute)).
+		SetJobID(ackJob.ID).
+		SaveX(ctx).ID
+
+	s := NewScheduler(client, &stubQueue{configured: true}, time.Minute, nil, nil)
+	s.tick(ctx, now)
+
+	if got := client.JobRun.GetX(ctx, stuck).Status; got != jobrun.StatusFailed {
+		t.Errorf("status = %q, want failed", got)
 	}
 }

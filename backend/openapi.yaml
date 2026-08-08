@@ -1241,6 +1241,9 @@ components:
           format: uri
           readOnly: true
           type: string
+        error:
+          description: why the sync failed; ignored when status is succeeded
+          type: string
         run_id:
           description: the run returned by /claim, to close
           format: int64

@@ -364,15 +364,42 @@ func (s *stubEnqueuer) Enqueue(_ context.Context, j queue.Job) error {
 	return nil
 }
 
-// stubNotifier records the refresh notifications the ack-gated force-start path sends,
-// so the handshake is observable (and can be told to fail, to prove non-fatality).
+// stubNotifier records the notifications the finance sync path sends, so the handshake
+// and the start/finish reports are observable (and can be told to fail, to prove
+// non-fatality).
 type stubNotifier struct {
-	fail  bool
-	calls []int // run ids notified
+	fail     bool
+	calls    []int              // run ids notified via NotifyRefresh
+	started  []int              // run ids notified via NotifyRunStarted
+	finished []stubFinishedCall // terminal reports, in order
+}
+
+// stubFinishedCall is one NotifyRunFinished call, kept whole so a test can assert the
+// status and the reason reached the notification and not just that something fired.
+type stubFinishedCall struct {
+	runID  int
+	status string
+	detail string
 }
 
 func (n *stubNotifier) NotifyRefresh(_ context.Context, runID int, _ string) error {
 	n.calls = append(n.calls, runID)
+	if n.fail {
+		return fmt.Errorf("notify boom")
+	}
+	return nil
+}
+
+func (n *stubNotifier) NotifyRunStarted(_ context.Context, runID int, _, _ string) error {
+	n.started = append(n.started, runID)
+	if n.fail {
+		return fmt.Errorf("notify boom")
+	}
+	return nil
+}
+
+func (n *stubNotifier) NotifyRunFinished(_ context.Context, runID int, _, status, detail string) error {
+	n.finished = append(n.finished, stubFinishedCall{runID: runID, status: status, detail: detail})
 	if n.fail {
 		return fmt.Errorf("notify boom")
 	}
