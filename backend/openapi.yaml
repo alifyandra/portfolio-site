@@ -1553,6 +1553,67 @@ components:
         - description
         - merchant
       type: object
+    FinanceProjectionOutputBody:
+      additionalProperties: false
+      properties:
+        $schema:
+          description: A URL to the JSON Schema for this object.
+          examples:
+            - https://example.com/schemas/FinanceProjectionOutputBody.json
+          format: uri
+          readOnly: true
+          type: string
+        accounts:
+          description: One line per account, name-ordered
+          items:
+            $ref: "#/components/schemas/ProjectionAccountDTO"
+          type:
+            - array
+            - "null"
+        events:
+          description: Every flow applied, oldest first
+          items:
+            $ref: "#/components/schemas/ProjectionEventDTO"
+          type:
+            - array
+            - "null"
+        excluded:
+          description: Declarations the walk left out
+          items:
+            $ref: "#/components/schemas/ProjectionExclusionDTO"
+          type:
+            - array
+            - "null"
+        horizon_days:
+          format: int64
+          type: integer
+        horizon_end:
+          description: YYYY-MM-DD, today plus horizon_days; the last day any flow is applied
+          type: string
+        include_wishlist:
+          type: boolean
+        net_worth:
+          $ref: "#/components/schemas/ProjectionNetWorthDTO"
+        step:
+          enum:
+            - day
+            - week
+            - month
+          type: string
+        today:
+          description: YYYY-MM-DD the horizon counts from, on the Melbourne calendar
+          type: string
+      required:
+        - today
+        - horizon_end
+        - horizon_days
+        - step
+        - include_wishlist
+        - accounts
+        - net_worth
+        - events
+        - excluded
+      type: object
     FinanceSuggestionDTO:
       additionalProperties: false
       properties:
@@ -2947,6 +3008,190 @@ components:
         - tags
         - image_keys
         - featured
+      type: object
+    ProjectionAccountDTO:
+      additionalProperties: false
+      properties:
+        account_id:
+          format: int64
+          type: integer
+        account_name:
+          type: string
+        class:
+          enum:
+            - asset
+            - liability
+          type: string
+        currency:
+          type: string
+        flat:
+          description: True for an investment account, carried flat at its reading because nothing declared moves it
+          type: boolean
+        note:
+          description: Why the line is empty or flat; empty otherwise
+          type: string
+        points:
+          description: From the snapshot's bucket through the horizon end's bucket
+          items:
+            $ref: "#/components/schemas/ProjectionPointDTO"
+          type:
+            - array
+            - "null"
+        start_as_of:
+          description: RFC3339 reading time of that snapshot; null with it
+          type:
+            - string
+            - "null"
+        start_balance:
+          description: The latest balance snapshot the walk starts from; null when the account has none
+          format: double
+          type:
+            - number
+            - "null"
+        type:
+          enum:
+            - everyday
+            - savings
+            - credit_card
+            - steppay
+            - investment
+          type: string
+      required:
+        - account_id
+        - account_name
+        - type
+        - class
+        - currency
+        - start_balance
+        - start_as_of
+        - flat
+        - note
+        - points
+      type: object
+    ProjectionEventDTO:
+      additionalProperties: false
+      properties:
+        account_id:
+          description: Account the flow moves; null when it moves net worth only
+          format: int64
+          type:
+            - integer
+            - "null"
+        amount:
+          description: "Signed, rounded to the cent: money out negative"
+          format: double
+          type: number
+        date:
+          description: YYYY-MM-DD occurrence (the derived due or pay date, or a wishlist deadline)
+          type: string
+        id:
+          description: The bill, income or wishlist item id
+          format: int64
+          type: integer
+        kind:
+          enum:
+            - bill
+            - income
+            - wishlist
+          type: string
+        name:
+          type: string
+      required:
+        - date
+        - kind
+        - id
+        - name
+        - amount
+        - account_id
+      type: object
+    ProjectionExclusionDTO:
+      additionalProperties: false
+      properties:
+        id:
+          format: int64
+          type: integer
+        kind:
+          enum:
+            - bill
+            - income
+            - wishlist
+          type: string
+        name:
+          type: string
+        reason:
+          description: "paused: declared paused. investment_account: names an investment account, which is carried flat. no_snapshot: names an account with no balance reading to start from. currency_mismatch: its currency differs from its account's (or, with no account, from net worth's)"
+          enum:
+            - paused
+            - investment_account
+            - no_snapshot
+            - currency_mismatch
+          type: string
+      required:
+        - kind
+        - id
+        - name
+        - reason
+      type: object
+    ProjectionNetWorthDTO:
+      additionalProperties: false
+      properties:
+        currency:
+          type: string
+        note:
+          description: Why the line is empty; empty otherwise
+          type: string
+        points:
+          description: From the freshest snapshot's bucket through the horizon end's bucket
+          items:
+            $ref: "#/components/schemas/ProjectionPointDTO"
+          type:
+            - array
+            - "null"
+        start_as_of:
+          description: RFC3339 time of the freshest of those snapshots; null with it
+          type:
+            - string
+            - "null"
+        start_balance:
+          description: Sum of every account's latest snapshot; null when no account has one
+          format: double
+          type:
+            - number
+            - "null"
+      required:
+        - currency
+        - start_balance
+        - start_as_of
+        - note
+        - points
+      type: object
+    ProjectionPointDTO:
+      additionalProperties: false
+      properties:
+        as_of:
+          description: RFC3339 bucket START in Australia/Melbourne, on the Balance Series grammar (a day runs local midnight to local midnight, a week starts local Monday, a month the local 1st)
+          type: string
+        balance:
+          description: Projected close of the bucket, rounded to the cent
+          format: double
+          type: number
+        in:
+          description: Declared money in applied inside the bucket, a positive magnitude
+          format: double
+          type: number
+        out:
+          description: Declared money out applied inside the bucket, a positive magnitude
+          format: double
+          type: number
+        projected:
+          description: "Always true: this is an extrapolation of declarations, never a reading"
+          type: boolean
+      required:
+        - as_of
+        - balance
+        - in
+        - out
+        - projected
       type: object
     RecipientDTO:
       additionalProperties: false
@@ -5353,6 +5598,54 @@ paths:
       security:
         - cookieAuth: []
       summary: List pending (not-yet-settled) transactions (admin)
+      tags:
+        - finance
+  /api/finance/projection:
+    get:
+      description: "A forward Balance Series under one premise, nothing changes: from each account's latest balance snapshot, apply every active or not-yet-ended recurring bill (out) and recurring income (in) occurrence in the horizon, skipping any cycle whose payment already posted on or before that account's snapshot. Investment accounts are carried flat and flows with no account move net worth only. Every point is marked projected."
+      operationId: get-finance-projection
+      parameters:
+        - description: Days ahead of today (the Melbourne calendar day) to project
+          explode: false
+          in: query
+          name: horizon_days
+          schema:
+            default: 90
+            description: Days ahead of today (the Melbourne calendar day) to project
+            format: int64
+            maximum: 730
+            minimum: 1
+            type: integer
+        - description: "Bucket width: day (default), week or month, on the Balance Series grammar. An unknown value is a 400."
+          explode: false
+          in: query
+          name: step
+          schema:
+            description: "Bucket width: day (default), week or month, on the Balance Series grammar. An unknown value is a 400."
+            type: string
+        - description: Also apply each wanted wishlist item that has both a cost and a deadline, as money out on its deadline (net worth only)
+          explode: false
+          in: query
+          name: include_wishlist
+          schema:
+            description: Also apply each wanted wishlist item that has both a cost and a deadline, as money out on its deadline (net worth only)
+            type: boolean
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FinanceProjectionOutputBody"
+          description: OK
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ErrorModel"
+          description: Error
+      security:
+        - cookieAuth: []
+      summary: Project balances and net worth forward from declared bills and income (admin)
       tags:
         - finance
   /api/finance/summary:
