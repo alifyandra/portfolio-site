@@ -3,6 +3,7 @@ package finance
 import (
 	"context"
 	"errors"
+	"maps"
 	"strconv"
 	"testing"
 	"time"
@@ -74,7 +75,7 @@ func TestDetectRuns_MonthlyDebitAroundWeekends(t *testing.T) {
 	if r.matchPattern != "ZYLO STREAMING" || r.label != "ZYLO STREAMING" {
 		t.Errorf("label/pattern = %q/%q, want ZYLO STREAMING for both", r.label, r.matchPattern)
 	}
-	if r.counterparty != "d:zylo streaming" {
+	if r.counterparty != "zylo streaming" {
 		t.Errorf("counterparty = %q, want the description's distinctive words only", r.counterparty)
 	}
 }
@@ -140,8 +141,70 @@ func TestDetectRuns_MerchantIsLabelAndPattern(t *testing.T) {
 	if len(runs) != 1 {
 		t.Fatalf("runs = %d, want 1", len(runs))
 	}
-	if r := runs[0]; r.label != "Kestrel Energy" || r.matchPattern != "Kestrel Energy" || r.counterparty != "m:kestrel energy" {
+	if r := runs[0]; r.label != "Kestrel Energy" || r.matchPattern != "Kestrel Energy" || r.counterparty != "kestrel energy" {
 		t.Errorf("label/pattern/counterparty = %q/%q/%q, want the merchant", r.label, r.matchPattern, r.counterparty)
+	}
+}
+
+// runSizes maps each run's counterparty to its evidence count, for the grouping tests.
+func runSizes(runs []detectedRun) map[string]int {
+	out := map[string]int{}
+	for _, r := range runs {
+		out[r.counterparty] = len(r.evidence)
+	}
+	return out
+}
+
+// TestDetectRuns_OnePayeeOneGroup: one payee's rows group together whether or not the
+// bank parsed a merchant on them, and whatever city the card terminal appended. Kestrel
+// has its merchant parsed on alternate months only, with a store number between its name
+// and the city; Zylo has no merchant and a different city most months.
+func TestDetectRuns_OnePayeeOneGroup(t *testing.T) {
+	today := day(2026, time.November, 8)
+	var rows []*ent.Transaction
+	for i := 0; i < 4; i++ {
+		merchant := ""
+		if i%2 == 0 {
+			merchant = "Kestrel Energy"
+		}
+		rows = append(rows, memTxn(10+i, 1, day(2026, time.October, 20).AddDate(0, -i, 0), -64.5,
+			"KESTREL ENERGY "+itoaTest(8812+i)+" MELBOURNE", merchant))
+	}
+	for i, city := range []string{"SYDNEY AU", "MELBOURNE AU", "SYDNEY", "BRISBANE QLD"} {
+		rows = append(rows, memTxn(20+i, 1, day(2026, time.November, 2).AddDate(0, -i, 0), -15.99, "ZYLO STREAMING "+city, ""))
+	}
+	got := runSizes(detectRuns(rows, nil, today))
+	want := map[string]int{"kestrel energy": 4, "zylo streaming": 4}
+	if !maps.Equal(got, want) {
+		t.Errorf("runs = %v, want %v", got, want)
+	}
+}
+
+// TestDetectRuns_DifferentPayeesStayApart: the folding never merges two payees. A
+// merchant-less narrative folds onto a parsed merchant only when its whole name (the
+// words before its first number) is that merchant, so "ZYLO INSURANCE" stays apart from
+// a merchant "Zylo" at the same amount, and two salaries keep the employer that follows
+// the shared word.
+func TestDetectRuns_DifferentPayeesStayApart(t *testing.T) {
+	today := day(2026, time.November, 8)
+	var rows []*ent.Transaction
+	for i := 0; i < 4; i++ {
+		rows = append(rows,
+			memTxn(10+i, 1, day(2026, time.November, 3).AddDate(0, -i, 0), -15.99, "ZYLO "+itoaTest(4471+i)+" SYDNEY", "Zylo"),
+			memTxn(20+i, 1, day(2026, time.October, 25).AddDate(0, -i, 0), -15.99, "ZYLO INSURANCE "+itoaTest(5501+i)+" SYDNEY", ""),
+			memTxn(30+i, 1, day(2026, time.October, 28).AddDate(0, -i, 0), -15.99, "ZYLO STREAMING PREMIUM "+itoaTest(6601+i), ""),
+		)
+	}
+	for i := 0; i < 5; i++ {
+		rows = append(rows,
+			memTxn(40+i, 1, day(2026, time.November, 5).AddDate(0, 0, -14*i), 2000, "SALARY 0123"+itoaTest(i)+" ACME", ""),
+			memTxn(50+i, 1, day(2026, time.November, 6).AddDate(0, 0, -14*i), 2000, "SALARY 0999"+itoaTest(i)+" BETA CORP", ""),
+		)
+	}
+	got := runSizes(detectRuns(rows, nil, today))
+	want := map[string]int{"zylo": 4, "zylo insurance": 4, "zylo streaming premium": 4, "salary acme": 5, "salary beta corp": 5}
+	if !maps.Equal(got, want) {
+		t.Errorf("runs = %v, want %v", got, want)
 	}
 }
 

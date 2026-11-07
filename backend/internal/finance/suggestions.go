@@ -40,8 +40,10 @@ import (
 //  2. Group by (account, direction, counterparty). Debits make bill runs, credits make
 //     income runs. The counterparty is the parsed merchant when the bank gave one, else
 //     the description reduced to its distinctive words, so a varying reference number,
-//     date or month name does not split a group and the bank's own words do not join two
-//     (counterpartyKey). A row with nothing distinctive left is not grouped.
+//     date, month name or trailing city does not split a group and the bank's own words
+//     do not join two (counterpartyKey). A merchant-less row whose name (the words before
+//     its first number) is a merchant parsed on the same account joins that merchant's
+//     group. A row with nothing distinctive left is not grouped.
 //  3. Within a group, walk back from a recent row (the head) keeping each older row
 //     whose magnitude is within suggestAmountTolerance of the head's and whose gap to
 //     the previous kept row fits the cadence band; a row too close is skipped as noise
@@ -100,7 +102,7 @@ var genericWords = map[string]bool{
 	"value": true, "date": true, "netbank": true, "commbank": true, "app": true, "ref": true,
 	"reference": true, "deposit": true, "osko": true, "bpay": true, "eftpos": true,
 	"visa": true, "mastercard": true, "purchase": true, "online": true, "the": true,
-	"and": true, "for": true, "aus": true, "au": true, "pty": true, "ltd": true, "fast": true,
+	"and": true, "for": true, "of": true, "aus": true, "au": true, "pty": true, "ltd": true, "fast": true,
 	"received": true, "sent": true, "via": true, "bank": true, "account": true, "acct": true,
 	"recurring": true, "periodic": true, "standing": true, "order": true,
 }
@@ -137,11 +139,25 @@ func (r detectedRun) fingerprint() string {
 	return hex.EncodeToString(sum[:])
 }
 
+// locationWords are the place names a card terminal appends after a payee's name: the
+// Australian states and territories, their capitals, and the country codes overseas
+// subscriptions carry. They are dropped only from the END of a key and never down to
+// nothing, so "ZYLO STREAMING SYDNEY AU" and "ZYLO STREAMING MELBOURNE" are one payee
+// while "PERTH MINT" keeps its first word.
+var locationWords = map[string]bool{
+	"vic": true, "nsw": true, "qld": true, "wa": true, "sa": true, "tas": true, "nt": true,
+	"act": true, "melbourne": true, "sydney": true, "brisbane": true, "perth": true,
+	"adelaide": true, "hobart": true, "darwin": true, "canberra": true, "australia": true,
+	"us": true, "usa": true, "gb": true, "gbr": true, "uk": true, "nz": true, "nzl": true,
+	"ie": true, "irl": true, "sg": true, "sgp": true, "nl": true, "nld": true,
+}
+
 // normalizeCounterparty reduces text to its lowercase letter words, dropping month names,
 // single letters and the bank's own vocabulary (genericWords), so the parts of a narrative
 // that vary cycle to cycle (reference numbers, dates, amounts) do not split one
 // counterparty into many, and the channel it was paid through ("direct credit",
-// "transfer to") does not join two. Empty when nothing distinctive is left.
+// "transfer to") does not join two. Trailing locationWords go too. Empty when nothing
+// distinctive is left.
 func normalizeCounterparty(s string) string {
 	words := strings.FieldsFunc(strings.ToLower(s), func(r rune) bool { return !unicode.IsLetter(r) })
 	kept := words[:0]
@@ -151,21 +167,47 @@ func normalizeCounterparty(s string) string {
 		}
 		kept = append(kept, w)
 	}
+	for len(kept) > 1 && locationWords[kept[len(kept)-1]] {
+		kept = kept[:len(kept)-1]
+	}
 	return truncateBytes(strings.Join(kept, " "), suggestPatternMaxBytes)
 }
 
-// counterpartyKey is the grouping key: the merchant when the bank parsed one (prefixed so
-// a merchant and a description that happen to read the same stay apart), else the
-// description. Empty when neither has a distinctive word in it, and a row with no key is
-// never grouped: a run of bare "DIRECT CREDIT" rows says nothing about who paid.
-func counterpartyKey(t *ent.Transaction) string {
+// nameSegment is the payee's name as a narrative spells it: the normalised words before
+// the first token carrying a digit (a store number, a reference), taken from the first
+// such segment with a distinctive word left. "KESTREL ENERGY 8812 MELBOURNE" gives
+// "kestrel energy" and "DIRECT DEBIT 004411 ZYLO STREAMING REF 4411" gives "zylo
+// streaming". It is only used to fold a narrative onto a merchant the bank parsed.
+func nameSegment(desc string) string {
+	var seg []string
+	flush := func() string {
+		k := normalizeCounterparty(strings.Join(seg, " "))
+		seg = seg[:0]
+		return k
+	}
+	for _, tok := range strings.Fields(desc) {
+		if strings.ContainsFunc(tok, unicode.IsDigit) {
+			if k := flush(); k != "" {
+				return k
+			}
+			continue
+		}
+		seg = append(seg, tok)
+	}
+	return flush()
+}
+
+// counterpartyKey is a row's own grouping key: the merchant when the bank parsed one, else
+// the description, in one namespace so a payee whose merchant is parsed on some rows and
+// not others is still one group when the two read the same. Empty when neither has a
+// distinctive word in it, and a row with no key is never grouped: a run of bare "DIRECT
+// CREDIT" rows says nothing about who paid. detectRuns may then fold a merchant-less row
+// onto a parsed merchant (see there).
+func counterpartyKey(t *ent.Transaction) (key string, fromMerchant bool) {
 	if m := normalizeCounterparty(t.Merchant); m != "" {
-		return "m:" + m
+		return m, true
 	}
-	if d := normalizeCounterparty(t.Description); d != "" {
-		return "d:" + d
-	}
-	return ""
+	return normalizeCounterparty(t.Description), false
 }
 
 // truncateBytes cuts s to at most n bytes without splitting a UTF-8 rune.
@@ -193,12 +235,23 @@ func detectRuns(rows []*ent.Transaction, own4 map[string]bool, today time.Time) 
 		kind         recurrencesuggestion.Kind
 		counterparty string
 	}
-	groups := map[groupKey][]*ent.Transaction{}
+	type keyedRow struct {
+		t            *ent.Transaction
+		k            groupKey
+		fromMerchant bool
+	}
+	// First pass: each row's own key, and the merchant keys the bank parsed per
+	// (account, kind). Second pass: a merchant-less row whose name segment IS one of those
+	// merchants joins it, so "KESTREL ENERGY 8812 MELBOURNE" with no merchant groups with
+	// the rows the bank parsed as "Kestrel Energy". Only an exact name match folds, which
+	// keeps "ZYLO INSURANCE 5501" apart from a merchant "Zylo".
+	var keyed []keyedRow
+	merchants := map[groupKey]bool{}
 	for _, t := range rows {
 		if t.Amount == 0 || isInternalTransfer(t.Description, own4) {
 			continue
 		}
-		cp := counterpartyKey(t)
+		cp, fromMerchant := counterpartyKey(t)
 		if cp == "" {
 			continue
 		}
@@ -209,7 +262,21 @@ func detectRuns(rows []*ent.Transaction, own4 map[string]bool, today time.Time) 
 		if a := t.Edges.Account; a != nil {
 			k.accountID = a.ID
 		}
-		groups[k] = append(groups[k], t)
+		if fromMerchant {
+			merchants[k] = true
+		}
+		keyed = append(keyed, keyedRow{t: t, k: k, fromMerchant: fromMerchant})
+	}
+	groups := map[groupKey][]*ent.Transaction{}
+	for _, r := range keyed {
+		if !r.fromMerchant {
+			folded := r.k
+			folded.counterparty = nameSegment(r.t.Description)
+			if folded.counterparty != "" && merchants[folded] {
+				r.k = folded
+			}
+		}
+		groups[r.k] = append(groups[r.k], r.t)
 	}
 
 	keys := make([]groupKey, 0, len(groups))
@@ -241,8 +308,8 @@ func detectRuns(rows []*ent.Transaction, own4 map[string]bool, today time.Time) 
 		if !ok {
 			continue
 		}
-		run := buildRun(chain, band.cadence)
-		run.kind, run.accountID, run.counterparty = k.kind, k.accountID, k.counterparty
+		run := buildRun(chain, band.cadence, k.counterparty)
+		run.kind, run.accountID = k.kind, k.accountID
 		runs = append(runs, run)
 	}
 	return runs
@@ -292,7 +359,7 @@ func chainFrom(txns []*ent.Transaction, h int, band cadenceBand) []*ent.Transact
 
 // buildRun derives what a suggestion stores from its chain: the median magnitude, the
 // best-fitting grid, and a label and match pattern.
-func buildRun(chain []*ent.Transaction, c recurringbill.Cadence) detectedRun {
+func buildRun(chain []*ent.Transaction, c recurringbill.Cadence, counterparty string) detectedRun {
 	amounts := make([]float64, 0, len(chain))
 	for _, t := range chain {
 		amounts = append(amounts, math.Abs(t.Amount))
@@ -302,8 +369,9 @@ func buildRun(chain []*ent.Transaction, c recurringbill.Cadence) detectedRun {
 	if len(amounts)%2 == 0 {
 		median = (amounts[len(amounts)/2-1] + amounts[len(amounts)/2]) / 2
 	}
-	label, pattern := describeRun(chain)
+	label, pattern := describeRun(chain, counterparty)
 	return detectedRun{
+		counterparty:   counterparty,
 		cadence:        c,
 		evidence:       chain,
 		expectedAmount: median,
@@ -354,7 +422,7 @@ func bestAnchor(chain []*ent.Transaction, c recurringbill.Cadence) time.Time {
 // distinctive and common, so "DIRECT CREDIT 012345 ACME WIDGETS" gives "ACME WIDGETS"
 // rather than "DIRECT CREDIT". With no such word the pattern is empty (the declaration is
 // then reconciled by hand) and the label falls back to the counterparty's words.
-func describeRun(chain []*ent.Transaction) (label, pattern string) {
+func describeRun(chain []*ent.Transaction, counterparty string) (label, pattern string) {
 	newest := chain[len(chain)-1]
 	if m := strings.TrimSpace(newest.Merchant); m != "" {
 		shared := true
@@ -403,8 +471,7 @@ func describeRun(chain []*ent.Transaction) (label, pattern string) {
 			return truncateBytes(p, suggestLabelMaxBytes), truncateBytes(p, suggestPatternMaxBytes)
 		}
 	}
-	key := strings.TrimPrefix(strings.TrimPrefix(counterpartyKey(newest), "m:"), "d:")
-	return truncateBytes(key, suggestLabelMaxBytes), ""
+	return truncateBytes(counterparty, suggestLabelMaxBytes), ""
 }
 
 // wordSpans returns the [start, end) byte offsets of each whitespace-separated word.

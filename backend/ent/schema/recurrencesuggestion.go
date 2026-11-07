@@ -37,7 +37,7 @@ func (RecurrenceSuggestion) Fields() []ent.Field {
 		field.String("counterparty").
 			NotEmpty().
 			Immutable().
-			Comment("The normalised key the run was grouped by: the parsed merchant when the bank gave one, else the description with digits, punctuation, month names and the bank's own words (direct, credit, transfer...) removed"),
+			Comment("The normalised key the run was grouped by: the parsed merchant when the bank gave one, else the description with digits, punctuation, month names, trailing place names and the bank's own words (direct, credit, transfer...) removed; a merchant-less row whose name matches a parsed merchant takes that merchant's key"),
 		field.String("label").
 			NotEmpty().
 			Comment("Suggested name for the declaration, at most 120 bytes; the owner may replace it when accepting"),
