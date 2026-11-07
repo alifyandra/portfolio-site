@@ -51,6 +51,10 @@ func (RecurrenceSuggestion) Fields() []ent.Field {
 		field.Float("expected_amount").
 			Positive().
 			Comment("The median magnitude of the evidence, positive like RecurringBill.expected_amount"),
+		field.Int("gaps").
+			NonNegative().
+			Default(0).
+			Comment("Cycles the run skipped between its oldest and newest row (one missed cycle at a time is tolerated); 0 for an unbroken run"),
 		field.Time("anchor_date").
 			Comment("The pay or due date grid that best fits the evidence, placed on the oldest run's cycle so every evidence row settles a cycle on or after it (UTC midnight)"),
 		field.Enum("status").

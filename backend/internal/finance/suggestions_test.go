@@ -106,6 +106,9 @@ func TestDetectRuns_FortnightlySalaryPaidEarly(t *testing.T) {
 	if r.expectedAmount != 2450 {
 		t.Errorf("expected amount = %v, want the median 2450", r.expectedAmount)
 	}
+	if r.gaps != 0 {
+		t.Errorf("gaps = %d, want 0: a fortnightly run is not a weekly one missing every other week", r.gaps)
+	}
 	if !r.anchor.Equal(day(2026, time.August, 13)) {
 		t.Errorf("anchor = %s, want 2026-08-13 (the Thursday grid)", r.anchor.Format(dateLayoutTest))
 	}
@@ -125,6 +128,33 @@ func TestDetectRuns_WeeklyIsNotFortnightly(t *testing.T) {
 	runs := detectRuns(rows, nil, today)
 	if len(runs) != 1 || runs[0].cadence != recurringbill.CadenceWeekly || len(runs[0].evidence) != 5 {
 		t.Fatalf("runs = %+v, want one weekly run of 5", runs)
+	}
+}
+
+// TestDetectRuns_ToleratesOneSkippedCycle: a monthly charge that missed September is
+// still one run, with the skipped cycle counted in gaps; two cycles missed in a row end
+// the run, so what is left is too short to offer.
+func TestDetectRuns_ToleratesOneSkippedCycle(t *testing.T) {
+	today := day(2026, time.November, 8)
+	monthly := func(dates ...time.Time) []*ent.Transaction {
+		var rows []*ent.Transaction
+		for i, d := range dates {
+			rows = append(rows, memTxn(i+1, 1, d, -9.99, "PODCAST PLUS", ""))
+		}
+		return rows
+	}
+	runs := detectRuns(monthly(day(2026, time.June, 3), day(2026, time.July, 3), day(2026, time.August, 3),
+		day(2026, time.October, 3), day(2026, time.November, 3)), nil, today)
+	if len(runs) != 1 || runs[0].cadence != recurringbill.CadenceMonthly || len(runs[0].evidence) != 5 || runs[0].gaps != 1 {
+		t.Fatalf("runs = %+v, want one monthly run of 5 rows with 1 gap", runs)
+	}
+	if !runs[0].anchor.Equal(day(2026, time.June, 3)) {
+		t.Errorf("anchor = %s, want 2026-06-03", runs[0].anchor.Format(dateLayoutTest))
+	}
+	runs = detectRuns(monthly(day(2026, time.June, 3), day(2026, time.July, 3), day(2026, time.August, 3),
+		day(2026, time.November, 3)), nil, today)
+	if len(runs) != 0 {
+		t.Errorf("two skipped cycles: runs = %+v, want none", runs)
 	}
 }
 
@@ -386,6 +416,29 @@ func TestScanRecurrences_CreatesRefreshesAndRemembersDismissal(t *testing.T) {
 	}
 	if views, _ := ListSuggestions(ctx, client, "pending"); len(views) != 0 {
 		t.Errorf("pending after dismissal = %d, want 0", len(views))
+	}
+}
+
+// TestScanRecurrences_StoresGaps: a run with one skipped cycle is stored with its gap
+// count, so the owner sees the history is not unbroken before accepting it.
+func TestScanRecurrences_StoresGaps(t *testing.T) {
+	client := newFinanceTestClient(t)
+	ctx := context.Background()
+	today := localToday()
+	acc := seedAccount(t, ctx, client, "Everyday", account.ClassAsset, account.TypeEveryday)
+	last := recentDay(today, 3)
+	for _, back := range []int{0, 1, 3, 4} {
+		seedTxn(t, ctx, client, acc, "pod-"+itoaTest(back), last.AddDate(0, -back, 0), -9.99, "PODCAST PLUS", "")
+	}
+	if _, err := ScanRecurrences(ctx, client); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	views, err := ListSuggestions(ctx, client, "pending")
+	if err != nil || len(views) != 1 {
+		t.Fatalf("pending = %d (%v), want 1", len(views), err)
+	}
+	if v := views[0]; v.Gaps != 1 || len(v.Evidence) != 4 {
+		t.Errorf("suggestion gaps/evidence = %d/%d, want 1/4", v.Gaps, len(v.Evidence))
 	}
 }
 

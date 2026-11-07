@@ -1600,6 +1600,10 @@ components:
           description: Median magnitude of the evidence, rounded to the cent
           format: double
           type: number
+        gaps:
+          description: Cycles the run skipped between its oldest and newest evidence row; 0 for an unbroken run
+          format: int64
+          type: integer
         id:
           format: int64
           type: integer
@@ -1641,6 +1645,7 @@ components:
         - expected_amount
         - anchor_date
         - next_expected
+        - gaps
         - status
         - decided_at
         - account_id

@@ -47,10 +47,13 @@ import (
 //  3. Within a group, walk back from a recent row (the head) keeping each older row
 //     whose magnitude is within suggestAmountTolerance of the head's and whose gap to
 //     the previous kept row fits the cadence band; a row too close is skipped as noise
-//     (a one-off at the same merchant), a gap too wide ends the run. Bands are tried
-//     finest first, so a weekly run is never reported as fortnightly.
-//  4. A run needs suggestMinRun rows, and its newest row must be live: no older than one
-//     band maximum plus suggestStaleGraceDays, so a cancelled subscription is not offered.
+//     (a one-off at the same merchant). A gap of exactly two cycles (twice the band) is
+//     one skipped cycle and is kept and counted in gaps; any other gap too wide ends the
+//     run. Bands are tried finest first, so a weekly run is never reported as fortnightly.
+//  4. A run needs suggestMinRun rows, more on-band intervals than skipped cycles (so a
+//     fortnightly run is not a weekly one missing every other week), and its newest row
+//     must be live: no older than one band maximum plus suggestStaleGraceDays, so a
+//     cancelled subscription is not offered.
 //
 // Nothing here rounds money; the API rounds at its DTO.
 
@@ -124,6 +127,7 @@ type detectedRun struct {
 	counterparty   string
 	cadence        recurringbill.Cadence
 	evidence       []*ent.Transaction // oldest first
+	gaps           int                // cycles the run skipped (see chainFrom)
 	expectedAmount float64
 	anchor         time.Time
 	label          string
@@ -304,57 +308,70 @@ func detectRuns(rows []*ent.Transaction, own4 map[string]bool, today time.Time) 
 			}
 			return txns[i].ID < txns[j].ID
 		})
-		chain, band, ok := findRun(txns, today)
+		chain, gaps, band, ok := findRun(txns, today)
 		if !ok {
 			continue
 		}
 		run := buildRun(chain, band.cadence, k.counterparty)
-		run.kind, run.accountID = k.kind, k.accountID
+		run.kind, run.accountID, run.gaps = k.kind, k.accountID, gaps
 		runs = append(runs, run)
 	}
 	return runs
 }
 
 // findRun tries each band finest first and, within a band, each live head newest first,
-// returning the first chain long enough to count. txns is one group, oldest first.
-func findRun(txns []*ent.Transaction, today time.Time) ([]*ent.Transaction, cadenceBand, bool) {
+// returning the first chain that counts as a run (runShape) and how many cycles it
+// skipped. txns is one group, oldest first.
+func findRun(txns []*ent.Transaction, today time.Time) ([]*ent.Transaction, int, cadenceBand, bool) {
 	for _, band := range cadenceBands {
 		for h := len(txns) - 1; h >= 0; h-- {
 			if daysBetween(txns[h].PostedDate, today) > band.max+suggestStaleGraceDays {
 				break // every older head is staler still
 			}
-			if chain := chainFrom(txns, h, band); len(chain) >= suggestMinRun {
-				return chain, band, true
+			if chain, gaps := chainFrom(txns, h, band); runShape(chain, gaps) {
+				return chain, gaps, band, true
 			}
 		}
 	}
-	return nil, cadenceBand{}, false
+	return nil, 0, cadenceBand{}, false
+}
+
+// runShape is the rule a chain must meet to be a run: suggestMinRun rows, and more
+// on-band intervals than skipped cycles, so the interval is measured and not inferred
+// from the gaps.
+func runShape(chain []*ent.Transaction, gaps int) bool {
+	return len(chain) >= suggestMinRun && len(chain)-1-gaps > gaps
 }
 
 // chainFrom walks back from txns[h], keeping each older row near the head's amount whose
-// gap to the last kept row fits the band. Returned oldest first.
-func chainFrom(txns []*ent.Transaction, h int, band cadenceBand) []*ent.Transaction {
+// gap to the last kept row fits the band, or fits it twice over (one skipped cycle,
+// counted in gaps). Returned oldest first.
+func chainFrom(txns []*ent.Transaction, h int, band cadenceBand) ([]*ent.Transaction, int) {
 	head := txns[h]
 	ref := math.Abs(head.Amount)
 	chain := []*ent.Transaction{head}
 	last := head.PostedDate
+	gaps := 0
+walk:
 	for i := h - 1; i >= 0; i-- {
 		t := txns[i]
 		if !nearAmount(math.Abs(t.Amount), ref) {
 			continue
 		}
-		gap := daysBetween(t.PostedDate, last)
-		if gap < band.min {
+		switch gap := daysBetween(t.PostedDate, last); {
+		case gap < band.min:
 			continue
-		}
-		if gap > band.max {
-			break
+		case gap <= band.max:
+		case gap >= 2*band.min && gap <= 2*band.max:
+			gaps++
+		default:
+			break walk
 		}
 		chain = append(chain, t)
 		last = t.PostedDate
 	}
 	slices.Reverse(chain)
-	return chain
+	return chain, gaps
 }
 
 // buildRun derives what a suggestion stores from its chain: the median magnitude, the
@@ -604,6 +621,7 @@ func ScanRecurrences(ctx context.Context, client *ent.Client) (ScanSummary, erro
 				SetMatchPattern(run.matchPattern).
 				SetExpectedAmount(run.expectedAmount).
 				SetAnchorDate(run.anchor).
+				SetGaps(run.gaps).
 				ClearEvidence().
 				AddEvidence(run.evidence...).
 				Exec(ctx); err != nil {
@@ -620,6 +638,7 @@ func ScanRecurrences(ctx context.Context, client *ent.Client) (ScanSummary, erro
 				SetCadence(recurrencesuggestion.Cadence(run.cadence)).
 				SetExpectedAmount(run.expectedAmount).
 				SetAnchorDate(run.anchor).
+				SetGaps(run.gaps).
 				AddEvidence(run.evidence...)
 			if run.accountID != 0 {
 				create.SetAccountID(run.accountID)
@@ -765,6 +784,7 @@ type SuggestionView struct {
 	ExpectedAmount float64
 	AnchorDate     time.Time
 	NextExpected   time.Time
+	Gaps           int
 	Status         string
 	DecidedAt      *time.Time
 	AccountID      int
@@ -810,6 +830,7 @@ func ListSuggestions(ctx context.Context, client *ent.Client, status string) ([]
 			ExpectedAmount: s.ExpectedAmount,
 			AnchorDate:     normalizeDate(s.AnchorDate),
 			NextExpected:   nextDue(s.AnchorDate, c, today),
+			Gaps:           s.Gaps,
 			Status:         string(s.Status),
 			DecidedAt:      s.DecidedAt,
 			CreatedAt:      s.CreatedAt,

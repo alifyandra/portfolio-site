@@ -35,6 +35,7 @@ type FinanceSuggestionDTO struct {
 	ExpectedAmount float64                        `json:"expected_amount" doc:"Median magnitude of the evidence, rounded to the cent"`
 	AnchorDate     string                         `json:"anchor_date" doc:"YYYY-MM-DD; the grid that best fits the evidence, on its oldest cycle"`
 	NextExpected   string                         `json:"next_expected" doc:"YYYY-MM-DD; the grid's next date on or after today"`
+	Gaps           int                            `json:"gaps" doc:"Cycles the run skipped between its oldest and newest evidence row; 0 for an unbroken run"`
 	Status         string                         `json:"status" enum:"pending,accepted,dismissed"`
 	DecidedAt      *string                        `json:"decided_at" doc:"When the owner accepted or dismissed it; null while pending"`
 	AccountID      *int                           `json:"account_id" doc:"The account every evidence row posted to"`
@@ -111,6 +112,7 @@ func toFinanceSuggestionDTO(v finance.SuggestionView) FinanceSuggestionDTO {
 		ExpectedAmount: roundCents(v.ExpectedAmount),
 		AnchorDate:     v.AnchorDate.Format(dateLayout),
 		NextExpected:   v.NextExpected.Format(dateLayout),
+		Gaps:           v.Gaps,
 		Status:         v.Status,
 		AccountID:      intPtrOrNil(v.AccountID),
 		AccountName:    v.AccountName,
