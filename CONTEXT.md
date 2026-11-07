@@ -60,6 +60,15 @@ A lightweight, organizational grouping of related [Tool]s in the app menu (e.g.
 Category confers no capability and gates nothing; access is always decided by
 [Role]. Categories have a defined display order, and empty ones are hidden.
 
+### Lab
+The owner's private home infrastructure, named under `*.lab.aliflabs.dev` and
+reachable only from the owner's own devices, never from the public internet. The Lab
+is not part of the platform: no [Tool] runs there, no [Visitor] or [User] can reach
+it, and the backend never calls into it. It shares the `aliflabs.dev` name with the
+platform and nothing else; its own code, deploy and decisions live in a separate
+private repository. Contrast with [Finance Source], which is also private and
+external but pushes data *into* the platform.
+
 ### Welcome
 The first-sign-in moment for a [User]: a one-time prompt asking what they'd like to
 be called (setting their [Nickname]; skippable, in which case the Google `name` is
@@ -364,6 +373,41 @@ so the two can never drift apart, and the pair differing is how a repriced bill 
 spotted. Created either by the matching pass (from the bill's owner-typed match pattern,
 amount tolerance and date window) or by hand, and a hand-made link is never overwritten
 by the pass. A cycle with no Bill Payment past its window is a missed bill.
+
+### Recurring Income
+A repeating receipt the owner declares (salary, rent received, a regular transfer in):
+the same cadence, anchor date, expected amount and optional [Financial Account] as a
+[Recurring Bill], in the opposite direction. It is kept as its own term rather than a
+signed bill because a bill is a commitment and income is not; the two share a shape,
+not a meaning. Like a bill it is a declaration: the ledger shows what arrived, the
+declaration says what is expected and when. Each cycle links to the [Posted
+Transaction] that paid it the way a [Bill Payment] does, so "is this credit regular?"
+is answered by the link, never by a flag on the transaction.
+
+### Recurrence Suggestion
+A proposal, derived from history, that a run of [Posted Transaction]s looks like one
+[Recurring Bill] or [Recurring Income]: the same counterparty, a near-constant amount
+and a near-constant interval, with the evidence attached. It is surfaced to the owner
+to accept or dismiss, the way a bank app offers "we noticed a regular payment". The
+detection pass only ever **suggests**; it never creates a declaration on its own, for
+the same reason the ingest never writes an account's description: declarations are
+owner-authored. Accepting one creates the declaration and links its history;
+dismissing one is remembered, so the same pattern is not offered again. A Suggestion
+is not a declaration and feeds nothing, not the [Projection], not the dashboard
+totals, until accepted.
+
+### Projection
+A forward [Balance Series] under one stated premise: **nothing changes**. It starts from
+each [Financial Account]'s latest [Balance Snapshot] and walks forward applying only
+what the owner has declared: every occurrence in the horizon of each *active*
+[Recurring Bill] and [Recurring Income], and optionally each *wanted* [Wishlist Item]
+that carries both a cost and a deadline. Paused or ended declarations and bought or
+abandoned wishlist items are retained but feed nothing: a bought item is already in
+the starting balance. An **investment** account is carried flat, since nothing declared moves it.
+Net worth is the sum. A Projection is an extrapolation of declarations, never a
+forecast: it is only as complete as what has been declared, and it is wrong the day
+something changes. Every projected point is marked as such so it can never be read as
+a reading. Contrast with the historical [Balance Series], which reports what was.
 
 ## Naming conventions
 
