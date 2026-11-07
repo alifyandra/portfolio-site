@@ -1477,7 +1477,7 @@ components:
             - string
             - "null"
         match_pattern:
-          description: Case-insensitive substring the matching pass looks for in a credit's description or merchant; empty means receipts are linked by hand only
+          description: Case-insensitive text the matching pass looks for, on word boundaries, in a credit's description or merchant; empty means receipts are linked by hand only
           type: string
         name:
           type: string

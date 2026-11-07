@@ -133,3 +133,58 @@ func TestReconcileIncome_NoPatternNoPass(t *testing.T) {
 		t.Errorf("pass = %+v (%v), want nothing scanned", sum, err)
 	}
 }
+
+// TestContainsToken: a match pattern finds its text on word boundaries only. The edges
+// are judged by the pattern's own first and last characters, so a letter edge needs a
+// non-letter neighbour and a digit edge a non-digit one, and a reference number glued to
+// a name does not hide it.
+func TestContainsToken(t *testing.T) {
+	cases := []struct {
+		hay, needle string
+		want        bool
+	}{
+		{"ato payg 0123", "ato", true},
+		{"ato-0123", "ato", true},
+		{"pay from ato", "ato", true},
+		{"latte", "ato", false},
+		{"potato farm", "ato", false},
+		{"potato ato", "ato", true}, // a later occurrence on a boundary still counts
+		{"salary acme0123", "acme", true},
+		{"acmewidgets", "acme", false},
+		{"salary acme widgets pty", "acme widgets", true},
+		{"netflix.com", "netflix", true},
+		{"uber *eats sydney", "*eats", true},
+		{"ref 4411", "441", false},
+		{"", "ato", false},
+		{"ato", "", false},
+	}
+	for _, c := range cases {
+		if got := containsToken(c.hay, c.needle); got != c.want {
+			t.Errorf("containsToken(%q, %q) = %v, want %v", c.hay, c.needle, got, c.want)
+		}
+	}
+}
+
+// TestReconcileIncome_PatternOnWordBoundaries: an income matching "ATO" is not paid by a
+// credit from a potato co-op at the same amount, and is paid by the ATO's own credit.
+func TestReconcileIncome_PatternOnWordBoundaries(t *testing.T) {
+	client := newFinanceTestClient(t)
+	ctx := context.Background()
+	today := localToday()
+	acc := seedAccount(t, ctx, client, "Everyday", account.ClassAsset, account.TypeEveryday)
+	payday := recentDay(today, 1)
+	inc := seedIncome(t, ctx, client, "Tax", 500, recurringincome.CadenceMonthly, payday.AddDate(0, -1, 0), func(c *ent.RecurringIncomeCreate) {
+		c.SetMatchPattern("ATO")
+	})
+	seedTxn(t, ctx, client, acc, "potato", payday, 500, "POTATO CO-OP", "")
+	seedTxn(t, ctx, client, acc, "ato", payday.AddDate(0, -1, 0), 500, "ATO 012345", "")
+	if _, err := ReconcileIncome(ctx, client, ReconcileOptions{}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if r := receiptFor(t, ctx, client, inc.ID, payday); r != nil {
+		t.Errorf("payday settled by %q, want it open: ATO is not a word in POTATO", r.Edges.Transaction.Description)
+	}
+	if r := receiptFor(t, ctx, client, inc.ID, payday.AddDate(0, -1, 0)); r == nil {
+		t.Error("the ATO credit did not settle its cycle")
+	}
+}

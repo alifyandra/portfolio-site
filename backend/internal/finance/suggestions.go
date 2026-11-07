@@ -792,12 +792,13 @@ func (c *coverage) covers(run detectedRun) bool {
 
 // patternFinds is the pattern and account-scope half of a declaration's match rule, with
 // no amount or date check: a declaration whose pattern finds the run's newest row
-// already speaks for that counterparty, whatever its amount or grid now says.
+// already speaks for that counterparty, whatever its amount or grid now says. The pattern
+// is matched on word boundaries (containsToken), like the income matcher.
 func patternFinds(needle string, scopeID int, c candidate) bool {
 	if needle == "" {
 		return false
 	}
-	if !strings.Contains(c.descLower, needle) && !strings.Contains(c.merchLower, needle) {
+	if !containsToken(c.descLower, needle) && !containsToken(c.merchLower, needle) {
 		return false
 	}
 	return scopeID == 0 || scopeID == c.accountID

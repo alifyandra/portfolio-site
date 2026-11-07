@@ -495,6 +495,26 @@ func TestScanRecurrences_SkipsDeclaredRuns(t *testing.T) {
 	}
 }
 
+// TestScanRecurrences_CoverageOnWordBoundaries: an income matching "ATO" does not cover
+// a regular credit from a potato co-op, so that run is still suggested.
+func TestScanRecurrences_CoverageOnWordBoundaries(t *testing.T) {
+	client := newFinanceTestClient(t)
+	ctx := context.Background()
+	today := localToday()
+	acc := seedAccount(t, ctx, client, "Everyday", account.ClassAsset, account.TypeEveryday)
+	seedMonthlyRun(t, ctx, client, acc, "potato", recentDay(today, 2), 4, 500, "POTATO CO-OP")
+	seedIncome(t, ctx, client, "Tax", 500, recurringincome.CadenceMonthly, today, func(c *ent.RecurringIncomeCreate) {
+		c.SetMatchPattern("ato")
+	})
+	sum, err := ScanRecurrences(ctx, client)
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if sum.Created != 1 || sum.Declared != 0 {
+		t.Errorf("scan = %+v, want the co-op run suggested, not declared", sum)
+	}
+}
+
 // TestScanRecurrences_DropsVanishedPending: a pending suggestion whose run the pass no
 // longer finds is removed, since it is derived; decided ones are never touched.
 func TestScanRecurrences_DropsVanishedPending(t *testing.T) {

@@ -47,7 +47,7 @@ type FinanceIncomeDTO struct {
 	Status             string   `json:"status" enum:"active,paused,ended"`
 	EndedOn            *string  `json:"ended_on" doc:"YYYY-MM-DD the income stopped; null while it runs"`
 	Notes              string   `json:"notes"`
-	MatchPattern       string   `json:"match_pattern" doc:"Case-insensitive substring the matching pass looks for in a credit's description or merchant; empty means receipts are linked by hand only"`
+	MatchPattern       string   `json:"match_pattern" doc:"Case-insensitive text the matching pass looks for, on word boundaries, in a credit's description or merchant; empty means receipts are linked by hand only"`
 	AccountID          *int     `json:"account_id" doc:"Account the income is paid into; null when unset (the edge is optional)"`
 	AccountName        string   `json:"account_name"`
 	NextExpected       *string  `json:"next_expected" doc:"YYYY-MM-DD; the next derived pay date on or after today and not after ended_on. Null when none is left (the income ended before its next pay date), never a past date"`

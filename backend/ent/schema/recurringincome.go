@@ -45,7 +45,7 @@ func (RecurringIncome) Fields() []ent.Field {
 		field.String("match_pattern").
 			Optional().
 			MaxLen(200).
-			Comment("Case-insensitive substring matched against a posted credit's description OR merchant; empty means the income is never auto-matched and every receipt is linked by hand. Same rule as RecurringBill.match_pattern"),
+			Comment("Case-insensitive text matched on word boundaries against a posted credit's description OR merchant (\"ATO\" does not match \"POTATO\"); empty means the income is never auto-matched and every receipt is linked by hand. RecurringBill.match_pattern is still a plain substring"),
 		field.Enum("status").
 			Values("active", "paused", "ended").
 			Default("active").

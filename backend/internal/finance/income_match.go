@@ -5,6 +5,8 @@ import (
 	"math"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/alifyandra/portfolio-site/backend/ent"
 	"github.com/alifyandra/portfolio-site/backend/ent/incomereceipt"
@@ -19,8 +21,9 @@ import (
 //
 // The rule is a per-income AND of five clauses:
 //
-//  1. match_pattern is a case-insensitive substring of the description OR merchant; an
-//     empty pattern never matches, so that income is linked by hand only;
+//  1. match_pattern occurs case-insensitively in the description OR merchant on word
+//     boundaries (containsToken: "ATO" is not found in "POTATO"); an empty pattern never
+//     matches, so that income is linked by hand only;
 //  2. account scope, when the income names its account;
 //  3. a credit (positive amount), since income is money in;
 //  4. the amount within incomeAmountTolerancePct of expected_amount;
@@ -68,7 +71,7 @@ func (m incomeMatcher) matches(c candidate, occ time.Time) bool {
 	if m.needle == "" || c.txn.Amount <= 0 {
 		return false
 	}
-	if !strings.Contains(c.descLower, m.needle) && !strings.Contains(c.merchLower, m.needle) {
+	if !containsToken(c.descLower, m.needle) && !containsToken(c.merchLower, m.needle) {
 		return false
 	}
 	if m.scopeID != 0 && c.accountID != m.scopeID {
@@ -274,4 +277,45 @@ func settledReceipts(ctx context.Context, client *ent.Client, incomeID int) (map
 		out[normalizeDate(r.OccurrenceDate).Unix()] = true
 	}
 	return out, nil
+}
+
+// containsToken reports whether needle occurs in hay (both lowercased already) on word
+// boundaries: an occurrence counts only when the character before it is not the same kind
+// (letter or digit) as the needle's first character, and the character after it not the
+// same kind as its last. So "ato" finds "ato payg" and "ato-0123" but not "potato", and
+// "acme" still finds "acme0123", where a reference number is glued to the name. A needle
+// edge that is neither (punctuation, a space) needs no boundary. Empty never matches.
+func containsToken(hay, needle string) bool {
+	if needle == "" {
+		return false
+	}
+	first, _ := utf8.DecodeRuneInString(needle)
+	last, _ := utf8.DecodeLastRuneInString(needle)
+	for off := 0; off <= len(hay)-len(needle); {
+		i := strings.Index(hay[off:], needle)
+		if i < 0 {
+			return false
+		}
+		start, end := off+i, off+i+len(needle)
+		before, _ := utf8.DecodeLastRuneInString(hay[:start])
+		after, _ := utf8.DecodeRuneInString(hay[end:])
+		if (start == 0 || !sameWordClass(before, first)) && (end == len(hay) || !sameWordClass(after, last)) {
+			return true
+		}
+		_, size := utf8.DecodeRuneInString(hay[start:])
+		off = start + size
+	}
+	return false
+}
+
+// sameWordClass reports whether r continues the word that edge ends: both letters or
+// both digits. An edge that is neither is never continued.
+func sameWordClass(r, edge rune) bool {
+	switch {
+	case unicode.IsLetter(edge):
+		return unicode.IsLetter(r)
+	case unicode.IsDigit(edge):
+		return unicode.IsDigit(r)
+	}
+	return false
 }
