@@ -121,8 +121,8 @@ func TestFinanceIncome_CRUDAndDerivedFields(t *testing.T) {
 	if created.Currency != "AUD" || created.Status != "active" || created.Cadence != "fortnightly" {
 		t.Errorf("defaults = %+v, want AUD / active / fortnightly", created)
 	}
-	if created.NextExpected != today.Format(dateLayout) || created.DaysUntil != 0 {
-		t.Errorf("derived = %s / %d, want today / 0", created.NextExpected, created.DaysUntil)
+	if created.NextExpected == nil || *created.NextExpected != today.Format(dateLayout) || created.DaysUntil == nil || *created.DaysUntil != 0 {
+		t.Errorf("derived = %v / %v, want today / 0", created.NextExpected, created.DaysUntil)
 	}
 	if created.AccountID != nil || created.LastReceivedDate != nil || created.LastReceivedAmount != nil {
 		t.Errorf("optional fields = %+v, want null account and nothing received", created)
@@ -355,5 +355,64 @@ func TestFinanceIncome_LinkReceiptRules(t *testing.T) {
 	resp = link(bonus, map[string]any{"transaction_id": other.ID, "occurrence_date": today.Format(dateLayout)})
 	if resp.Code != http.StatusConflict || !strings.Contains(resp.Body.String(), "pay cycle already has a receipt") {
 		t.Errorf("lost race on the cycle = %d %s, want 409 naming the cycle", resp.Code, resp.Body.String())
+	}
+}
+
+// TestFinanceIncome_StatusAndEndedOnAgree: ended_on is set exactly when status is ended.
+// Either half alone is a 422 on create and on the merged result of a patch, and an
+// income whose ended_on has passed reports next_expected as null, never a past date.
+func TestFinanceIncome_StatusAndEndedOnAgree(t *testing.T) {
+	api, client := newFinanceIncomeTestAPI(t)
+	ctx := context.Background()
+	admin := sessionCookieFor(t, ctx, client, user.RoleAdmin)
+	today := melbourneToday(t)
+	anchor := today.AddDate(0, 0, -70).Format(dateLayout)
+	past := today.AddDate(0, 0, -10).Format(dateLayout)
+
+	for name, body := range map[string]map[string]any{
+		"ended_on without ended": {"name": "A", "expected_amount": 10, "cadence": "weekly", "anchor_date": anchor, "ended_on": past},
+		"ended without ended_on": {"name": "B", "expected_amount": 10, "cadence": "weekly", "anchor_date": anchor, "status": "ended"},
+		"paused with ended_on":   {"name": "C", "expected_amount": 10, "cadence": "weekly", "anchor_date": anchor, "status": "paused", "ended_on": past},
+	} {
+		if resp := api.Post("/api/admin/finance/income", admin, body); resp.Code != http.StatusUnprocessableEntity {
+			t.Errorf("create %s = %d, want 422; body=%s", name, resp.Code, resp.Body.String())
+		}
+	}
+
+	resp := api.Post("/api/admin/finance/income", admin, map[string]any{
+		"name": "Old job", "expected_amount": 10, "cadence": "weekly", "anchor_date": anchor, "status": "ended", "ended_on": past,
+	})
+	if resp.Code != http.StatusCreated {
+		t.Fatalf("create ended = %d; body=%s", resp.Code, resp.Body.String())
+	}
+	var ended FinanceIncomeDTO
+	_ = json.Unmarshal(resp.Body.Bytes(), &ended)
+	if ended.NextExpected != nil || ended.DaysUntil != nil {
+		t.Errorf("ended next_expected/days_until = %v/%v, want null/null", ended.NextExpected, ended.DaysUntil)
+	}
+
+	resp = api.Post("/api/admin/finance/income", admin, map[string]any{
+		"name": "Salary", "expected_amount": 10, "cadence": "weekly", "anchor_date": anchor,
+	})
+	var inc FinanceIncomeDTO
+	_ = json.Unmarshal(resp.Body.Bytes(), &inc)
+	path := "/api/admin/finance/income/" + itoa(inc.ID)
+	steps := []struct {
+		name string
+		body map[string]any
+		want int
+	}{
+		{"end without a date", map[string]any{"status": "ended"}, http.StatusUnprocessableEntity},
+		{"date without ending", map[string]any{"ended_on": past}, http.StatusUnprocessableEntity},
+		{"end with a date", map[string]any{"status": "ended", "ended_on": past}, http.StatusOK},
+		{"resume keeping the date", map[string]any{"status": "active"}, http.StatusUnprocessableEntity},
+		{"clear the date while ended", map[string]any{"ended_on": ""}, http.StatusUnprocessableEntity},
+		{"move the end date", map[string]any{"ended_on": today.Format(dateLayout)}, http.StatusOK},
+		{"un-end", map[string]any{"status": "active", "ended_on": ""}, http.StatusOK},
+	}
+	for _, s := range steps {
+		if resp := api.Patch(path, admin, s.body); resp.Code != s.want {
+			t.Errorf("patch %s = %d, want %d; body=%s", s.name, resp.Code, s.want, resp.Body.String())
+		}
 	}
 }

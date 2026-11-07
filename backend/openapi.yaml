@@ -747,7 +747,7 @@ components:
           maxLength: 3
           type: string
         ended_on:
-          description: YYYY-MM-DD the income stopped
+          description: YYYY-MM-DD the income stopped; required with status ended and refused with any other status
           type: string
         expected_amount:
           description: Expected receipt per cycle as a positive magnitude
@@ -762,7 +762,7 @@ components:
         notes:
           type: string
         status:
-          description: Defaults to active
+          description: Defaults to active; ended requires ended_on
           enum:
             - active
             - paused
@@ -1383,9 +1383,11 @@ components:
         currency:
           type: string
         days_until:
-          description: Whole days from today to next_expected; negative only for an ended income's final cycle
+          description: Whole days from today to next_expected, never negative; null with it
           format: int64
-          type: integer
+          type:
+            - integer
+            - "null"
         ended_on:
           description: YYYY-MM-DD the income stopped; null while it runs
           type:
@@ -1416,8 +1418,10 @@ components:
         name:
           type: string
         next_expected:
-          description: YYYY-MM-DD; the next derived pay date on or after today, or the last one on or before ended_on once ended
-          type: string
+          description: YYYY-MM-DD; the next derived pay date on or after today and not after ended_on. Null when none is left (the income ended before its next pay date), never a past date
+          type:
+            - string
+            - "null"
         notes:
           type: string
         status:
@@ -3091,6 +3095,7 @@ components:
         notes:
           type: string
         status:
+          description: After the patch, ended requires ended_on and any other status refuses it
           enum:
             - active
             - paused

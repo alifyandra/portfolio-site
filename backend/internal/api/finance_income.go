@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 
@@ -42,8 +43,8 @@ type FinanceIncomeDTO struct {
 	Notes              string   `json:"notes"`
 	AccountID          *int     `json:"account_id" doc:"Account the income is paid into; null when unset (the edge is optional)"`
 	AccountName        string   `json:"account_name"`
-	NextExpected       string   `json:"next_expected" doc:"YYYY-MM-DD; the next derived pay date on or after today, or the last one on or before ended_on once ended"`
-	DaysUntil          int      `json:"days_until" doc:"Whole days from today to next_expected; negative only for an ended income's final cycle"`
+	NextExpected       *string  `json:"next_expected" doc:"YYYY-MM-DD; the next derived pay date on or after today and not after ended_on. Null when none is left (the income ended before its next pay date), never a past date"`
+	DaysUntil          *int     `json:"days_until" doc:"Whole days from today to next_expected, never negative; null with it"`
 	LastReceivedDate   *string  `json:"last_received_date" doc:"YYYY-MM-DD the newest linked cycle actually posted; null until one is linked"`
 	LastReceivedAmount *float64 `json:"last_received_amount" doc:"Amount actually received for that cycle; null until one is linked"`
 	ExpectedMonthly    float64  `json:"expected_monthly" doc:"expected_amount normalised to a per-month figure so mixed cadences can be summed"`
@@ -87,8 +88,8 @@ type createIncomeInput struct {
 		Currency       string  `json:"currency,omitempty" maxLength:"3" doc:"ISO currency code; defaults to AUD"`
 		Cadence        string  `json:"cadence,omitempty" enum:"weekly,fortnightly,monthly,quarterly,annual" doc:"Defaults to monthly"`
 		AnchorDate     string  `json:"anchor_date" doc:"One known pay date, YYYY-MM-DD; every occurrence steps the cadence from here"`
-		Status         string  `json:"status,omitempty" enum:"active,paused,ended" doc:"Defaults to active"`
-		EndedOn        string  `json:"ended_on,omitempty" doc:"YYYY-MM-DD the income stopped"`
+		Status         string  `json:"status,omitempty" enum:"active,paused,ended" doc:"Defaults to active; ended requires ended_on"`
+		EndedOn        string  `json:"ended_on,omitempty" doc:"YYYY-MM-DD the income stopped; required with status ended and refused with any other status"`
 		Notes          string  `json:"notes,omitempty"`
 		AccountID      *int    `json:"account_id,omitempty" doc:"Account the income is paid into; optional"`
 	}
@@ -105,7 +106,7 @@ type updateIncomeInput struct {
 		Currency       *string  `json:"currency,omitempty" maxLength:"3"`
 		Cadence        *string  `json:"cadence,omitempty" enum:"weekly,fortnightly,monthly,quarterly,annual"`
 		AnchorDate     *string  `json:"anchor_date,omitempty" doc:"YYYY-MM-DD"`
-		Status         *string  `json:"status,omitempty" enum:"active,paused,ended"`
+		Status         *string  `json:"status,omitempty" enum:"active,paused,ended" doc:"After the patch, ended requires ended_on and any other status refuses it"`
 		EndedOn        *string  `json:"ended_on,omitempty" doc:"YYYY-MM-DD, or \"\" to clear it"`
 		Notes          *string  `json:"notes,omitempty"`
 		AccountID      *int     `json:"account_id,omitempty" doc:"Account id, or 0 to detach the account"`
@@ -126,6 +127,20 @@ type createIncomeReceiptInput struct {
 
 type incomeReceiptOutput struct {
 	Body IncomeReceiptDTO
+}
+
+// checkIncomeEnd is the status / ended_on cross-check: ended_on is set exactly when the
+// income is ended. An active income with an end date would count toward the totals past
+// it, and an ended one without a date has no point its cycles stop. On a patch it runs on
+// the merged result, so ending takes both fields in one request.
+func checkIncomeEnd(status recurringincome.Status, endedOn *time.Time) error {
+	switch {
+	case status == recurringincome.StatusEnded && endedOn == nil:
+		return huma.Error422UnprocessableEntity("status ended requires ended_on (YYYY-MM-DD)")
+	case status != recurringincome.StatusEnded && endedOn != nil:
+		return huma.Error422UnprocessableEntity("ended_on is only allowed with status ended; send ended_on \"\" to clear it")
+	}
+	return nil
 }
 
 // checkIncomeName is the byte pre-check behind incomeNameMaxBytes.
@@ -193,6 +208,13 @@ func (h *Handler) registerFinanceIncome(api huma.API) {
 		if err != nil {
 			return nil, err
 		}
+		status := recurringincome.DefaultStatus
+		if in.Body.Status != "" {
+			status = recurringincome.Status(in.Body.Status)
+		}
+		if err := checkIncomeEnd(status, endedOn); err != nil {
+			return nil, err
+		}
 
 		create := h.deps.Ent.RecurringIncome.Create().
 			SetName(in.Body.Name).
@@ -208,7 +230,7 @@ func (h *Handler) registerFinanceIncome(api huma.API) {
 			create.SetCadence(recurringincome.Cadence(in.Body.Cadence))
 		}
 		if in.Body.Status != "" {
-			create.SetStatus(recurringincome.Status(in.Body.Status))
+			create.SetStatus(status)
 		}
 		if in.Body.AccountID != nil && *in.Body.AccountID != 0 {
 			create.SetAccountID(*in.Body.AccountID)
@@ -238,6 +260,16 @@ func (h *Handler) registerFinanceIncome(api huma.API) {
 		if h.deps.Ent == nil {
 			return nil, huma.Error503ServiceUnavailable("finance is not available")
 		}
+		cur, err := h.deps.Ent.RecurringIncome.Get(ctx, in.ID)
+		if ent.IsNotFound(err) {
+			return nil, huma.Error404NotFound("recurring income not found")
+		}
+		if err != nil {
+			return nil, huma.Error500InternalServerError("failed to load recurring income", err)
+		}
+		// status and ended_on are cross-checked on the merged result, so start from what
+		// is stored and let the patch overwrite it.
+		status, endedOn := cur.Status, cur.EndedOn
 		upd := h.deps.Ent.RecurringIncome.UpdateOneID(in.ID)
 		if in.Body.Name != nil {
 			if err := checkIncomeName(*in.Body.Name); err != nil {
@@ -262,18 +294,24 @@ func (h *Handler) registerFinanceIncome(api huma.API) {
 			upd.SetAnchorDate(anchor)
 		}
 		if in.Body.Status != nil {
-			upd.SetStatus(recurringincome.Status(*in.Body.Status))
+			status = recurringincome.Status(*in.Body.Status)
+			upd.SetStatus(status)
 		}
 		if in.Body.EndedOn != nil {
 			if *in.Body.EndedOn == "" {
+				endedOn = nil
 				upd.ClearEndedOn()
 			} else {
 				ended, err := parseBillDate("ended_on", *in.Body.EndedOn)
 				if err != nil {
 					return nil, err
 				}
+				endedOn = &ended
 				upd.SetEndedOn(ended)
 			}
+		}
+		if err := checkIncomeEnd(status, endedOn); err != nil {
+			return nil, err
 		}
 		if in.Body.Notes != nil {
 			upd.SetNotes(*in.Body.Notes)
@@ -414,7 +452,7 @@ func toFinanceIncomeDTOs(incomes []finance.IncomeView) []FinanceIncomeDTO {
 			EndedOn:            dateOnlyPtr(v.EndedOn),
 			Notes:              v.Notes,
 			AccountName:        v.AccountName,
-			NextExpected:       v.NextExpected.UTC().Format(dateLayout),
+			NextExpected:       dateOnlyPtr(v.NextExpected),
 			DaysUntil:          v.DaysUntil,
 			LastReceivedDate:   dateOnlyPtr(v.LastReceivedDate),
 			LastReceivedAmount: v.LastReceivedAmount,

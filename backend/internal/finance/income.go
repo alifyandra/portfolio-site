@@ -85,12 +85,12 @@ type IncomeView struct {
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
 
-	// NextExpected is the earliest pay date on or after today, or, once an income has
-	// ended, the last pay date on or before ended_on (nothing after it is expected).
-	NextExpected time.Time
-	// DaysUntil is whole days from today to NextExpected; negative only for an ended
-	// income's final cycle.
-	DaysUntil int
+	// NextExpected is the earliest pay date on or after today and, when the income has an
+	// ended_on, on or before it (nothing after it is expected). Nil when no such date is
+	// left, so a finished income never reports a past date as its next one.
+	NextExpected *time.Time
+	// DaysUntil is whole days from today to NextExpected, never negative; nil with it.
+	DaysUntil *int
 	// LastReceivedDate / LastReceivedAmount come from the newest IncomeReceipt's
 	// transaction: when the money actually posted and how much. Both nil until a cycle is
 	// linked. The amount differing from ExpectedAmount is information, not an error.
@@ -103,7 +103,7 @@ type IncomeView struct {
 
 // IncomeTotals is the expected-money roll-up over a returned income set. Count is every
 // income returned; the two money figures count ACTIVE incomes only, so a paused or ended
-// income never inflates what is expected.
+// income never inflates what is expected, and never one whose ended_on has passed.
 type IncomeTotals struct {
 	ExpectedTotal     float64
 	MonthlyEquivalent float64
@@ -119,7 +119,8 @@ func billCadence(c recurringincome.Cadence) recurringbill.Cadence {
 
 // ListRecurringIncome returns the declared incomes matching the filter with their derived
 // pay dates and last-received figures, plus the expected-money roll-up over the returned
-// set. Results are ordered soonest first (days_until ascending, then name). Like the bill
+// set. Results are ordered soonest first (days_until ascending, incomes with no pay date
+// left last, then name). Like the bill
 // list, the derived date is computed in Go, so within_days filtering and ordering happen
 // after the load; the set is a handful of rows.
 func ListRecurringIncome(ctx context.Context, client *ent.Client, f IncomeFilter) ([]IncomeView, IncomeTotals, error) {
@@ -147,20 +148,27 @@ func ListRecurringIncome(ctx context.Context, client *ent.Client, f IncomeFilter
 		if err != nil {
 			return nil, IncomeTotals{}, err
 		}
-		// within_days is a window AHEAD: an ended income's final cycle in the past is
-		// history, not a pay day coming up.
-		if f.WithinDays > 0 && (v.DaysUntil < 0 || v.DaysUntil > f.WithinDays) {
+		// within_days is a window AHEAD: an income with no pay date left has nothing
+		// coming up.
+		if f.WithinDays > 0 && (v.DaysUntil == nil || *v.DaysUntil > f.WithinDays) {
 			continue
 		}
 		views = append(views, v)
 	}
 	sort.SliceStable(views, func(i, j int) bool {
-		if views[i].DaysUntil != views[j].DaysUntil {
-			return views[i].DaysUntil < views[j].DaysUntil
+		a, b := views[i].DaysUntil, views[j].DaysUntil
+		switch {
+		case a == nil && b == nil:
+		case a == nil:
+			return false
+		case b == nil:
+			return true
+		case *a != *b:
+			return *a < *b
 		}
 		return views[i].Name < views[j].Name
 	})
-	return views, incomeTotals(views), nil
+	return views, incomeTotals(views, today), nil
 }
 
 // incomeView maps one stored income to its view. It expects the account edge to be
@@ -204,24 +212,27 @@ func incomeView(ctx context.Context, client *ent.Client, inc *ent.RecurringIncom
 	}
 
 	next := nextDue(inc.AnchorDate, c, today)
-	// An income that stopped expects nothing after ended_on, so the generator is clipped
-	// here; otherwise a finished job keeps reporting a pay day forever.
-	if inc.EndedOn != nil {
-		if e := normalizeDate(*inc.EndedOn); next.After(e) {
-			next = lastOccurrenceOnOrBefore(inc.AnchorDate, c, e)
-		}
+	// An income that stopped expects nothing after ended_on, so a pay date past it is no
+	// pay date at all; otherwise a finished job keeps reporting a pay day forever.
+	if inc.EndedOn == nil || !next.After(normalizeDate(*inc.EndedOn)) {
+		days := daysBetween(today, next)
+		v.NextExpected = &next
+		v.DaysUntil = &days
 	}
-	v.NextExpected = next
-	v.DaysUntil = daysBetween(today, next)
 	return v, nil
 }
 
 // incomeTotals rolls a returned income set into the expected-money figures. Only ACTIVE
-// incomes count toward the money.
-func incomeTotals(views []IncomeView) IncomeTotals {
+// incomes count toward the money, and never one whose ended_on is before today: the API
+// keeps ended_on to ended incomes, but a row written before it did must not inflate what
+// is expected.
+func incomeTotals(views []IncomeView, today time.Time) IncomeTotals {
 	t := IncomeTotals{Count: len(views)}
 	for _, v := range views {
 		if v.Status != string(recurringincome.StatusActive) {
+			continue
+		}
+		if v.EndedOn != nil && normalizeDate(*v.EndedOn).Before(today) {
 			continue
 		}
 		t.ExpectedTotal += v.ExpectedAmount

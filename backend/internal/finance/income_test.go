@@ -86,8 +86,8 @@ func TestListRecurringIncome_DerivedFields(t *testing.T) {
 		t.Fatalf("views = %d, want 1", len(views))
 	}
 	v := views[0]
-	if !v.NextExpected.Equal(today) || v.DaysUntil != 0 {
-		t.Errorf("next_expected/days_until = %s/%d, want today/0", v.NextExpected.Format(dateLayoutTest), v.DaysUntil)
+	if v.NextExpected == nil || !v.NextExpected.Equal(today) || v.DaysUntil == nil || *v.DaysUntil != 0 {
+		t.Errorf("next_expected/days_until = %v/%v, want today/0", v.NextExpected, v.DaysUntil)
 	}
 	if v.AccountID != acc.ID || v.AccountName != "Everyday" {
 		t.Errorf("account = %d/%q, want %d/Everyday", v.AccountID, v.AccountName, acc.ID)
@@ -145,30 +145,69 @@ func TestListRecurringIncome_TotalsCountActiveOnly(t *testing.T) {
 	}
 }
 
-// TestListRecurringIncome_EndedStopsAtEndedOn: an income that stopped expects nothing
-// after ended_on, so its reported date is the last cycle it was ever paid, not a fresh
-// future pay day that will never come.
-func TestListRecurringIncome_EndedStopsAtEndedOn(t *testing.T) {
+// TestListRecurringIncome_EndedReportsNoPastDate: an income that stopped expects nothing
+// after ended_on. Once ended_on has passed there is no pay date left, so next_expected is
+// absent rather than a past date dressed up as the next one.
+func TestListRecurringIncome_EndedReportsNoPastDate(t *testing.T) {
 	client := newFinanceTestClient(t)
 	ctx := context.Background()
 	today := localToday()
 	anchor := today.AddDate(0, 0, -70) // ten weeks back: cycles every 7 days up to today
-	endedOn := today.AddDate(0, 0, -10)
 
 	seedIncome(t, ctx, client, "Contract", 300, recurringincome.CadenceWeekly, anchor, func(c *ent.RecurringIncomeCreate) {
-		c.SetStatus(recurringincome.StatusEnded).SetEndedOn(endedOn)
+		c.SetStatus(recurringincome.StatusEnded).SetEndedOn(today.AddDate(0, 0, -10))
+	})
+	// Ending in ten days: today's cycle is still ahead of ended_on.
+	seedIncome(t, ctx, client, "Notice period", 300, recurringincome.CadenceWeekly, anchor, func(c *ent.RecurringIncomeCreate) {
+		c.SetStatus(recurringincome.StatusEnded).SetEndedOn(today.AddDate(0, 0, 3))
+	})
+	// Ending in three days, but the next monthly pay date is further out than that.
+	seedIncome(t, ctx, client, "Last month", 300, recurringincome.CadenceMonthly, today.AddDate(0, 0, -10), func(c *ent.RecurringIncomeCreate) {
+		c.SetStatus(recurringincome.StatusEnded).SetEndedOn(today.AddDate(0, 0, 3))
 	})
 
 	views, _, err := ListRecurringIncome(ctx, client, IncomeFilter{Status: "all"})
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
-	v := views[0]
-	if want := today.AddDate(0, 0, -14); !v.NextExpected.Equal(want) {
-		t.Errorf("next_expected = %s, want %s (the last cycle on or before ended_on)", v.NextExpected.Format(dateLayoutTest), want.Format(dateLayoutTest))
+	byName := map[string]IncomeView{}
+	for _, v := range views {
+		byName[v.Name] = v
 	}
-	if v.DaysUntil != -14 {
-		t.Errorf("days_until = %d, want -14", v.DaysUntil)
+	for _, name := range []string{"Contract", "Last month"} {
+		if v := byName[name]; v.NextExpected != nil || v.DaysUntil != nil {
+			t.Errorf("%s next_expected/days_until = %v/%v, want none (no pay date left)", name, v.NextExpected, v.DaysUntil)
+		}
+	}
+	if v := byName["Notice period"]; v.NextExpected == nil || !v.NextExpected.Equal(today) || v.DaysUntil == nil || *v.DaysUntil != 0 {
+		t.Errorf("notice period next_expected/days_until = %v/%v, want today/0", v.NextExpected, v.DaysUntil)
+	}
+}
+
+// TestListRecurringIncome_PastEndedOnLeavesTheMoney: a row whose ended_on has passed is
+// out of the totals even when its status still says active (written before the API
+// cross-checked the two), and it reports no next pay date.
+func TestListRecurringIncome_PastEndedOnLeavesTheMoney(t *testing.T) {
+	client := newFinanceTestClient(t)
+	ctx := context.Background()
+	today := localToday()
+
+	seedIncome(t, ctx, client, "Salary", 1000, recurringincome.CadenceMonthly, today)
+	seedIncome(t, ctx, client, "Stale", 900, recurringincome.CadenceMonthly, today.AddDate(0, -6, 0), func(c *ent.RecurringIncomeCreate) {
+		c.SetEndedOn(today.AddDate(0, 0, -1)) // status left at the active default
+	})
+
+	views, totals, err := ListRecurringIncome(ctx, client, IncomeFilter{Status: "active"})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if totals.Count != 2 || totals.ExpectedTotal != 1000 || totals.MonthlyEquivalent != 1000 {
+		t.Errorf("totals = %+v, want count 2 and only Salary's 1000 in the money", totals)
+	}
+	for _, v := range views {
+		if v.Name == "Stale" && v.NextExpected != nil {
+			t.Errorf("stale next_expected = %s, want none", v.NextExpected.Format(dateLayoutTest))
+		}
 	}
 }
 
@@ -208,13 +247,14 @@ func TestListRecurringIncome_WithinDaysAndAccountFilter(t *testing.T) {
 		t.Errorf("by account = %v, want just Soon (no-account incomes are excluded)", names(views))
 	}
 
-	// Ordering is soonest first, so the default list leads with the nearest pay day.
+	// Ordering is soonest first, so the default list leads with the nearest pay day, and
+	// an income with no pay date left goes last.
 	views, _, err = ListRecurringIncome(ctx, client, IncomeFilter{Status: "all"})
 	if err != nil {
 		t.Fatalf("list all: %v", err)
 	}
-	if got := names(views); !slices.Equal(got, []string{"Finished", "Soon", "Later"}) {
-		t.Errorf("order = %v, want Finished, Soon, Later (days_until ascending)", got)
+	if got := names(views); !slices.Equal(got, []string{"Soon", "Later", "Finished"}) {
+		t.Errorf("order = %v, want Soon, Later, Finished (days_until ascending, none last)", got)
 	}
 }
 
