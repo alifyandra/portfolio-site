@@ -16,7 +16,7 @@ import (
 )
 
 // The income matching pass (ReconcileIncome), the credit-side sibling of ReconcileBills:
-// one owner-typed substring per income, no LLM. It links an unsettled pay cycle to the
+// one owner-typed pattern per income, no LLM. It links an unsettled pay cycle to the
 // posted credit that paid it, as an IncomeReceipt with method auto, and like the bill
 // pass it runs after the ingest transaction commits, over rows already in the ledger.
 //
@@ -65,6 +65,9 @@ type IncomeReconcileSummary struct {
 	CyclesChecked      int
 	CandidatesCompared int
 	ReceiptsLinked     int
+	// Ambiguous counts credits two incomes fit equally well (same cents off, same distance
+	// from their pay dates). They are left for a hand link rather than guessed.
+	Ambiguous int
 }
 
 // incomeMatcher is one income's compiled rule.
@@ -101,27 +104,128 @@ func (m incomeMatcher) matches(c candidate, occ time.Time) bool {
 	return gap >= -earlyPayDays && gap <= incomeMatchLateDays
 }
 
-// bestMatch picks the row that settles one pay date: the closest posted date, ties going
-// to the earlier day and then the lower id, skipping any credit that already settles a
-// receipt of ANY income (one credit is one payment). The second return is the work done.
-func (m incomeMatcher) bestMatch(byDay map[int64][]candidate, occ time.Time, used map[int]bool) (*ent.Transaction, int) {
-	var best *ent.Transaction
-	bestGap, compared := 0, 0
-	for d := -earlyPayDays; d <= incomeMatchLateDays; d++ {
-		for _, c := range byDay[occ.AddDate(0, 0, d).Unix()] {
-			if used[c.txn.ID] {
-				continue
+// incomeFit is one way a credit could settle a cycle: which income (an index into the
+// pass's matchers), which pay date, how far off the expected amount in whole cents, and
+// the signed day offset from the pay date (negative when paid early).
+type incomeFit struct {
+	m      int
+	occ    time.Time
+	c      candidate
+	cents  int64
+	offset int
+}
+
+// closer orders two fits of ONE credit to two incomes: fewer cents off the expected amount
+// first, then the nearer pay date. Equal on both is a tie, which no rule here can break.
+func (f incomeFit) closer(o incomeFit) int {
+	if f.cents != o.cents {
+		return cmpInt64(f.cents, o.cents)
+	}
+	return cmpInt64(int64(absInt(f.offset)), int64(absInt(o.offset)))
+}
+
+func cmpInt64(a, b int64) int {
+	switch {
+	case a < b:
+		return -1
+	case a > b:
+		return 1
+	}
+	return 0
+}
+
+// centsOff is how far a credit is from an expected amount, in whole cents, so two fits
+// compare exactly rather than on float noise.
+func centsOff(amount, expected float64) int64 {
+	return int64(math.Round(math.Abs(amount-expected) * 100))
+}
+
+// assignIncomeCredits decides which credit settles which cycle, across every income in
+// the pass at once, so incomes sharing a payer's pattern cannot steal each other's pay.
+// fits holds every (income, unsettled cycle, unused credit) the rule accepts, in pass
+// order (income, then pay date, then posted day and id).
+//
+//  1. Each credit belongs to the income it fits best (incomeFit.closer over that income's
+//     best cycle). When two incomes tie for it, nothing says which one it pays: it is
+//     left for a hand link and counted in the second return.
+//  2. Within its income a cycle takes the owned credit nearest its pay date, ties going to
+//     the earlier day and then the lower id (the single-income rule), and one credit
+//     settles one cycle.
+//
+// The result is in pass order, so a re-run is deterministic.
+func assignIncomeCredits(fits []incomeFit) ([]incomeFit, int) {
+	type key struct{ txn, m int }
+	bestPer := map[key]incomeFit{}
+	var txnOrder []int
+	incomesOf := map[int][]int{}
+	for _, f := range fits {
+		k := key{f.c.txn.ID, f.m}
+		b, seen := bestPer[k]
+		if !seen {
+			if len(incomesOf[k.txn]) == 0 {
+				txnOrder = append(txnOrder, k.txn)
 			}
-			compared++
-			if !m.matches(c, occ) {
-				continue
-			}
-			if gap := absInt(d); best == nil || gap < bestGap {
-				best, bestGap = c.txn, gap
-			}
+			incomesOf[k.txn] = append(incomesOf[k.txn], f.m)
+		}
+		if !seen || f.closer(b) < 0 {
+			bestPer[k] = f
 		}
 	}
-	return best, compared
+	owner := map[int]int{}
+	ambiguous := 0
+	for _, txn := range txnOrder {
+		ms := incomesOf[txn]
+		win, tied := bestPer[key{txn, ms[0]}], false
+		for _, m := range ms[1:] {
+			switch f := bestPer[key{txn, m}]; f.closer(win) {
+			case -1:
+				win, tied = f, false
+			case 0:
+				tied = true
+			}
+		}
+		if tied {
+			ambiguous++
+			continue
+		}
+		owner[txn] = win.m
+	}
+
+	type cycle struct {
+		m   int
+		occ int64
+	}
+	var order []cycle
+	byCycle := map[cycle][]incomeFit{}
+	for _, f := range fits {
+		if m, ok := owner[f.c.txn.ID]; !ok || m != f.m {
+			continue
+		}
+		cy := cycle{f.m, f.occ.Unix()}
+		if _, seen := byCycle[cy]; !seen {
+			order = append(order, cy)
+		}
+		byCycle[cy] = append(byCycle[cy], f)
+	}
+	used := map[int]bool{}
+	out := make([]incomeFit, 0, len(order))
+	for _, cy := range order {
+		var best *incomeFit
+		for i := range byCycle[cy] {
+			f := &byCycle[cy][i]
+			if used[f.c.txn.ID] {
+				continue // an earlier cycle of the same income took it
+			}
+			if best == nil || absInt(f.offset) < absInt(best.offset) {
+				best = f
+			}
+		}
+		if best != nil {
+			used[best.c.txn.ID] = true
+			out = append(out, *best)
+		}
+	}
+	return out, ambiguous
 }
 
 // incomeCycleWindow is the set of an income's pay dates one pass should try to settle,
@@ -161,6 +265,8 @@ func incomeCycleWindow(inc *ent.RecurringIncome, coverageFrom *time.Time, opts R
 // settled cycle is skipped whoever settled it, so a hand-made receipt is never touched,
 // and the unique indexes on IncomeReceipt make a concurrent double run a no-op. Paused
 // incomes are skipped; ended ones are matched up to ended_on, so late history settles.
+// Which credit settles which cycle is decided across all incomes at once
+// (assignIncomeCredits), and a credit two incomes fit equally well is not linked.
 func ReconcileIncome(ctx context.Context, client *ent.Client, opts ReconcileOptions) (IncomeReconcileSummary, error) {
 	sum := IncomeReconcileSummary{}
 	incomes, err := client.RecurringIncome.Query().
@@ -248,7 +354,8 @@ func ReconcileIncome(ctx context.Context, client *ent.Client, opts ReconcileOpti
 		used[id] = true
 	}
 
-	for _, m := range matchers {
+	var fits []incomeFit
+	for mi, m := range matchers {
 		sum.IncomesScanned++
 		settled, err := settledReceipts(ctx, client, m.income.ID)
 		if err != nil {
@@ -259,30 +366,35 @@ func ReconcileIncome(ctx context.Context, client *ent.Client, opts ReconcileOpti
 				continue // manual or auto, never overwritten
 			}
 			sum.CyclesChecked++
-			t, compared := m.bestMatch(byDay, occ, used)
-			sum.CandidatesCompared += compared
-			if t == nil {
-				continue
+			for d := -earlyPayDays; d <= incomeMatchLateDays; d++ {
+				for _, c := range byDay[occ.AddDate(0, 0, d).Unix()] {
+					if used[c.txn.ID] {
+						continue // one credit is one payment, across every income
+					}
+					sum.CandidatesCompared++
+					if m.matches(c, occ) {
+						fits = append(fits, incomeFit{m: mi, occ: occ, c: c, cents: centsOff(c.txn.Amount, m.income.ExpectedAmount), offset: d})
+					}
+				}
 			}
-			err := client.IncomeReceipt.Create().
-				SetIncomeID(m.income.ID).
-				SetTransactionID(t.ID).
-				SetOccurrenceDate(occ).
-				SetMethod(incomereceipt.MethodAuto).
-				Exec(ctx)
-			if ent.IsConstraintError(err) {
-				// A concurrent pass or a hand link got there first; the indexes did their job.
-				settled[occ.Unix()] = true
-				used[t.ID] = true
-				continue
-			}
-			if err != nil {
-				return sum, err
-			}
-			settled[occ.Unix()] = true
-			used[t.ID] = true
-			sum.ReceiptsLinked++
 		}
+	}
+	assigned, ambiguous := assignIncomeCredits(fits)
+	sum.Ambiguous = ambiguous
+	for _, f := range assigned {
+		err := client.IncomeReceipt.Create().
+			SetIncomeID(matchers[f.m].income.ID).
+			SetTransactionID(f.c.txn.ID).
+			SetOccurrenceDate(f.occ).
+			SetMethod(incomereceipt.MethodAuto).
+			Exec(ctx)
+		if ent.IsConstraintError(err) {
+			continue // a concurrent pass or a hand link got there first; the indexes did their job
+		}
+		if err != nil {
+			return sum, err
+		}
+		sum.ReceiptsLinked++
 	}
 	return sum, nil
 }

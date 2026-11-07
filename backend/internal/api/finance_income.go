@@ -514,6 +514,7 @@ type reconcileIncomeOutput struct {
 		CyclesChecked      int `json:"cycles_checked" doc:"Unsettled pay dates it tried to settle"`
 		CandidatesCompared int `json:"candidates_compared" doc:"Posted rows the match rule was evaluated against"`
 		ReceiptsLinked     int `json:"receipts_linked" doc:"New auto receipts"`
+		Ambiguous          int `json:"ambiguous" doc:"Credits two incomes fit equally well, left unlinked for a hand link"`
 	}
 }
 
@@ -544,6 +545,7 @@ func (h *Handler) registerFinanceIncomeReconcile(api huma.API) {
 		out.Body.CyclesChecked = sum.CyclesChecked
 		out.Body.CandidatesCompared = sum.CandidatesCompared
 		out.Body.ReceiptsLinked = sum.ReceiptsLinked
+		out.Body.Ambiguous = sum.Ambiguous
 		return out, nil
 	})
 }

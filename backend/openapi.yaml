@@ -2986,6 +2986,10 @@ components:
           format: uri
           readOnly: true
           type: string
+        ambiguous:
+          description: Credits two incomes fit equally well, left unlinked for a hand link
+          format: int64
+          type: integer
         candidates_compared:
           description: Posted rows the match rule was evaluated against
           format: int64
@@ -3007,6 +3011,7 @@ components:
         - cycles_checked
         - candidates_compared
         - receipts_linked
+        - ambiguous
       type: object
     ReorderPlaylistsInputBody:
       additionalProperties: false

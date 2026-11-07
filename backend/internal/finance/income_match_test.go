@@ -220,3 +220,73 @@ func TestReconcileIncome_SkipsTransfersAndRefunds(t *testing.T) {
 		t.Errorf("payday receipt = %+v, want the salary credit", r)
 	}
 }
+
+// TestReconcileIncome_SharedPatternBestFit: incomes that share a payer's pattern do not
+// steal each other's credits. Each credit goes to the income it fits best (fewest cents
+// off the expected amount, then the nearest pay date), whichever income was declared
+// first. The allowance is older and its tolerance admits the salary credit, which also
+// posted nearer its pay date; the salary still gets it. Two incomes at one amount with
+// pay dates three days apart each take the credit nearest their own date.
+func TestReconcileIncome_SharedPatternBestFit(t *testing.T) {
+	client := newFinanceTestClient(t)
+	ctx := context.Background()
+	today := localToday()
+	acc := seedAccount(t, ctx, client, "Everyday", account.ClassAsset, account.TypeEveryday)
+	payday := recentDay(today, 4)
+	anchor := payday.AddDate(0, -1, 0)
+	pattern := func(c *ent.RecurringIncomeCreate) { c.SetMatchPattern("acme") }
+	allowance := seedIncome(t, ctx, client, "Allowance", 2100, recurringincome.CadenceMonthly, anchor, pattern)
+	salary := seedIncome(t, ctx, client, "Salary", 2000, recurringincome.CadenceMonthly, anchor, pattern)
+	seedTxn(t, ctx, client, acc, "salary", payday, 2000, "ACME PAYROLL", "")
+	seedTxn(t, ctx, client, acc, "allowance", payday.AddDate(0, 0, 1), 2100, "ACME PAYROLL", "")
+
+	late := seedIncome(t, ctx, client, "Rent B", 900, recurringincome.CadenceMonthly, anchor.AddDate(0, 0, 3), func(c *ent.RecurringIncomeCreate) {
+		c.SetMatchPattern("quoll")
+	})
+	early := seedIncome(t, ctx, client, "Rent A", 900, recurringincome.CadenceMonthly, anchor, func(c *ent.RecurringIncomeCreate) {
+		c.SetMatchPattern("quoll")
+	})
+	seedTxn(t, ctx, client, acc, "rent-a", payday.AddDate(0, 0, 1), 900, "RENT QUOLL", "")
+
+	sum, err := ReconcileIncome(ctx, client, ReconcileOptions{})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if r := receiptFor(t, ctx, client, salary.ID, payday); r == nil || r.Edges.Transaction.Amount != 2000 {
+		t.Errorf("salary receipt = %+v, want the 2000 credit", r)
+	}
+	if r := receiptFor(t, ctx, client, allowance.ID, payday); r == nil || r.Edges.Transaction.Amount != 2100 {
+		t.Errorf("allowance receipt = %+v, want the 2100 credit", r)
+	}
+	if r := receiptFor(t, ctx, client, early.ID, payday); r == nil {
+		t.Error("the rent credit a day after Rent A's pay date did not settle Rent A")
+	}
+	if r := receiptFor(t, ctx, client, late.ID, payday.AddDate(0, 0, 3)); r != nil {
+		t.Errorf("Rent B took %+v, want it left: the credit is nearer Rent A's date", r)
+	}
+	if sum.ReceiptsLinked != 3 || sum.Ambiguous != 0 {
+		t.Errorf("summary = %+v, want 3 linked, none ambiguous", sum)
+	}
+}
+
+// TestReconcileIncome_AmbiguousCreditLeftForHand: two incomes share the pattern, the
+// amount and the pay date, so nothing says which one a credit pays. It is not guessed:
+// it is left for a hand link and counted as ambiguous.
+func TestReconcileIncome_AmbiguousCreditLeftForHand(t *testing.T) {
+	client := newFinanceTestClient(t)
+	ctx := context.Background()
+	today := localToday()
+	acc := seedAccount(t, ctx, client, "Everyday", account.ClassAsset, account.TypeEveryday)
+	payday := recentDay(today, 1)
+	pattern := func(c *ent.RecurringIncomeCreate) { c.SetMatchPattern("quoll") }
+	seedIncome(t, ctx, client, "Room 1", 900, recurringincome.CadenceMonthly, payday, pattern)
+	seedIncome(t, ctx, client, "Room 2", 900, recurringincome.CadenceMonthly, payday, pattern)
+	seedTxn(t, ctx, client, acc, "rent", payday, 900, "RENT QUOLL", "")
+	sum, err := ReconcileIncome(ctx, client, ReconcileOptions{})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if sum.ReceiptsLinked != 0 || sum.Ambiguous != 1 || client.IncomeReceipt.Query().CountX(ctx) != 0 {
+		t.Errorf("summary = %+v, want nothing linked and 1 ambiguous", sum)
+	}
+}
