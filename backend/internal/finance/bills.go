@@ -71,10 +71,15 @@ func localToday() time.Time {
 // many days, plus anything genuinely overdue (actionable now); a past due date that is
 // NOT overdue is history and stays out. AccountID > 0 keeps only bills paid from that
 // account, which EXCLUDES bills with no account set.
+//
+// Today is the calendar day the derived figures (next_due, days_until, overdue) are
+// measured from, as a UTC-midnight date in LocalDate's form. Zero means the current
+// Melbourne day; a caller holding a clock passes it so a test can pin the instant.
 type BillFilter struct {
 	Status     string
 	WithinDays int
 	AccountID  int
+	Today      time.Time
 }
 
 // BillView is one recurring bill's stored columns plus the part that is derived on read.
@@ -143,6 +148,9 @@ type BillTotals struct {
 type ReconcileOptions struct {
 	From *time.Time
 	To   *time.Time
+	// Today is the day the pass treats as now, in BillFilter.Today's form; zero means the
+	// current Melbourne day.
+	Today time.Time
 }
 
 // ReconcileSummary reports what one matching pass did, so a "reconcile now" caller can see
@@ -433,7 +441,10 @@ func ListRecurringBills(ctx context.Context, client *ent.Client, f BillFilter) (
 		return nil, BillTotals{}, err
 	}
 
-	today := localToday()
+	today := f.Today
+	if today.IsZero() {
+		today = localToday()
+	}
 	views := make([]BillView, 0, len(bills))
 	for _, b := range bills {
 		v, err := billView(ctx, client, b, coverageFrom, today)
@@ -736,7 +747,10 @@ func ReconcileBills(ctx context.Context, client *ent.Client, opts ReconcileOptio
 		return sum, nil // an empty ledger can settle nothing
 	}
 
-	today := localToday()
+	today := opts.Today
+	if today.IsZero() {
+		today = localToday()
+	}
 	// Cycles per bill, plus the union of every bill's candidate date window, so the whole
 	// pass loads posted rows once instead of once per bill.
 	cycles := make(map[int][]time.Time, len(candidates))

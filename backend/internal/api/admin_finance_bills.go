@@ -158,7 +158,7 @@ func (h *Handler) registerAdminFinanceBills(api huma.API) {
 		if h.deps.Ent == nil {
 			return nil, huma.Error503ServiceUnavailable("finance is not available")
 		}
-		bills, totals, err := finance.ListRecurringBills(ctx, h.deps.Ent, finance.BillFilter{Status: "all"})
+		bills, totals, err := finance.ListRecurringBills(ctx, h.deps.Ent, finance.BillFilter{Status: "all", Today: h.financeToday()})
 		if err != nil {
 			return nil, huma.Error500InternalServerError("failed to list recurring bills", err)
 		}
@@ -378,7 +378,7 @@ func (h *Handler) registerAdminFinanceBills(api huma.API) {
 		}
 		// Both bounds open: the button exists for a full backfill after a pattern edit,
 		// unlike the post-ingest hook which passes the window it just ingested.
-		sum, err := finance.ReconcileBills(ctx, h.deps.Ent, finance.ReconcileOptions{})
+		sum, err := finance.ReconcileBills(ctx, h.deps.Ent, finance.ReconcileOptions{Today: h.financeToday()})
 		if err != nil {
 			return nil, huma.Error500InternalServerError("failed to reconcile recurring bills", err)
 		}
@@ -433,7 +433,7 @@ func (h *Handler) registerAdminFinanceBills(api huma.API) {
 // or update answers with the same derived fields (next_due, days_until, last paid) the
 // list endpoints report instead of a second, hand-rolled shape.
 func (h *Handler) billResponse(ctx context.Context, id int) (*adminBillOutput, error) {
-	bills, _, err := finance.ListRecurringBills(ctx, h.deps.Ent, finance.BillFilter{Status: "all"})
+	bills, _, err := finance.ListRecurringBills(ctx, h.deps.Ent, finance.BillFilter{Status: "all", Today: h.financeToday()})
 	if err != nil {
 		return nil, huma.Error500InternalServerError("failed to load the recurring bill", err)
 	}

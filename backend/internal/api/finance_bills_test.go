@@ -19,6 +19,7 @@ import (
 	"github.com/alifyandra/portfolio-site/backend/ent/account"
 	"github.com/alifyandra/portfolio-site/backend/ent/user"
 	"github.com/alifyandra/portfolio-site/backend/internal/auth"
+	"github.com/alifyandra/portfolio-site/backend/internal/finance"
 )
 
 // Recurring-bill endpoint tests (portfolio-site#125). The read lives under /api/finance/*
@@ -44,17 +45,22 @@ func newFinanceBillsTestAPI(t *testing.T) (humatest.TestAPI, *ent.Client) {
 	svc := auth.New(client, auth.Config{})
 	_, api := humatest.New(t)
 	api.UseMiddleware(svc.Middleware)
-	h := New(Deps{Auth: svc, Ent: client})
+	h := New(Deps{Auth: svc, Ent: client, Now: func() time.Time { return boundaryNow }})
 	h.registerFinanceRead(api)
 	h.registerAdminFinanceBills(api)
 	return api, client
 }
 
-// todayUTC is the UTC-midnight "today" the derived due dates are measured from.
-func todayUTC() time.Time {
-	n := time.Now().UTC()
-	return time.Date(n.Year(), n.Month(), n.Day(), 0, 0, 0, 0, time.UTC)
-}
+// boundaryNow is the instant every bill test runs at. 14:00 UTC on 7 November 2026 is
+// 01:00 AEDT on the 8th, so the UTC and Melbourne calendar days differ. Due dates are
+// Melbourne calendar facts, and when these tests took "today" from the real clock's UTC date
+// they failed only when CI happened to run in the first hours of a Melbourne day. Pinning
+// the handler clock here makes every run cross that boundary.
+var boundaryNow = time.Date(2026, 11, 7, 14, 0, 0, 0, time.UTC)
+
+// billsToday is the "today" the derived due dates are measured from: the Melbourne
+// calendar day at boundaryNow (2026-11-08), in the UTC-midnight form stored dates take.
+func billsToday() time.Time { return finance.LocalDate(boundaryNow) }
 
 // TestFinanceBills_RequiresAdmin: anonymous is 401 and a member is 403 on every bill
 // route, read and write alike.
@@ -106,7 +112,7 @@ func TestFinanceBills_CRUDAndDerivedFields(t *testing.T) {
 	api, client := newFinanceBillsTestAPI(t)
 	ctx := context.Background()
 	admin := sessionCookieFor(t, ctx, client, user.RoleAdmin)
-	today := todayUTC()
+	today := billsToday()
 
 	resp := api.Post("/api/admin/finance/bills", admin, map[string]any{
 		"name":            "Housing",
@@ -196,6 +202,42 @@ func TestFinanceBills_CRUDAndDerivedFields(t *testing.T) {
 	}
 }
 
+// TestFinanceBills_TodayIsTheMelbourneDayAtTheUTCBoundary pins the regression behind a CI
+// failure at 00:30 AEDT: at 14:00 UTC on 7 November the owner's day is already the 8th, so
+// a bill anchored on the 8th is due today, and one anchored on the 7th (the UTC date) has
+// already passed and reads a full cadence out. The dates are literal so that measuring
+// "today" off the UTC date, in the handler or the test, fails here on every run.
+func TestFinanceBills_TodayIsTheMelbourneDayAtTheUTCBoundary(t *testing.T) {
+	if got := billsToday().Format(dateLayout); got != "2026-11-08" {
+		t.Fatalf("Melbourne day at %s = %s, want 2026-11-08 (is the tz database available?)", boundaryNow.Format(time.RFC3339), got)
+	}
+	api, client := newFinanceBillsTestAPI(t)
+	ctx := context.Background()
+	admin := sessionCookieFor(t, ctx, client, user.RoleAdmin)
+
+	for _, tc := range []struct {
+		name, anchor, wantNext string
+		wantDays               int
+	}{
+		{"Due today", "2026-11-08", "2026-11-08", 0},
+		{"Due on the UTC date", "2026-11-07", "2026-11-21", 13},
+	} {
+		resp := api.Post("/api/admin/finance/bills", admin, map[string]any{
+			"name": tc.name, "expected_amount": 50, "cadence": "fortnightly", "anchor_date": tc.anchor,
+		})
+		if resp.Code != http.StatusCreated {
+			t.Fatalf("create %q = %d, want 201; body=%s", tc.name, resp.Code, resp.Body.String())
+		}
+		var bill FinanceBillDTO
+		if err := json.Unmarshal(resp.Body.Bytes(), &bill); err != nil {
+			t.Fatalf("decode %q: %v", tc.name, err)
+		}
+		if bill.NextDue != tc.wantNext || bill.DaysUntil != tc.wantDays {
+			t.Errorf("%s (anchor %s) = %s / %d, want %s / %d", tc.name, tc.anchor, bill.NextDue, bill.DaysUntil, tc.wantNext, tc.wantDays)
+		}
+	}
+}
+
 // TestFinanceBills_BadInputIs422: a malformed anchor date and an out-of-range status are
 // rejected loudly rather than landing as a zero date or an unfiltered list.
 func TestFinanceBills_BadInputIs422(t *testing.T) {
@@ -226,7 +268,7 @@ func TestFinanceBills_HandReconciledBill(t *testing.T) {
 	api, client := newFinanceBillsTestAPI(t)
 	ctx := context.Background()
 	admin := sessionCookieFor(t, ctx, client, user.RoleAdmin)
-	today := todayUTC()
+	today := billsToday()
 
 	acc := client.Account.Create().SetSource("commbank").SetName("Everyday").
 		SetType(account.TypeEveryday).SetClass(account.ClassAsset).SetCurrency("AUD").SaveX(ctx)
@@ -260,7 +302,7 @@ func TestFinanceBills_ReconcileAndManualLink(t *testing.T) {
 	api, client := newFinanceBillsTestAPI(t)
 	ctx := context.Background()
 	admin := sessionCookieFor(t, ctx, client, user.RoleAdmin)
-	today := todayUTC()
+	today := billsToday()
 
 	acc := client.Account.Create().SetSource("commbank").SetName("Everyday").
 		SetType(account.TypeEveryday).SetClass(account.ClassAsset).SetCurrency("AUD").SaveX(ctx)

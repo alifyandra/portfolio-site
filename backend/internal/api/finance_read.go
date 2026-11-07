@@ -618,6 +618,7 @@ func (h *Handler) listFinanceBills(ctx context.Context, in *listFinanceBillsInpu
 		Status:     in.Status,
 		WithinDays: in.WithinDays,
 		AccountID:  in.AccountID,
+		Today:      h.financeToday(),
 	})
 	if err != nil {
 		return nil, huma.Error500InternalServerError("failed to load recurring bills", err)

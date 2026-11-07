@@ -24,6 +24,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/alifyandra/portfolio-site/backend/ent"
 	"github.com/alifyandra/portfolio-site/backend/internal/auth"
@@ -81,6 +82,10 @@ type Deps struct {
 	// OAuth access token bound to this MCP resource (audience) with finance.read
 	// scope. Nil in cmd/spec and whenever the flag is off. It NEVER sees a cookie.
 	VerifyOAuthToken func(ctx context.Context, rawToken string) bool
+
+	// Now is the clock the finance tools take "today" from; nil means time.Now. Tests pin
+	// it to an instant where the UTC and Melbourne dates differ.
+	Now func() time.Time
 }
 
 // server is the http.Handler mounted at /mcp.

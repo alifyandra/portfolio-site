@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 
@@ -22,6 +23,16 @@ var financeTags = []string{"finance"}
 
 // financeScope is the ScheduledJob key / scope string the ingest token must carry.
 const financeScope = "finance.sync"
+
+// financeToday is the Melbourne calendar day at the handler's clock (Deps.Now, else the
+// wall clock), the "today" recurring-bill due dates and matching windows measure from.
+func (h *Handler) financeToday() time.Time {
+	now := time.Now
+	if h.deps.Now != nil {
+		now = h.deps.Now
+	}
+	return finance.LocalDate(now())
+}
 
 type ingestInput struct {
 	Body finance.Payload
@@ -87,6 +98,7 @@ func (h *Handler) ingestFinance(ctx context.Context, in *ingestInput) (*ingestOu
 		if from, to, ok := finance.PostedDateRange(&in.Body); ok {
 			opts.From, opts.To = &from, &to
 		}
+		opts.Today = h.financeToday()
 		if rec, rErr := finance.ReconcileBills(ctx, h.deps.Ent, opts); rErr != nil {
 			slog.Warn("finance: post-ingest bill reconciliation failed", "error", rErr)
 		} else if rec.PaymentsLinked > 0 {
