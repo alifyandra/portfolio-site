@@ -45,8 +45,10 @@ import (
 //     its first number) is a merchant parsed on the same account joins that merchant's
 //     group. A row with nothing distinctive left is not grouped.
 //  3. Within a group, walk back from a recent row (the head) keeping each older row
-//     whose magnitude is within suggestAmountTolerance of the head's and whose gap to
-//     the previous kept row fits the cadence band; a row too close is skipped as noise
+//     whose magnitude is within suggestAmountTolerancePct of the run's median and whose
+//     gap to the previous kept row fits the cadence band (settledChain walks against the
+//     head's amount first, then re-walks against the median until every kept row fits
+//     it, the head included); a row too close is skipped as noise
 //     (a one-off at the same merchant). A gap of exactly two cycles (twice the band) is
 //     one skipped cycle and is kept and counted in gaps; any other gap too wide ends the
 //     run. Bands are tried finest first, so a weekly run is never reported as fortnightly.
@@ -64,10 +66,12 @@ const (
 	// suggestMinRun is the fewest rows a run needs: two gaps, so "near-constant interval"
 	// is a measurement and not one coincidence.
 	suggestMinRun = 3
-	// suggestAmountTolerance is how far (as a fraction of the head row's magnitude) a row
-	// may differ and still belong to the run: the bills' default amount_tolerance_pct, so
-	// an accepted bill's own matcher accepts every evidence row.
-	suggestAmountTolerance = 0.10
+	// suggestAmountTolerancePct is how far (as a percentage of the run's median magnitude,
+	// which becomes the declaration's expected amount) every evidence row may differ. It is
+	// the bills' default amount_tolerance_pct and the income matcher's
+	// incomeAmountTolerancePct, computed the same way, so an accepted declaration's own
+	// matcher accepts every evidence row on amount.
+	suggestAmountTolerancePct = 10
 	// suggestStaleGraceDays is how far past one band maximum the newest row may be and the
 	// run still count as live: a daily sync that has not landed yet, or a late cycle.
 	suggestStaleGraceDays = 7
@@ -227,7 +231,7 @@ func truncateBytes(s string, n int) string {
 }
 
 func nearAmount(a, ref float64) bool {
-	return math.Abs(a-ref) <= ref*suggestAmountTolerance
+	return math.Abs(a-ref) <= ref*suggestAmountTolerancePct/100
 }
 
 // detectRuns is the pure half of the pass: rows in, runs out, in a fixed order (account,
@@ -328,7 +332,7 @@ func findRun(txns []*ent.Transaction, today time.Time) ([]*ent.Transaction, int,
 			if daysBetween(txns[h].PostedDate, today) > band.max+suggestStaleGraceDays {
 				break // every older head is staler still
 			}
-			if chain, gaps := chainFrom(txns, h, band); runShape(chain, gaps) {
+			if chain, gaps, ok := settledChain(txns, h, band); ok {
 				return chain, gaps, band, true
 			}
 		}
@@ -343,12 +347,43 @@ func runShape(chain []*ent.Transaction, gaps int) bool {
 	return len(chain) >= suggestMinRun && len(chain)-1-gaps > gaps
 }
 
-// chainFrom walks back from txns[h], keeping each older row near the head's amount whose
-// gap to the last kept row fits the band, or fits it twice over (one skipped cycle,
-// counted in gaps). Returned oldest first.
-func chainFrom(txns []*ent.Transaction, h int, band cadenceBand) ([]*ent.Transaction, int) {
+// settledChain is the chain from head h whose every row, the head included, is near the
+// median the run would declare. The first walk is against the head's magnitude; each
+// later one is against the previous chain's median, until a walk's rows all fit its own
+// median. A head that is itself an outlier against that median is refused, so an older
+// head is tried instead. Bounded, since the reference only settles on real data.
+func settledChain(txns []*ent.Transaction, h int, band cadenceBand) ([]*ent.Transaction, int, bool) {
+	head := math.Abs(txns[h].Amount)
+	ref := head
+	for range 4 {
+		chain, gaps := chainFrom(txns, h, band, ref)
+		if !runShape(chain, gaps) {
+			return nil, 0, false
+		}
+		m := medianMagnitude(chain)
+		if !nearAmount(head, m) {
+			return nil, 0, false
+		}
+		fits := true
+		for _, t := range chain {
+			if !nearAmount(math.Abs(t.Amount), m) {
+				fits = false
+				break
+			}
+		}
+		if fits {
+			return chain, gaps, true
+		}
+		ref = m
+	}
+	return nil, 0, false
+}
+
+// chainFrom walks back from txns[h], keeping each older row near ref whose gap to the
+// last kept row fits the band, or fits it twice over (one skipped cycle, counted in
+// gaps). The head is always kept. Returned oldest first.
+func chainFrom(txns []*ent.Transaction, h int, band cadenceBand, ref float64) ([]*ent.Transaction, int) {
 	head := txns[h]
-	ref := math.Abs(head.Amount)
 	chain := []*ent.Transaction{head}
 	last := head.PostedDate
 	gaps := 0
@@ -374,24 +409,29 @@ walk:
 	return chain, gaps
 }
 
-// buildRun derives what a suggestion stores from its chain: the median magnitude, the
-// best-fitting grid, and a label and match pattern.
-func buildRun(chain []*ent.Transaction, c recurringbill.Cadence, counterparty string) detectedRun {
+// medianMagnitude is the median of the chain's unsigned amounts, the run's expected
+// amount. The chain is never empty.
+func medianMagnitude(chain []*ent.Transaction) float64 {
 	amounts := make([]float64, 0, len(chain))
 	for _, t := range chain {
 		amounts = append(amounts, math.Abs(t.Amount))
 	}
 	slices.Sort(amounts)
-	median := amounts[len(amounts)/2]
 	if len(amounts)%2 == 0 {
-		median = (amounts[len(amounts)/2-1] + amounts[len(amounts)/2]) / 2
+		return (amounts[len(amounts)/2-1] + amounts[len(amounts)/2]) / 2
 	}
+	return amounts[len(amounts)/2]
+}
+
+// buildRun derives what a suggestion stores from its chain: the median magnitude, the
+// best-fitting grid, and a label and match pattern.
+func buildRun(chain []*ent.Transaction, c recurringbill.Cadence, counterparty string) detectedRun {
 	label, pattern := describeRun(chain, counterparty)
 	return detectedRun{
 		counterparty:   counterparty,
 		cadence:        c,
 		evidence:       chain,
-		expectedAmount: median,
+		expectedAmount: medianMagnitude(chain),
 		anchor:         bestAnchor(chain, c),
 		label:          label,
 		matchPattern:   pattern,

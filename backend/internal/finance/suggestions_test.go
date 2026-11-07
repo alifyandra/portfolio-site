@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"maps"
+	"math"
 	"strconv"
 	"testing"
 	"time"
@@ -155,6 +156,31 @@ func TestDetectRuns_ToleratesOneSkippedCycle(t *testing.T) {
 		day(2026, time.November, 3)), nil, today)
 	if len(runs) != 0 {
 		t.Errorf("two skipped cycles: runs = %+v, want none", runs)
+	}
+}
+
+// TestDetectRuns_EvidenceFitsTheMedian: every evidence row is within the tolerance of
+// the expected amount (the run's median), so the accepted declaration's own matcher takes
+// each one. October's 105 is near the newest row's 98 but not near the median 90, so it
+// is left out and the run keeps the other four with September to November as one gap.
+func TestDetectRuns_EvidenceFitsTheMedian(t *testing.T) {
+	today := day(2026, time.November, 8)
+	var rows []*ent.Transaction
+	for i, a := range []float64{-90, -90, -90, -105, -98} {
+		rows = append(rows, memTxn(i+1, 1, day(2026, time.July, 4).AddDate(0, i, 0), a, "GYM FLEXIFIT", ""))
+	}
+	runs := detectRuns(rows, nil, today)
+	if len(runs) != 1 {
+		t.Fatalf("runs = %d, want 1", len(runs))
+	}
+	r := runs[0]
+	for _, e := range r.evidence {
+		if math.Abs(math.Abs(e.Amount)-r.expectedAmount) > r.expectedAmount*suggestAmountTolerancePct/100 {
+			t.Errorf("evidence %v is outside the tolerance of the expected %v", e.Amount, r.expectedAmount)
+		}
+	}
+	if r.expectedAmount != 90 || len(r.evidence) != 4 || r.gaps != 1 {
+		t.Errorf("run = %v over %d rows with %d gaps, want 90 over 4 with 1", r.expectedAmount, len(r.evidence), r.gaps)
 	}
 }
 
