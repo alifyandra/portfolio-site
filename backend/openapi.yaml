@@ -3068,7 +3068,7 @@ components:
           format: int64
           type: integer
         declared:
-          description: Runs left alone because a declaration already covers them
+          description: Runs left alone because a live declaration already covers them (an ended one covers only up to its ended_on plus a week)
           format: int64
           type: integer
         dismissed:
@@ -3081,6 +3081,10 @@ components:
           type: integer
         refreshed:
           description: Pending suggestions updated with the current amount, grid and evidence
+          format: int64
+          type: integer
+        reopened:
+          description: Accepted suggestions put back to pending because their declaration ended and the run carried on
           format: int64
           type: integer
         rows_scanned:
@@ -3098,6 +3102,7 @@ components:
         - refreshed
         - declared
         - dismissed
+        - reopened
         - dropped
       type: object
     StartJobRunOutputBody:

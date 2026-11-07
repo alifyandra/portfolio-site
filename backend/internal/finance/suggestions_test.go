@@ -515,6 +515,79 @@ func TestScanRecurrences_CoverageOnWordBoundaries(t *testing.T) {
 	}
 }
 
+// TestScanRecurrences_EndedDeclarationsStopCovering: a paused declaration still speaks
+// for its counterparty, but an ended one covers only rows up to its ended_on plus a
+// grace week. A run that carries on past that is suggested again, even when its older
+// rows are linked to the ended declaration.
+func TestScanRecurrences_EndedDeclarationsStopCovering(t *testing.T) {
+	client := newFinanceTestClient(t)
+	ctx := context.Background()
+	today := localToday()
+	acc := seedAccount(t, ctx, client, "Everyday", account.ClassAsset, account.TypeEveryday)
+	last := recentDay(today, 3)
+	seedMonthlyRun(t, ctx, client, acc, "zylo", last, 4, -15.99, "ZYLO STREAMING")
+	seedMonthlyRun(t, ctx, client, acc, "gym", recentDay(today, 2), 4, -20, "GYM FLEXIFIT")
+	endedOn := last.AddDate(0, -2, 0)
+	ended := seedBill(t, ctx, client, "Streaming", 15.99, recurringbill.CadenceMonthly, last.AddDate(0, -3, 0), func(c *ent.RecurringBillCreate) {
+		c.SetMatchPattern("zylo").SetStatus(recurringbill.StatusEnded).SetEndedOn(endedOn)
+	})
+	oldest := client.Transaction.Query().Where(transaction.DedupHash("hash-zylo-3")).OnlyX(ctx)
+	client.BillPayment.Create().SetBillID(ended.ID).SetTransactionID(oldest.ID).SetOccurrenceDate(last.AddDate(0, -3, 0)).SaveX(ctx)
+	seedBill(t, ctx, client, "Gym", 20, recurringbill.CadenceMonthly, today, func(c *ent.RecurringBillCreate) {
+		c.SetMatchPattern("flexifit").SetStatus(recurringbill.StatusPaused)
+	})
+
+	sum, err := ScanRecurrences(ctx, client)
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if sum.Created != 1 || sum.Declared != 1 {
+		t.Fatalf("scan = %+v, want the run past the ended bill suggested and the paused one declared", sum)
+	}
+	if s := client.RecurrenceSuggestion.Query().OnlyX(ctx); s.Counterparty != "zylo streaming" {
+		t.Errorf("suggested %q, want the streaming run", s.Counterparty)
+	}
+
+	// Ending it later than the newest row (within the grace week) covers the run again.
+	client.RecurringBill.UpdateOne(ended).SetEndedOn(last.AddDate(0, 0, -5)).ExecX(ctx)
+	if sum, err := ScanRecurrences(ctx, client); err != nil || sum.Declared != 2 || sum.Dropped != 1 {
+		t.Errorf("scan = %+v (%v), want both declared and the pending one dropped", sum, err)
+	}
+}
+
+// TestScanRecurrences_ReopensAcceptedRunAfterItsDeclarationEnded: the owner accepted a
+// run, then ended the bill, and the charges carried on. The accepted suggestion is
+// reopened as pending so the owner sees it again; it no longer points at the ended bill.
+func TestScanRecurrences_ReopensAcceptedRunAfterItsDeclarationEnded(t *testing.T) {
+	client := newFinanceTestClient(t)
+	ctx := context.Background()
+	today := localToday()
+	acc := seedAccount(t, ctx, client, "Everyday", account.ClassAsset, account.TypeEveryday)
+	last := recentDay(today, 3)
+	seedMonthlyRun(t, ctx, client, acc, "zylo", last, 4, -15.99, "ZYLO STREAMING")
+	if _, err := ScanRecurrences(ctx, client); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	s := client.RecurrenceSuggestion.Query().OnlyX(ctx)
+	res, err := AcceptSuggestion(ctx, client, s.ID, "Streaming")
+	if err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	client.RecurringBill.UpdateOneID(res.BillID).SetStatus(recurringbill.StatusEnded).SetEndedOn(last.AddDate(0, -2, 0)).ExecX(ctx)
+
+	sum, err := ScanRecurrences(ctx, client)
+	if err != nil {
+		t.Fatalf("rescan: %v", err)
+	}
+	if sum.Reopened != 1 || sum.Declared != 0 {
+		t.Errorf("rescan = %+v, want the accepted run reopened", sum)
+	}
+	s = client.RecurrenceSuggestion.Query().WithBill().OnlyX(ctx)
+	if s.Status != recurrencesuggestion.StatusPending || s.DecidedAt != nil || s.Edges.Bill != nil {
+		t.Errorf("suggestion = %+v (bill %v), want pending, undecided and unlinked", s, s.Edges.Bill)
+	}
+}
+
 // TestScanRecurrences_DropsVanishedPending: a pending suggestion whose run the pass no
 // longer finds is removed, since it is derived; decided ones are never touched.
 func TestScanRecurrences_DropsVanishedPending(t *testing.T) {

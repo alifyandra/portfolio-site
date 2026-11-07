@@ -583,12 +583,16 @@ type ScanSummary struct {
 	RunsFound   int
 	Created     int
 	Refreshed   int
-	// Declared counts runs left alone because a declaration already covers them: a
-	// row is already linked as a payment or receipt, a declaration's match pattern finds
-	// the newest row, or the suggestion was accepted earlier.
+	// Declared counts runs left alone because a live declaration already covers them
+	// (one of its rows is linked to it, or its match pattern finds the newest row; an
+	// ended declaration covers only up to its ended_on plus a grace week), or because
+	// the suggestion was accepted earlier and its declaration has not ended.
 	Declared int
 	// Dismissed counts runs the owner dismissed before; they are not offered again.
 	Dismissed int
+	// Reopened counts accepted suggestions put back to pending because the declaration
+	// they created has ended and the run carried on past it.
+	Reopened int
 	// Dropped counts pending suggestions removed because their run is no longer found or
 	// is now declared.
 	Dropped int
@@ -597,9 +601,10 @@ type ScanSummary struct {
 // ScanRecurrences runs the detection pass over the last suggestLookbackDays of the posted
 // ledger and reconciles the stored suggestions with what it found, in one transaction:
 // a new run becomes a pending suggestion, a pending one is refreshed with the current
-// amount, grid and evidence, a dismissed or accepted one is left exactly as the owner
-// left it, and a pending one whose run is gone is dropped. It never creates or edits a
-// declaration.
+// amount, grid and evidence, a dismissed one is left exactly as the owner left it, an
+// accepted one too unless its declaration has ended and the run carried on past it (then
+// it is reopened as pending), and a pending one whose run is gone or is now covered by a
+// live declaration is dropped. It never creates or edits a declaration.
 func ScanRecurrences(ctx context.Context, client *ent.Client) (ScanSummary, error) {
 	sum := ScanSummary{}
 	today := localToday()
@@ -629,7 +634,10 @@ func ScanRecurrences(ctx context.Context, client *ent.Client) (ScanSummary, erro
 	if err != nil {
 		return sum, err
 	}
-	existing, err := tx.RecurrenceSuggestion.Query().All(ctx)
+	existing, err := tx.RecurrenceSuggestion.Query().
+		WithBill(func(q *ent.RecurringBillQuery) { q.Select(recurringbill.FieldID) }).
+		WithIncome(func(q *ent.RecurringIncomeQuery) { q.Select(recurringincome.FieldID) }).
+		All(ctx)
 	if err != nil {
 		return sum, rollback(tx, err)
 	}
@@ -645,29 +653,36 @@ func ScanRecurrences(ctx context.Context, client *ent.Client) (ScanSummary, erro
 		switch {
 		case cur != nil && cur.Status == recurrencesuggestion.StatusDismissed:
 			sum.Dismissed++
-		case cur != nil && cur.Status == recurrencesuggestion.StatusAccepted:
+		case cur != nil && cur.Status == recurrencesuggestion.StatusAccepted && !covered.endedUnder(cur, run):
 			sum.Declared++
 		case covered.covers(run):
 			sum.Declared++
-			if cur != nil {
+			if cur != nil && cur.Status == recurrencesuggestion.StatusPending {
 				if err := dropSuggestion(ctx, tx, cur); err != nil {
 					return sum, rollback(tx, err)
 				}
 				sum.Dropped++
 			}
 		case cur != nil:
-			if err := tx.RecurrenceSuggestion.UpdateOne(cur).
+			// Pending, or accepted under a declaration that has since ended while the run
+			// carried on: refresh it, and reopen the accepted one for the owner.
+			update := tx.RecurrenceSuggestion.UpdateOne(cur).
 				SetLabel(run.label).
 				SetMatchPattern(run.matchPattern).
 				SetExpectedAmount(run.expectedAmount).
 				SetAnchorDate(run.anchor).
 				SetGaps(run.gaps).
 				ClearEvidence().
-				AddEvidence(run.evidence...).
-				Exec(ctx); err != nil {
+				AddEvidence(run.evidence...)
+			if cur.Status == recurrencesuggestion.StatusAccepted {
+				update.SetStatus(recurrencesuggestion.StatusPending).ClearDecidedAt().ClearBill().ClearIncome()
+				sum.Reopened++
+			} else {
+				sum.Refreshed++
+			}
+			if err := update.Exec(ctx); err != nil {
 				return sum, rollback(tx, err)
 			}
-			sum.Refreshed++
 		default:
 			create := tx.RecurrenceSuggestion.Create().
 				SetFingerprint(fp).
@@ -712,82 +727,130 @@ func dropSuggestion(ctx context.Context, tx *ent.Tx, s *ent.RecurrenceSuggestion
 	return tx.RecurrenceSuggestion.DeleteOne(s).Exec(ctx)
 }
 
-// coverage answers "is this run already declared?" without a query per run.
-type coverage struct {
-	linked map[int]bool // transaction ids already a BillPayment or IncomeReceipt
-	bills  []billMatcher
-	income []incomeMatcher
+// coverDecl is one declaration as the coverage check sees it. endedOn is set only for an
+// ended declaration; a paused one still speaks for its counterparty (it may resume), so it
+// covers like an active one.
+type coverDecl struct {
+	kind    recurrencesuggestion.Kind
+	needle  string
+	scopeID int
+	endedOn *time.Time
 }
 
-// newCoverage loads which rows since from are already linked, and every declaration's
-// match pattern, whatever its status: a run an ended bill's pattern still finds is a
-// declaration question for the owner, not a new suggestion.
+// liveFor reports whether the declaration still speaks for a run whose newest row posted
+// on newest: always, unless it ended more than suggestStaleGraceDays before that row (a
+// last charge can land a few days after the declared end). Past that, the run carried on
+// without it, and that is a new question for the owner.
+func (d coverDecl) liveFor(newest time.Time) bool {
+	if d.endedOn == nil {
+		return true
+	}
+	return !normalizeDate(newest).After(normalizeDate(*d.endedOn).AddDate(0, 0, suggestStaleGraceDays))
+}
+
+// coverage answers "is this run already declared?" without a query per run.
+type coverage struct {
+	decls  []coverDecl
+	bills  map[int]int   // bill id -> index in decls
+	income map[int]int   // income id -> index in decls
+	linked map[int][]int // transaction id -> the decls it settles a cycle of
+}
+
+func newCoverDecl(kind recurrencesuggestion.Kind, pattern string, acc *ent.Account, ended bool, endedOn *time.Time) coverDecl {
+	d := coverDecl{kind: kind, needle: strings.ToLower(strings.TrimSpace(pattern))}
+	if acc != nil {
+		d.scopeID = acc.ID
+	}
+	if ended && endedOn != nil {
+		d.endedOn = endedOn
+	}
+	return d
+}
+
+// newCoverage loads every declaration (whatever its status, so liveFor can judge an
+// ended one) and which rows since from are already linked to which.
 func newCoverage(ctx context.Context, client *ent.Client, from time.Time) (*coverage, error) {
-	c := &coverage{linked: map[int]bool{}}
-	paid, err := client.BillPayment.Query().
-		Where(billpayment.HasTransactionWith(transaction.PostedDateGTE(from))).
-		QueryTransaction().
-		IDs(ctx)
-	if err != nil {
-		return nil, err
-	}
-	received, err := client.IncomeReceipt.Query().
-		Where(incomereceipt.HasTransactionWith(transaction.PostedDateGTE(from))).
-		QueryTransaction().
-		IDs(ctx)
-	if err != nil {
-		return nil, err
-	}
-	for _, id := range append(paid, received...) {
-		c.linked[id] = true
-	}
-	bills, err := client.RecurringBill.Query().
-		Where(recurringbill.MatchPatternNEQ("")).
-		WithAccount().
-		All(ctx)
+	c := &coverage{bills: map[int]int{}, income: map[int]int{}, linked: map[int][]int{}}
+	bills, err := client.RecurringBill.Query().WithAccount().All(ctx)
 	if err != nil {
 		return nil, err
 	}
 	for _, b := range bills {
-		c.bills = append(c.bills, newBillMatcher(b))
+		c.bills[b.ID] = len(c.decls)
+		c.decls = append(c.decls, newCoverDecl(recurrencesuggestion.KindBill, b.MatchPattern, b.Edges.Account, b.Status == recurringbill.StatusEnded, b.EndedOn))
 	}
-	incomes, err := client.RecurringIncome.Query().
-		Where(recurringincome.MatchPatternNEQ("")).
-		WithAccount().
-		All(ctx)
+	incomes, err := client.RecurringIncome.Query().WithAccount().All(ctx)
 	if err != nil {
 		return nil, err
 	}
 	for _, inc := range incomes {
-		c.income = append(c.income, newIncomeMatcher(inc))
+		c.income[inc.ID] = len(c.decls)
+		c.decls = append(c.decls, newCoverDecl(recurrencesuggestion.KindIncome, inc.MatchPattern, inc.Edges.Account, inc.Status == recurringincome.StatusEnded, inc.EndedOn))
+	}
+	payments, err := client.BillPayment.Query().
+		Where(billpayment.HasTransactionWith(transaction.PostedDateGTE(from))).
+		WithBill(func(q *ent.RecurringBillQuery) { q.Select(recurringbill.FieldID) }).
+		WithTransaction(func(q *ent.TransactionQuery) { q.Select(transaction.FieldID) }).
+		All(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range payments {
+		if p.Edges.Bill != nil && p.Edges.Transaction != nil {
+			c.linked[p.Edges.Transaction.ID] = append(c.linked[p.Edges.Transaction.ID], c.bills[p.Edges.Bill.ID])
+		}
+	}
+	receipts, err := client.IncomeReceipt.Query().
+		Where(incomereceipt.HasTransactionWith(transaction.PostedDateGTE(from))).
+		WithIncome(func(q *ent.RecurringIncomeQuery) { q.Select(recurringincome.FieldID) }).
+		WithTransaction(func(q *ent.TransactionQuery) { q.Select(transaction.FieldID) }).
+		All(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range receipts {
+		if r.Edges.Income != nil && r.Edges.Transaction != nil {
+			c.linked[r.Edges.Transaction.ID] = append(c.linked[r.Edges.Transaction.ID], c.income[r.Edges.Income.ID])
+		}
 	}
 	return c, nil
 }
 
-// covers reports whether a declaration already accounts for the run: any evidence row
-// already linked, or a declaration of the same kind whose pattern and account scope find
-// the run's newest row.
+// covers reports whether a declaration that is still live for the run's newest row
+// (coverDecl.liveFor) already accounts for it: one of its evidence rows is linked to that
+// declaration, or the declaration is of the same kind and its pattern and account scope
+// find the newest row.
 func (c *coverage) covers(run detectedRun) bool {
+	newestTxn := run.evidence[len(run.evidence)-1]
+	newest := newestTxn.PostedDate
 	for _, t := range run.evidence {
-		if c.linked[t.ID] {
-			return true
-		}
-	}
-	newest := newCandidate(run.evidence[len(run.evidence)-1])
-	if run.kind == recurrencesuggestion.KindIncome {
-		for _, m := range c.income {
-			if patternFinds(m.needle, m.scopeID, newest) {
+		for _, i := range c.linked[t.ID] {
+			if c.decls[i].liveFor(newest) {
 				return true
 			}
 		}
-		return false
 	}
-	for _, m := range c.bills {
-		if patternFinds(m.needle, m.scopeID, newest) {
+	cand := newCandidate(newestTxn)
+	for _, d := range c.decls {
+		if d.kind == run.kind && d.liveFor(newest) && patternFinds(d.needle, d.scopeID, cand) {
 			return true
 		}
 	}
 	return false
+}
+
+// endedUnder reports whether an accepted suggestion's own declaration has ended and the
+// run carried on past it, which reopens the suggestion. A suggestion whose declaration is
+// gone (deleted before deletes reopened suggestions) is left as accepted.
+func (c *coverage) endedUnder(s *ent.RecurrenceSuggestion, run detectedRun) bool {
+	i, ok := -1, false
+	switch {
+	case s.Edges.Bill != nil:
+		i, ok = c.bills[s.Edges.Bill.ID]
+	case s.Edges.Income != nil:
+		i, ok = c.income[s.Edges.Income.ID]
+	}
+	return ok && !c.decls[i].liveFor(run.evidence[len(run.evidence)-1].PostedDate)
 }
 
 // patternFinds is the pattern and account-scope half of a declaration's match rule, with

@@ -64,8 +64,9 @@ type scanFinanceSuggestionsOutput struct {
 		RunsFound   int `json:"runs_found" doc:"Runs the detection rule found"`
 		Created     int `json:"created" doc:"New pending suggestions"`
 		Refreshed   int `json:"refreshed" doc:"Pending suggestions updated with the current amount, grid and evidence"`
-		Declared    int `json:"declared" doc:"Runs left alone because a declaration already covers them"`
+		Declared    int `json:"declared" doc:"Runs left alone because a live declaration already covers them (an ended one covers only up to its ended_on plus a week)"`
 		Dismissed   int `json:"dismissed" doc:"Runs left alone because the owner dismissed them before"`
+		Reopened    int `json:"reopened" doc:"Accepted suggestions put back to pending because their declaration ended and the run carried on"`
 		Dropped     int `json:"dropped" doc:"Pending suggestions removed because their run is gone or now declared"`
 	}
 }
@@ -190,6 +191,7 @@ func (h *Handler) registerFinanceSuggestions(api huma.API) {
 		out.Body.Refreshed = sum.Refreshed
 		out.Body.Declared = sum.Declared
 		out.Body.Dismissed = sum.Dismissed
+		out.Body.Reopened = sum.Reopened
 		out.Body.Dropped = sum.Dropped
 		return out, nil
 	})
