@@ -14,17 +14,30 @@
 // about the existing view changes) reads the bank's balance readings. Ledger
 // derives close, open and per-period in/out from posted transactions, which
 // also fills in the series-level flags rendered as a caption below the chart.
+//
+// The projection (ADR 0019) continues the selected account's line as a dashed
+// path: its latest reading walked forward through the declared bills and
+// income, nothing else assumed. It is fetched on the same step as the history so
+// the two share a bucket grammar, and the caption names the projected net worth
+// and any declaration the walk left out.
 
 import { useState } from 'react';
 
 import {
   useListFinanceAccounts,
   useGetFinanceBalanceHistory,
+  useGetFinanceProjection,
 } from '@/lib/api/generated';
 import { citronCard, citronBadge, selectClass } from '@/components/admin/ui';
 import { BalanceChart } from './BalanceChart';
 import { formatDate } from './format';
 import { useMoney } from './censor';
+import {
+  PROJECTION_HORIZONS,
+  continuation,
+  exclusionSummary,
+  projectionStep,
+} from './projectionRules';
 
 // Default step per look-back window: fine over a short window, coarse over a long
 // one. Buckets align to Australia/Melbourne local boundaries server-side.
@@ -59,6 +72,8 @@ export function BalanceHistorySection() {
   const [stepChoice, setStepChoice] = useState<string>('');
   const [basis, setBasis] = useState<string>('snapshot');
   const ledger = basis === 'ledger';
+  const [horizon, setHorizon] = useState<number>(90);
+  const [withWishlist, setWithWishlist] = useState(false);
 
   // Default to the first asset account (fall back to the first account overall)
   // until the user picks one explicitly.
@@ -104,6 +119,22 @@ export function BalanceHistorySection() {
 
   const points = history?.points ?? [];
 
+  const { data: projection } = useGetFinanceProjection(
+    {
+      horizon_days: horizon,
+      step: projectionStep(step),
+      include_wishlist: withWishlist,
+    },
+    { query: { enabled: horizon > 0 && activeId != null } },
+  );
+  const projectedLine =
+    horizon > 0
+      ? projection?.accounts?.find((a) => a.account_id === activeId)
+      : undefined;
+  const projected = continuation(points, projectedLine?.points ?? []);
+  const netWorthEnd =
+    horizon > 0 ? projection?.net_worth.points?.at(-1) : undefined;
+
   // Series-level flags: one caption line under the chart rather than more ink on
   // the plot. drift_max is emitted under ledger even when it is 0, so the check
   // is against null and not against falsiness (a healthy series is the case
@@ -119,6 +150,14 @@ export function BalanceHistorySection() {
     history?.drift_max != null
       ? `Largest drift against a reading ${money(history.drift_max)}`
       : undefined,
+    projected.length > 0
+      ? 'Dashed grey: projected from declared bills and income only'
+      : undefined,
+    projectedLine?.note || undefined,
+    netWorthEnd
+      ? `Net worth projected ${money(netWorthEnd.balance)} by ${formatDate(netWorthEnd.as_of)}`
+      : undefined,
+    horizon > 0 ? exclusionSummary(projection?.excluded ?? []) : undefined,
   ]
     .filter(Boolean)
     .join(' · ');
@@ -174,6 +213,35 @@ export function BalanceHistorySection() {
               </option>
             ))}
           </select>
+
+          <select
+            aria-label="Projection horizon"
+            className={`${selectClass} w-auto`}
+            value={horizon}
+            onChange={(e) => setHorizon(Number(e.target.value))}
+          >
+            {PROJECTION_HORIZONS.map((h) => (
+              <option key={h.days} value={h.days}>
+                {h.label}
+              </option>
+            ))}
+          </select>
+
+          {horizon > 0 && (
+            <button
+              type="button"
+              aria-pressed={withWishlist}
+              onClick={() => setWithWishlist((v) => !v)}
+              title="Apply each wanted wishlist item with a cost and a deadline to the projected net worth"
+              className={`rounded-lg border border-slate-700 px-2.5 py-1.5 text-xs font-medium transition ${
+                withWishlist
+                  ? 'bg-citron text-ink'
+                  : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              Wishlist
+            </button>
+          )}
 
           <div className="flex overflow-hidden rounded-lg border border-slate-700">
             {BASES.map((b) => (
@@ -231,7 +299,7 @@ export function BalanceHistorySection() {
         </p>
       ) : (
         <div>
-          <BalanceChart points={points} basis={basis} />
+          <BalanceChart points={points} basis={basis} projected={projected} />
           {caption !== '' && (
             <p className="mt-2 text-xs text-slate-500">{caption}</p>
           )}

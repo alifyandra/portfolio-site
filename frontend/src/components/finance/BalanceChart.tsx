@@ -36,6 +36,13 @@
 // digits, and both are drawn against a domain whose endpoints are themselves
 // masked, so the censored chart still shows the trend without showing an
 // amount. That is the point of keeping it.
+//
+// A projection (ADR 0019) continues the line past the last history point. It is
+// its own path, dashed in a muted tone with no area under it, so it can never be
+// read as a reading, and the sky dash keeps meaning "carried". The readouts and
+// the flow strip stay history-only: a projected low is not a low the account
+// reached, and a declared flow is not a posted one. The projected end gets a
+// readout of its own instead.
 
 import {
   useEffect,
@@ -45,7 +52,7 @@ import {
   useState,
 } from 'react';
 
-import type { BalancePointDTO } from '@/lib/api/model';
+import type { BalancePointDTO, ProjectionPointDTO } from '@/lib/api/model';
 import { formatDate } from './format';
 import { FigureSlot, useMoney } from './censor';
 
@@ -77,6 +84,7 @@ interface Plotted {
   y: number; // viewBox y
   fx: number; // fraction 0..1 across the plot (for hover mapping)
   carried: boolean; // bucket had no reading; repeats the previous close
+  projected: boolean; // a projected bucket continuing the line, never a reading
 }
 
 interface FlowBar {
@@ -119,21 +127,30 @@ function sourceLabel(source: string): string {
 export function BalanceChart({
   points,
   basis,
+  projected,
 }: {
   points: BalancePointDTO[];
   basis?: string;
+  /** Projected buckets continuing the line, already trimmed to after the history. */
+  projected?: ProjectionPointDTO[];
 }) {
   const { money } = useMoney();
   const [hover, setHover] = useState<number | null>(null);
   const ledger = basis === 'ledger';
 
   const model = useMemo(() => {
-    const usable = (points ?? [])
-      .map((point) => ({ point, t: new Date(point?.as_of ?? '').getTime() }))
-      .filter(
-        ({ point, t }) => Number.isFinite(point?.balance) && Number.isFinite(t),
-      );
+    const plottable = (list: BalancePointDTO[]) =>
+      list
+        .map((point) => ({ point, t: new Date(point?.as_of ?? '').getTime() }))
+        .filter(
+          ({ point, t }) =>
+            Number.isFinite(point?.balance) && Number.isFinite(t),
+        );
+    const usable = plottable(points ?? []);
     if (usable.length === 0) return null;
+    // The projection shares the domain, so the line and its continuation sit on
+    // one scale, but nothing that describes the history reads it.
+    const future = plottable(projected ?? []);
 
     let min = Infinity;
     let max = -Infinity;
@@ -153,6 +170,12 @@ export function BalanceChart({
       if (t < tMin) tMin = t;
       if (t > tMax) tMax = t;
     });
+    for (const { point, t } of future) {
+      if (point.balance < min) min = point.balance;
+      if (point.balance > max) max = point.balance;
+      if (t < tMin) tMin = t;
+      if (t > tMax) tMax = t;
+    }
 
     if (min === max) {
       // Flat series: pad so the line sits mid-height rather than on an edge.
@@ -163,16 +186,23 @@ export function BalanceChart({
     const span = max - min;
     const tSpan = tMax - tMin || 1;
 
-    const plotted: Plotted[] = usable.map(({ point, t }, i) => {
-      const fx = usable.length === 1 ? 0.5 : (t - tMin) / tSpan;
+    const all = [...usable, ...future];
+    const plotted: Plotted[] = all.map(({ point, t }, i) => {
+      const fx = all.length === 1 ? 0.5 : (t - tMin) / tSpan;
+      const isProjected = i >= usable.length;
       return {
         point,
         x: PAD.left + fx * PLOT_W,
         y: PAD.top + (1 - (point.balance - min) / span) * PLOT_H,
         fx,
-        carried: point.carried === true,
+        carried: !isProjected && point.carried === true,
+        projected: isProjected,
       };
     });
+    // Everything describing the history reads `hist`; hover reads `plotted`, so a
+    // projected bucket can be inspected too.
+    const hist = plotted.slice(0, usable.length);
+    const ahead = plotted.slice(usable.length);
 
     // The line is drawn as two overlaid paths so a carried stretch reads as "no
     // reading" rather than "no change". Without this the carry-forward rule is
@@ -180,20 +210,29 @@ export function BalanceChart({
     // emitting a gap. A segment is dashed when either end is carried.
     const solid: string[] = [];
     const dashed: string[] = [];
-    for (let i = 1; i < plotted.length; i++) {
-      const a = plotted[i - 1];
-      const b = plotted[i];
+    for (let i = 1; i < hist.length; i++) {
+      const a = hist[i - 1];
+      const b = hist[i];
       const seg = `M ${a.x.toFixed(2)} ${a.y.toFixed(2)} L ${b.x.toFixed(2)} ${b.y.toFixed(2)}`;
       (a.carried || b.carried ? dashed : solid).push(seg);
     }
     // A single point has no segment, so it gets a dot to sit on instead.
-    const singleton = plotted.length === 1 ? plotted[0] : null;
+    const singleton = hist.length === 1 ? hist[0] : null;
+
+    // The projection starts at the last history point, so the dash reads as a
+    // continuation rather than a second line.
+    const from = hist[hist.length - 1];
+    const projectedPath =
+      ahead.length === 0
+        ? ''
+        : `M ${from.x.toFixed(2)} ${from.y.toFixed(2)} ` +
+          ahead.map((pt) => `L ${pt.x.toFixed(2)} ${pt.y.toFixed(2)}`).join(' ');
 
     const baseY = PAD.top + PLOT_H;
     const areaPath =
-      `M ${plotted[0].x.toFixed(2)} ${baseY.toFixed(2)} ` +
-      plotted.map((pt) => `L ${pt.x.toFixed(2)} ${pt.y.toFixed(2)}`).join(' ') +
-      ` L ${plotted[plotted.length - 1].x.toFixed(2)} ${baseY.toFixed(2)} Z`;
+      `M ${hist[0].x.toFixed(2)} ${baseY.toFixed(2)} ` +
+      hist.map((pt) => `L ${pt.x.toFixed(2)} ${pt.y.toFixed(2)}`).join(' ') +
+      ` L ${hist[hist.length - 1].x.toFixed(2)} ${baseY.toFixed(2)} Z`;
 
     // A faint zero reference line, only when 0 falls inside the value range.
     const zeroY =
@@ -216,8 +255,8 @@ export function BalanceChart({
       // months (28 to 31 days wide, hence not evenly spaced in time) still
       // never overlap.
       let minGap = PLOT_W;
-      for (let i = 1; i < plotted.length; i++) {
-        const gap = plotted[i].x - plotted[i - 1].x;
+      for (let i = 1; i < hist.length; i++) {
+        const gap = hist[i].x - hist[i - 1].x;
         if (gap > 0 && gap < minGap) minGap = gap;
       }
       const barW = Math.max(1.5, Math.min(20, minGap * 0.7));
@@ -227,7 +266,7 @@ export function BalanceChart({
       // already promised a flow panel below the line.
       const bars =
         peak > 0
-          ? plotted.map((pt) => {
+          ? hist.map((pt) => {
               const inV = magnitude(pt.point.in);
               const outV = magnitude(pt.point.out);
               return {
@@ -246,6 +285,9 @@ export function BalanceChart({
       plotted,
       solidPath: solid.join(' '),
       dashedPath: dashed.join(' '),
+      projectedPath,
+      projectedEnd: ahead.length > 0 ? ahead[ahead.length - 1].point : null,
+      historyCount: hist.length,
       singleton,
       areaPath,
       zeroY,
@@ -253,10 +295,10 @@ export function BalanceChart({
       last: usable[usable.length - 1].point,
       minPoint: usable[minIdx].point,
       maxPoint: usable[maxIdx].point,
-      carriedCount: plotted.filter((pt) => pt.carried).length,
+      carriedCount: hist.filter((pt) => pt.carried).length,
       dropped: (points?.length ?? 0) - usable.length,
     };
-  }, [points, ledger]);
+  }, [points, ledger, projected]);
 
   // Tooltip containment. The box is centred on its bucket, but the ledger body
   // is wide enough to paint outside the card at either end, and there is no
@@ -301,6 +343,9 @@ export function BalanceChart({
     plotted,
     solidPath,
     dashedPath,
+    projectedPath,
+    projectedEnd,
+    historyCount,
     singleton,
     areaPath,
     zeroY,
@@ -398,6 +443,18 @@ export function BalanceChart({
             vectorEffect="non-scaling-stroke"
           />
         )}
+        {projectedPath !== '' && (
+          <path
+            d={projectedPath}
+            fill="none"
+            stroke="var(--color-slate-400)"
+            strokeWidth={2}
+            strokeDasharray="6 5"
+            strokeLinejoin="round"
+            strokeLinecap="round"
+            vectorEffect="non-scaling-stroke"
+          />
+        )}
         {singleton && (
           <circle
             cx={singleton.x}
@@ -440,7 +497,13 @@ export function BalanceChart({
               cx={active.x}
               cy={active.y}
               r={4}
-              fill={active.carried ? 'var(--canvas)' : 'var(--color-sky)'}
+              fill={
+                active.projected
+                  ? 'var(--color-slate-400)'
+                  : active.carried
+                    ? 'var(--canvas)'
+                    : 'var(--color-sky)'
+              }
               stroke={active.carried ? 'var(--color-sky)' : 'var(--canvas)'}
               strokeWidth={2}
               vectorEffect="non-scaling-stroke"
@@ -553,7 +616,11 @@ export function BalanceChart({
           {active.carried && (
             <div className="text-slate-500">carried forward</div>
           )}
-          {ledger && <LedgerDetail point={active.point} />}
+          {active.projected ? (
+            <ProjectedDetail point={active.point} />
+          ) : (
+            ledger && <LedgerDetail point={active.point} />
+          )}
         </div>
       )}
 
@@ -580,6 +647,15 @@ export function BalanceChart({
           </FigureSlot>{' '}
           · {formatDate(maxPoint.as_of)}
         </span>
+        {projectedEnd && (
+          <span className="text-slate-400">
+            Projected{' '}
+            <FigureSlot className="font-medium text-slate-300">
+              {money(projectedEnd.balance)}
+            </FigureSlot>{' '}
+            · {formatDate(projectedEnd.as_of)}
+          </span>
+        )}
       </div>
 
       {(carriedCount > 0 || dropped > 0) && (
@@ -588,7 +664,7 @@ export function BalanceChart({
             <>
               Dashed segments and hollow markers are buckets with{' '}
               {ledger ? 'no posted transactions' : 'no reading'}, repeating the
-              previous close ({carriedCount} of {plotted.length}).
+              previous close ({carriedCount} of {historyCount}).
             </>
           )}
           {dropped > 0 && <> {dropped} unplottable point(s) skipped.</>}
@@ -673,6 +749,27 @@ function LedgerDetail({ point }: { point: BalancePointDTO }) {
       {isNum(drift) && <TipRow label="Drift" value={money(drift)} />}
       {mismatch === true && (
         <div className="text-coral">flows do not reconcile</div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The tooltip block for a projected bucket: the declared money the walk applied
+ * inside it, so a step in the dashed line says what moved it.
+ */
+function ProjectedDetail({ point }: { point: BalancePointDTO }) {
+  const { money } = useMoney();
+  const moneyIn = magnitude(point.in);
+  const out = magnitude(point.out);
+  return (
+    <div className="mt-1 space-y-0.5 border-t border-slate-700 pt-1 text-left">
+      <div className="text-slate-500">projected, not a reading</div>
+      {moneyIn > 0 && (
+        <TipRow label="Declared in" value={money(moneyIn)} tone="text-mint" />
+      )}
+      {out > 0 && (
+        <TipRow label="Declared out" value={money(out)} tone="text-coral" />
       )}
     </div>
   );
