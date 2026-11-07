@@ -48,8 +48,9 @@ func (Transaction) Fields() []ent.Field {
 }
 
 // Edges of the Transaction. The account FK lives here (on transactions), not on
-// accounts. bill_payments is the reconciliation back-reference: the FK lives on the
-// BillPayment link row, so this adds no column here.
+// accounts. bill_payments and income_receipts are the reconciliation back-references:
+// the FKs live on the BillPayment and IncomeReceipt link rows, so they add no column
+// here.
 func (Transaction) Edges() []ent.Edge {
 	return []ent.Edge{
 		edge.From("account", Account.Type).
@@ -57,5 +58,6 @@ func (Transaction) Edges() []ent.Edge {
 			Unique().
 			Required(),
 		edge.To("bill_payments", BillPayment.Type),
+		edge.To("income_receipts", IncomeReceipt.Type),
 	}
 }
