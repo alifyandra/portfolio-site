@@ -69,3 +69,20 @@ flat root (one box, one environment, no module indirection). Specifics:
   production-access request, Vercel, and GHCR package visibility.
 - Local and prod still share the compose Postgres today; a future RDS move would
   diverge them (still Postgres, same seam).
+
+## Amendment 2026-11-07: the zone is shared with the Lab
+
+The `aliflabs.dev` zone is managed by this repo's Terraform, but it is no longer the
+only writer. The owner's private home infrastructure (the **Lab**, see `CONTEXT.md`)
+takes the `lab.` subtree: `*.lab.aliflabs.dev` records pointing at tailnet addresses,
+managed from a separate private repository with its own state. This repo's Terraform
+**must never create, import or reference a record under `lab.aliflabs.dev`**, and the
+Lab's Terraform never touches anything outside that subtree. Two states writing one
+zone is safe only while the partition holds, and nothing enforces it mechanically:
+the rule lives here and in the Lab repo's first ADR.
+
+Why not one state: the Lab is applied from the home box, this repo from CI with a
+production approval gate, and the two have different operators, cadences and
+credentials. Why not delegate `lab.` as its own zone: Cloudflare's free plan does not
+allow subdomain zones, and a second registrar-level zone buys nothing a disjoint
+record set does not.
