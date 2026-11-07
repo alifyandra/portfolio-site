@@ -716,6 +716,84 @@ components:
         - email
         - tier
       type: object
+    CreateIncomeInputBody:
+      additionalProperties: false
+      properties:
+        $schema:
+          description: A URL to the JSON Schema for this object.
+          examples:
+            - https://example.com/schemas/CreateIncomeInputBody.json
+          format: uri
+          readOnly: true
+          type: string
+        account_id:
+          description: Account the income is paid into; optional
+          format: int64
+          type: integer
+        anchor_date:
+          description: One known pay date, YYYY-MM-DD; every occurrence steps the cadence from here
+          type: string
+        cadence:
+          description: Defaults to monthly
+          enum:
+            - weekly
+            - fortnightly
+            - monthly
+            - quarterly
+            - annual
+          type: string
+        currency:
+          description: ISO currency code; defaults to AUD
+          maxLength: 3
+          type: string
+        ended_on:
+          description: YYYY-MM-DD the income stopped
+          type: string
+        expected_amount:
+          description: Expected receipt per cycle as a positive magnitude
+          exclusiveMinimum: 0
+          format: double
+          type: number
+        name:
+          description: Label and human identity key, at most 120 bytes; must be unique
+          maxLength: 120
+          minLength: 1
+          type: string
+        notes:
+          type: string
+        status:
+          description: Defaults to active
+          enum:
+            - active
+            - paused
+            - ended
+          type: string
+      required:
+        - name
+        - expected_amount
+        - anchor_date
+      type: object
+    CreateIncomeReceiptInputBody:
+      additionalProperties: false
+      properties:
+        $schema:
+          description: A URL to the JSON Schema for this object.
+          examples:
+            - https://example.com/schemas/CreateIncomeReceiptInputBody.json
+          format: uri
+          readOnly: true
+          type: string
+        occurrence_date:
+          description: Pay date, YYYY-MM-DD; must be one of the income's derived occurrences. Defaults to the cycle nearest the transaction's posted date
+          type: string
+        transaction_id:
+          description: Posted credit that paid the cycle
+          format: int64
+          minimum: 1
+          type: integer
+      required:
+        - transaction_id
+      type: object
     CreateJobInputBody:
       additionalProperties: false
       properties:
@@ -1271,6 +1349,105 @@ components:
       required:
         - done
       type: object
+    FinanceIncomeDTO:
+      additionalProperties: false
+      properties:
+        $schema:
+          description: A URL to the JSON Schema for this object.
+          examples:
+            - https://example.com/schemas/FinanceIncomeDTO.json
+          format: uri
+          readOnly: true
+          type: string
+        account_id:
+          description: Account the income is paid into; null when unset (the edge is optional)
+          format: int64
+          type:
+            - integer
+            - "null"
+        account_name:
+          type: string
+        anchor_date:
+          description: YYYY-MM-DD; every pay date steps the cadence from here
+          type: string
+        cadence:
+          enum:
+            - weekly
+            - fortnightly
+            - monthly
+            - quarterly
+            - annual
+          type: string
+        created_at:
+          type: string
+        currency:
+          type: string
+        days_until:
+          description: Whole days from today to next_expected; negative only for an ended income's final cycle
+          format: int64
+          type: integer
+        ended_on:
+          description: YYYY-MM-DD the income stopped; null while it runs
+          type:
+            - string
+            - "null"
+        expected_amount:
+          description: Expected receipt per cycle as a positive magnitude (unlike the signed transaction amount)
+          format: double
+          type: number
+        expected_monthly:
+          description: expected_amount normalised to a per-month figure so mixed cadences can be summed
+          format: double
+          type: number
+        id:
+          format: int64
+          type: integer
+        last_received_amount:
+          description: Amount actually received for that cycle; null until one is linked
+          format: double
+          type:
+            - number
+            - "null"
+        last_received_date:
+          description: YYYY-MM-DD the newest linked cycle actually posted; null until one is linked
+          type:
+            - string
+            - "null"
+        name:
+          type: string
+        next_expected:
+          description: YYYY-MM-DD; the next derived pay date on or after today, or the last one on or before ended_on once ended
+          type: string
+        notes:
+          type: string
+        status:
+          enum:
+            - active
+            - paused
+            - ended
+          type: string
+        updated_at:
+          type: string
+      required:
+        - id
+        - name
+        - expected_amount
+        - currency
+        - cadence
+        - anchor_date
+        - status
+        - ended_on
+        - notes
+        - account_id
+        - account_name
+        - next_expected
+        - days_until
+        - last_received_date
+        - last_received_amount
+        - expected_monthly
+        - created_at
+        - updated_at
+      type: object
     FinancePendingDTO:
       additionalProperties: false
       properties:
@@ -1478,6 +1655,37 @@ components:
         - unknown_cost_count
         - currency_mismatch_count
         - currency
+      type: object
+    IncomeReceiptDTO:
+      additionalProperties: false
+      properties:
+        $schema:
+          description: A URL to the JSON Schema for this object.
+          examples:
+            - https://example.com/schemas/IncomeReceiptDTO.json
+          format: uri
+          readOnly: true
+          type: string
+        created_at:
+          type: string
+        id:
+          format: int64
+          type: integer
+        income_id:
+          format: int64
+          type: integer
+        occurrence_date:
+          description: YYYY-MM-DD pay date this receipt settles (not the posted date)
+          type: string
+        transaction_id:
+          format: int64
+          type: integer
+      required:
+        - id
+        - income_id
+        - transaction_id
+        - occurrence_date
+        - created_at
       type: object
     Item:
       additionalProperties: false
@@ -1806,6 +2014,40 @@ components:
       required:
         - bills
         - committed_total
+        - monthly_equivalent
+        - count
+      type: object
+    ListFinanceIncomeOutputBody:
+      additionalProperties: false
+      properties:
+        $schema:
+          description: A URL to the JSON Schema for this object.
+          examples:
+            - https://example.com/schemas/ListFinanceIncomeOutputBody.json
+          format: uri
+          readOnly: true
+          type: string
+        count:
+          description: Number of incomes returned
+          format: int64
+          type: integer
+        expected_total:
+          description: Sum of the returned active incomes' expected amounts
+          format: double
+          type: number
+        income:
+          items:
+            $ref: "#/components/schemas/FinanceIncomeDTO"
+          type:
+            - array
+            - "null"
+        monthly_equivalent:
+          description: The same set normalised to a per-month figure
+          format: double
+          type: number
+      required:
+        - income
+        - expected_total
         - monthly_equivalent
         - count
       type: object
@@ -2807,6 +3049,54 @@ components:
             - ended
           type: string
       type: object
+    UpdateIncomeInputBody:
+      additionalProperties: false
+      properties:
+        $schema:
+          description: A URL to the JSON Schema for this object.
+          examples:
+            - https://example.com/schemas/UpdateIncomeInputBody.json
+          format: uri
+          readOnly: true
+          type: string
+        account_id:
+          description: Account id, or 0 to detach the account
+          format: int64
+          type: integer
+        anchor_date:
+          description: YYYY-MM-DD
+          type: string
+        cadence:
+          enum:
+            - weekly
+            - fortnightly
+            - monthly
+            - quarterly
+            - annual
+          type: string
+        currency:
+          maxLength: 3
+          type: string
+        ended_on:
+          description: YYYY-MM-DD, or "" to clear it
+          type: string
+        expected_amount:
+          exclusiveMinimum: 0
+          format: double
+          type: number
+        name:
+          maxLength: 120
+          minLength: 1
+          type: string
+        notes:
+          type: string
+        status:
+          enum:
+            - active
+            - paused
+            - ended
+          type: string
+      type: object
     UpdateJobInputBody:
       additionalProperties: false
       properties:
@@ -3345,6 +3635,130 @@ paths:
       security:
         - cookieAuth: []
       summary: Link a posted transaction to one cycle of a bill by hand
+      tags:
+        - admin
+  /api/admin/finance/income:
+    post:
+      operationId: create-finance-income
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateIncomeInputBody"
+        required: true
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FinanceIncomeDTO"
+          description: Created
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ErrorModel"
+          description: Error
+      security:
+        - cookieAuth: []
+      summary: Declare a recurring income
+      tags:
+        - admin
+  /api/admin/finance/income/{id}:
+    delete:
+      operationId: delete-finance-income
+      parameters:
+        - description: Recurring income ID
+          in: path
+          name: id
+          required: true
+          schema:
+            description: Recurring income ID
+            format: int64
+            type: integer
+      responses:
+        "204":
+          description: No Content
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ErrorModel"
+          description: Error
+      security:
+        - cookieAuth: []
+      summary: Delete a recurring income and its receipt links
+      tags:
+        - admin
+    patch:
+      operationId: update-finance-income
+      parameters:
+        - description: Recurring income ID
+          in: path
+          name: id
+          required: true
+          schema:
+            description: Recurring income ID
+            format: int64
+            type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateIncomeInputBody"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FinanceIncomeDTO"
+          description: OK
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ErrorModel"
+          description: Error
+      security:
+        - cookieAuth: []
+      summary: Update a recurring income (partial; includes pause/resume via status)
+      tags:
+        - admin
+  /api/admin/finance/income/{id}/receipts:
+    post:
+      operationId: create-finance-income-receipt
+      parameters:
+        - description: Recurring income ID
+          in: path
+          name: id
+          required: true
+          schema:
+            description: Recurring income ID
+            format: int64
+            type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateIncomeReceiptInputBody"
+        required: true
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IncomeReceiptDTO"
+          description: Created
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ErrorModel"
+          description: Error
+      security:
+        - cookieAuth: []
+      summary: Link a posted credit to one pay cycle of an income by hand
       tags:
         - admin
   /api/admin/job-kinds:
@@ -4223,6 +4637,57 @@ paths:
       security:
         - cookieAuth: []
       summary: List recurring bills with derived due dates and committed money (admin)
+      tags:
+        - finance
+  /api/finance/income:
+    get:
+      operationId: list-finance-income
+      parameters:
+        - description: Which incomes to include; "all" spans every status
+          explode: false
+          in: query
+          name: status
+          schema:
+            default: active
+            description: Which incomes to include; "all" spans every status
+            enum:
+              - active
+              - paused
+              - ended
+              - all
+            type: string
+        - description: Keep only incomes whose next pay date is within this many days from today; 0 (default) returns all
+          explode: false
+          in: query
+          name: within_days
+          schema:
+            description: Keep only incomes whose next pay date is within this many days from today; 0 (default) returns all
+            format: int64
+            type: integer
+        - description: Filter to incomes paid into one account; 0 (default) spans all, and incomes with no account are then included
+          explode: false
+          in: query
+          name: account_id
+          schema:
+            description: Filter to incomes paid into one account; 0 (default) spans all, and incomes with no account are then included
+            format: int64
+            type: integer
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListFinanceIncomeOutputBody"
+          description: OK
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ErrorModel"
+          description: Error
+      security:
+        - cookieAuth: []
+      summary: List recurring income with derived pay dates and expected money (admin)
       tags:
         - finance
   /api/finance/ingest:

@@ -99,4 +99,7 @@ func (h *Handler) Register(api huma.API) {
 	// feature is a finance concern (its UI lives on /finance, not /admin) and its read
 	// half is registered by registerFinanceRead.
 	h.registerAdminFinanceBills(api)
+	// Recurring income registers its read and writes together: the same admin gate and
+	// the same /api/finance (read) and /api/admin/finance (write) split as the bills.
+	h.registerFinanceIncome(api)
 }
