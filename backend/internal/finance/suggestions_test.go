@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"maps"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -621,6 +622,73 @@ func TestScanRecurrences_DropsVanishedPending(t *testing.T) {
 	left := client.RecurrenceSuggestion.Query().AllX(ctx)
 	if len(left) != 1 || left[0].Fingerprint != "dismissed-gone" {
 		t.Errorf("left = %+v, want only the dismissed one", left)
+	}
+}
+
+// TestScanRecurrences_ConcurrentInsertIsHarmless: two scans can both read "no suggestion
+// for this run yet" and both insert it. The hook plays the other scan committing its row
+// between this scan's read and its insert; the insert must not trip the unique
+// fingerprint (a 500), and the one row left carries this scan's run and evidence.
+func TestScanRecurrences_ConcurrentInsertIsHarmless(t *testing.T) {
+	client := newFinanceTestClient(t)
+	ctx := context.Background()
+	today := localToday()
+	acc := seedAccount(t, ctx, client, "Everyday", account.ClassAsset, account.TypeEveryday)
+	seedMonthlyRun(t, ctx, client, acc, "zylo", recentDay(today, 3), 4, -15.99, "ZYLO STREAMING")
+	fired := false
+	client.RecurrenceSuggestion.Use(func(next ent.Mutator) ent.Mutator {
+		return hook.RecurrenceSuggestionFunc(func(ctx context.Context, m *ent.RecurrenceSuggestionMutation) (ent.Value, error) {
+			if fp, ok := m.Fingerprint(); ok && !fired && m.Op().Is(ent.OpCreate) {
+				fired = true
+				if err := m.Client().RecurrenceSuggestion.Create().
+					SetFingerprint(fp).SetKind(recurrencesuggestion.KindBill).SetCounterparty("zylo streaming").
+					SetLabel("From the other scan").SetCadence(recurrencesuggestion.CadenceMonthly).
+					SetExpectedAmount(1).SetAnchorDate(today).Exec(ctx); err != nil {
+					return nil, err
+				}
+			}
+			return next.Mutate(ctx, m)
+		})
+	})
+	if _, err := ScanRecurrences(ctx, client); err != nil {
+		t.Fatalf("scan racing another scan's insert = %v, want no error", err)
+	}
+	rows := client.RecurrenceSuggestion.Query().WithEvidence().AllX(ctx)
+	if len(rows) != 1 || rows[0].Label != "ZYLO STREAMING" || rows[0].ExpectedAmount != 15.99 || len(rows[0].Edges.Evidence) != 4 {
+		t.Errorf("suggestions = %+v, want one row refreshed to this scan's run with 4 evidence rows", rows)
+	}
+}
+
+// TestScanRecurrences_ConcurrentDropIsHarmless: two scans can both decide to drop the
+// same vanished pending suggestion. The hook plays the other scan deleting it first; this
+// scan's drop must then be a no-op, not a not-found error.
+func TestScanRecurrences_ConcurrentDropIsHarmless(t *testing.T) {
+	client := newFinanceTestClient(t)
+	ctx := context.Background()
+	today := localToday()
+	stale := client.RecurrenceSuggestion.Create().
+		SetFingerprint("gone").SetKind(recurrencesuggestion.KindBill).SetCounterparty("gone").
+		SetLabel("Gone").SetCadence(recurrencesuggestion.CadenceMonthly).SetExpectedAmount(5).
+		SetAnchorDate(today).SaveX(ctx)
+	fired := false
+	client.RecurrenceSuggestion.Use(func(next ent.Mutator) ent.Mutator {
+		return hook.RecurrenceSuggestionFunc(func(ctx context.Context, m *ent.RecurrenceSuggestionMutation) (ent.Value, error) {
+			if !fired && m.Op().Is(ent.OpUpdate|ent.OpUpdateOne|ent.OpDelete|ent.OpDeleteOne) {
+				if ids, err := m.IDs(ctx); err == nil && slices.Contains(ids, stale.ID) {
+					fired = true
+					if err := m.Client().RecurrenceSuggestion.DeleteOneID(stale.ID).Exec(ctx); err != nil {
+						return nil, err
+					}
+				}
+			}
+			return next.Mutate(ctx, m)
+		})
+	})
+	if _, err := ScanRecurrences(ctx, client); err != nil {
+		t.Fatalf("scan racing another scan's drop = %v, want no error", err)
+	}
+	if n := client.RecurrenceSuggestion.Query().CountX(ctx); n != 0 {
+		t.Errorf("suggestions left = %d, want 0", n)
 	}
 }
 

@@ -17,6 +17,7 @@ import (
 	"github.com/alifyandra/portfolio-site/backend/ent"
 	"github.com/alifyandra/portfolio-site/backend/ent/billpayment"
 	"github.com/alifyandra/portfolio-site/backend/ent/incomereceipt"
+	"github.com/alifyandra/portfolio-site/backend/ent/predicate"
 	"github.com/alifyandra/portfolio-site/backend/ent/recurrencesuggestion"
 	"github.com/alifyandra/portfolio-site/backend/ent/recurringbill"
 	"github.com/alifyandra/portfolio-site/backend/ent/recurringincome"
@@ -684,21 +685,7 @@ func ScanRecurrences(ctx context.Context, client *ent.Client) (ScanSummary, erro
 				return sum, rollback(tx, err)
 			}
 		default:
-			create := tx.RecurrenceSuggestion.Create().
-				SetFingerprint(fp).
-				SetKind(run.kind).
-				SetCounterparty(run.counterparty).
-				SetLabel(run.label).
-				SetMatchPattern(run.matchPattern).
-				SetCadence(recurrencesuggestion.Cadence(run.cadence)).
-				SetExpectedAmount(run.expectedAmount).
-				SetAnchorDate(run.anchor).
-				SetGaps(run.gaps).
-				AddEvidence(run.evidence...)
-			if run.accountID != 0 {
-				create.SetAccountID(run.accountID)
-			}
-			if err := create.Exec(ctx); err != nil {
+			if err := insertSuggestion(ctx, tx, fp, run); err != nil {
 				return sum, rollback(tx, err)
 			}
 			sum.Created++
@@ -718,13 +705,53 @@ func ScanRecurrences(ctx context.Context, client *ent.Client) (ScanSummary, erro
 	return sum, nil
 }
 
-// dropSuggestion removes a pending suggestion and its evidence links. Only pending rows
-// are ever dropped: they are derived, and the next scan would rebuild them.
-func dropSuggestion(ctx context.Context, tx *ent.Tx, s *ent.RecurrenceSuggestion) error {
-	if err := tx.RecurrenceSuggestion.UpdateOne(s).ClearEvidence().Exec(ctx); err != nil {
+// insertSuggestion stores a new run as a pending suggestion. Two scans can both read
+// "nothing stored for this run" and both insert it, so the insert is an upsert on the
+// unique fingerprint that changes nothing on conflict; the row that is then stored under
+// the fingerprint is refreshed with this run, if it is still pending. A second scan is
+// therefore harmless instead of a unique-index 500.
+func insertSuggestion(ctx context.Context, tx *ent.Tx, fp string, run detectedRun) error {
+	create := tx.RecurrenceSuggestion.Create().
+		SetFingerprint(fp).
+		SetKind(run.kind).
+		SetCounterparty(run.counterparty).
+		SetLabel(run.label).
+		SetMatchPattern(run.matchPattern).
+		SetCadence(recurrencesuggestion.Cadence(run.cadence)).
+		SetExpectedAmount(run.expectedAmount).
+		SetAnchorDate(run.anchor).
+		SetGaps(run.gaps)
+	if run.accountID != 0 {
+		create.SetAccountID(run.accountID)
+	}
+	if err := create.OnConflictColumns(recurrencesuggestion.FieldFingerprint).Ignore().Exec(ctx); err != nil {
 		return err
 	}
-	return tx.RecurrenceSuggestion.DeleteOne(s).Exec(ctx)
+	_, err := tx.RecurrenceSuggestion.Update().
+		Where(recurrencesuggestion.FingerprintEQ(fp), recurrencesuggestion.StatusEQ(recurrencesuggestion.StatusPending)).
+		SetLabel(run.label).
+		SetMatchPattern(run.matchPattern).
+		SetExpectedAmount(run.expectedAmount).
+		SetAnchorDate(run.anchor).
+		SetGaps(run.gaps).
+		ClearEvidence().
+		AddEvidence(run.evidence...).
+		Save(ctx)
+	return err
+}
+
+// dropSuggestion removes a pending suggestion and its evidence links. Only pending rows
+// are ever dropped: they are derived, and the next scan would rebuild them. Both writes
+// are conditional and affect nothing if a concurrent scan dropped it first.
+func dropSuggestion(ctx context.Context, tx *ent.Tx, s *ent.RecurrenceSuggestion) error {
+	pending := []predicate.RecurrenceSuggestion{
+		recurrencesuggestion.IDEQ(s.ID), recurrencesuggestion.StatusEQ(recurrencesuggestion.StatusPending),
+	}
+	if _, err := tx.RecurrenceSuggestion.Update().Where(pending...).ClearEvidence().Save(ctx); err != nil {
+		return err
+	}
+	_, err := tx.RecurrenceSuggestion.Delete().Where(pending...).Exec(ctx)
+	return err
 }
 
 // coverDecl is one declaration as the coverage check sees it. endedOn is set only for an
