@@ -45,9 +45,17 @@ var ErrNotAPayDate = errors.New("finance: that date is not one of the income's p
 var ErrNotACredit = errors.New("finance: only a credit (a positive amount) can be an income receipt")
 
 // ErrCycleOutOfRange is returned when a hand link targets a pay date that is on the grid
-// but is not a cycle that can have been paid: before the anchor (no cycle existed), after
-// ended_on (none was expected), or after today (not paid yet). The API maps it to a 422.
-var ErrCycleOutOfRange = errors.New("finance: that pay date is outside the income's cycles: it must fall between the anchor date and today, and not after ended_on")
+// but is not a cycle the credit can have paid: before the anchor (no cycle existed), after
+// ended_on (none was expected), or more than earlyPayDays after the credit posted. The API
+// maps it to a 422.
+var ErrCycleOutOfRange = errors.New("finance: that pay date is outside the income's cycles: it must fall on or after the anchor date, at most 7 days after the transaction posted, and not after ended_on")
+
+// earlyPayDays is how far AHEAD of its posted date a credit may settle a cycle. Pay that
+// falls on a weekend or a public holiday usually lands the business day before, so a
+// Sunday pay date is paid on the Friday and the credit posts before its cycle. A week
+// covers a weekend plus a holiday on either side; anything earlier is not that cycle's
+// pay. There is no matching bound the other way, since late pay is still pay.
+const earlyPayDays = 7
 
 // ErrTransactionReceived is returned when the credit already settles a receipt of ANY
 // income. One posted credit is one payment, so it pays at most one cycle. The API maps it
@@ -246,8 +254,10 @@ func incomeTotals(views []IncomeView, today time.Time) IncomeTotals {
 //
 // occurrence is optional: when nil the pay date closest to the transaction's posted date
 // is used, and when given it must be one of the income's derived pay dates
-// (ErrNotAPayDate otherwise). Either way the cycle must be one that can have been paid:
-// not before the anchor, not after ended_on, not after today (ErrCycleOutOfRange). The
+// (ErrNotAPayDate otherwise). Either way the cycle must be one the credit can have paid:
+// not before the anchor, not after ended_on, and at most earlyPayDays after the posted
+// date, so a Friday credit settles the Sunday pay date even while that Sunday is still
+// ahead (ErrCycleOutOfRange). The
 // transaction must be a credit (ErrNotACredit) and, when the income names its account,
 // posted to that account (ErrWrongAccount).
 //
@@ -285,7 +295,7 @@ func LinkIncomeReceipt(ctx context.Context, client *ent.Client, incomeID, txnID 
 			return nil, ErrNotAPayDate
 		}
 	}
-	if !cyclePayable(inc, occ, localToday()) {
+	if !cyclePayable(inc, occ, t.PostedDate) {
 		return nil, ErrCycleOutOfRange
 	}
 
@@ -309,12 +319,14 @@ func LinkIncomeReceipt(ctx context.Context, client *ent.Client, incomeID, txnID 
 	return r, nil
 }
 
-// cyclePayable reports whether occ is a cycle that can have been paid: on or after the
-// anchor (there is no cycle before it), on or before ended_on when the income has one
-// (nothing after it was expected), and on or before today (a future cycle is not paid
-// yet). occ is already known to be on the grid.
-func cyclePayable(inc *ent.RecurringIncome, occ, today time.Time) bool {
-	if occ.Before(normalizeDate(inc.AnchorDate)) || occ.After(today) {
+// cyclePayable reports whether occ is a cycle that a credit posted on posted can have
+// paid: on or after the anchor (there is no cycle before it), on or before ended_on when
+// the income has one (nothing after it was expected), and at most earlyPayDays after the
+// posted date (early pay, see earlyPayDays). Since a posted credit is never in the future,
+// that last bound also caps the cycle at a week past today. occ is already known to be on
+// the grid.
+func cyclePayable(inc *ent.RecurringIncome, occ, posted time.Time) bool {
+	if occ.Before(normalizeDate(inc.AnchorDate)) || occ.After(normalizeDate(posted).AddDate(0, 0, earlyPayDays)) {
 		return false
 	}
 	return inc.EndedOn == nil || !occ.After(normalizeDate(*inc.EndedOn))

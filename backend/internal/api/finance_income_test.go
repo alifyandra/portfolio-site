@@ -329,8 +329,8 @@ func TestFinanceIncome_LinkReceiptRules(t *testing.T) {
 		return api.Post("/api/admin/finance/income/"+itoa(inc.ID)+"/receipts", admin, body)
 	}
 
-	if resp := link(salary, map[string]any{"transaction_id": pay.ID, "occurrence_date": today.AddDate(0, 0, 7).Format(dateLayout)}); resp.Code != http.StatusUnprocessableEntity {
-		t.Errorf("future cycle = %d, want 422; body=%s", resp.Code, resp.Body.String())
+	if resp := link(salary, map[string]any{"transaction_id": pay.ID, "occurrence_date": today.AddDate(0, 0, 14).Format(dateLayout)}); resp.Code != http.StatusUnprocessableEntity {
+		t.Errorf("cycle two weeks after the credit = %d, want 422; body=%s", resp.Code, resp.Body.String())
 	}
 	if resp := link(salary, map[string]any{"transaction_id": pay.ID, "occurrence_date": today.AddDate(0, 0, -21).Format(dateLayout)}); resp.Code != http.StatusUnprocessableEntity {
 		t.Errorf("pre-anchor cycle = %d, want 422; body=%s", resp.Code, resp.Body.String())

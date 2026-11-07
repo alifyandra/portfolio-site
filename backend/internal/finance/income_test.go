@@ -13,6 +13,7 @@ import (
 	"github.com/alifyandra/portfolio-site/backend/ent/account"
 	"github.com/alifyandra/portfolio-site/backend/ent/recurringincome"
 	"github.com/alifyandra/portfolio-site/backend/ent/schema"
+	"github.com/alifyandra/portfolio-site/backend/ent/transaction"
 )
 
 // Recurring Income tests (ADR 0019). The occurrence arithmetic is the bill generator's
@@ -358,7 +359,8 @@ func TestLinkIncomeReceipt_OneCreditOneCycle(t *testing.T) {
 	acc := seedAccount(t, ctx, client, "Everyday", account.ClassAsset, account.TypeEveryday)
 	anchor := day(2026, time.March, 15)
 	inc := seedIncome(t, ctx, client, "Salary", 1000, recurringincome.CadenceMonthly, anchor)
-	seedTxn(t, ctx, client, acc, "pay-1", anchor, 1000, "PAY CREDIT", "")
+	// Posted 10 April, so it could pay either cycle: 15 March late or 15 April early.
+	seedTxn(t, ctx, client, acc, "pay-1", day(2026, time.April, 10), 1000, "PAY CREDIT", "")
 	txn := client.Transaction.Query().OnlyX(ctx)
 
 	if _, err := LinkIncomeReceipt(ctx, client, inc.ID, txn.ID, &anchor); err != nil {
@@ -398,8 +400,9 @@ func TestLinkIncomeReceipt_OneReceiptPerTransaction(t *testing.T) {
 }
 
 // TestLinkIncomeReceipt_OccurrenceWindow: being on the grid is not enough. A cycle before
-// the anchor never existed, one after ended_on was never expected, and one still in the
-// future has not been paid yet, whether the caller names it or it is derived as nearest.
+// the anchor never existed, one after ended_on was never expected, and one more than a
+// week after the credit posted cannot be what the credit paid, whether the caller names
+// it or it is derived as nearest.
 func TestLinkIncomeReceipt_OccurrenceWindow(t *testing.T) {
 	client := newFinanceTestClient(t)
 	ctx := context.Background()
@@ -413,8 +416,8 @@ func TestLinkIncomeReceipt_OccurrenceWindow(t *testing.T) {
 	pay := client.Transaction.Query().Order(ent.Desc("id")).FirstX(ctx)
 
 	beforeAnchor := today.AddDate(0, 0, -35)
-	future := today.AddDate(0, 0, 7)
-	for name, occ := range map[string]*time.Time{"before anchor": &beforeAnchor, "future": &future} {
+	tooEarly := today.AddDate(0, 0, 14) // two weeks after the credit posted
+	for name, occ := range map[string]*time.Time{"before anchor": &beforeAnchor, "two weeks early": &tooEarly} {
 		if _, err := LinkIncomeReceipt(ctx, client, inc.ID, pay.ID, occ); !errors.Is(err, ErrCycleOutOfRange) {
 			t.Errorf("%s = %v, want ErrCycleOutOfRange", name, err)
 		}
@@ -435,6 +438,48 @@ func TestLinkIncomeReceipt_OccurrenceWindow(t *testing.T) {
 	lastCycle := today.AddDate(0, 0, -14)
 	if _, err := LinkIncomeReceipt(ctx, client, inc.ID, pay.ID, &lastCycle); err != nil {
 		t.Errorf("the ended_on cycle itself failed: %v", err)
+	}
+}
+
+// TestLinkIncomeReceipt_EarlyPayOverTheWeekend: a pay date that falls on a weekend is
+// usually paid the Friday before, so the credit posts BEFORE its cycle, and the cycle can
+// still be in the future when the link is made. Here the credit posts today (the Friday)
+// and the pay date is two days out (the Sunday). The cycle may be at most a week after
+// the posted date: the nearest cycle and a named one both link, a cycle eight days after
+// the credit does not, and the week itself is inclusive.
+func TestLinkIncomeReceipt_EarlyPayOverTheWeekend(t *testing.T) {
+	client := newFinanceTestClient(t)
+	ctx := context.Background()
+	today := localToday()
+	acc := seedAccount(t, ctx, client, "Everyday", account.ClassAsset, account.TypeEveryday)
+	sunday := today.AddDate(0, 0, 2)
+	// Fortnightly from 12 days ago: pay dates at -12, +2 (the Sunday), +16.
+	salary := seedIncome(t, ctx, client, "Salary", 1000, recurringincome.CadenceFortnightly, sunday.AddDate(0, 0, -14))
+	seedTxn(t, ctx, client, acc, "friday", today, 1000, "PAY CREDIT", "")
+	friday := client.Transaction.Query().OnlyX(ctx)
+
+	r, err := LinkIncomeReceipt(ctx, client, salary.ID, friday.ID, nil)
+	if err != nil {
+		t.Fatalf("Friday credit for a Sunday pay date: %v, want it linked", err)
+	}
+	if !r.OccurrenceDate.Equal(sunday) {
+		t.Errorf("cycle = %s, want the Sunday %s (nearest, and after the posted date)",
+			r.OccurrenceDate.Format(dateLayoutTest), sunday.Format(dateLayoutTest))
+	}
+
+	// Weekly from two weeks back: pay dates at -14, -7, 0, +7. Next week's cycle is exactly
+	// 7 days after a credit posted today and 8 days after one posted yesterday.
+	contract := seedIncome(t, ctx, client, "Contract", 300, recurringincome.CadenceWeekly, today.AddDate(0, 0, -14))
+	seedTxn(t, ctx, client, acc, "week-early", today, 300, "PAY CREDIT", "")
+	seedTxn(t, ctx, client, acc, "eight-early", today.AddDate(0, 0, -1), 300, "PAY CREDIT", "")
+	weekEarly := client.Transaction.Query().Where(transaction.DedupHash("hash-week-early")).OnlyX(ctx)
+	eightEarly := client.Transaction.Query().Where(transaction.DedupHash("hash-eight-early")).OnlyX(ctx)
+	nextWeek := today.AddDate(0, 0, 7)
+	if _, err := LinkIncomeReceipt(ctx, client, contract.ID, eightEarly.ID, &nextWeek); !errors.Is(err, ErrCycleOutOfRange) {
+		t.Errorf("cycle 8 days after the credit = %v, want ErrCycleOutOfRange", err)
+	}
+	if _, err := LinkIncomeReceipt(ctx, client, contract.ID, weekEarly.ID, &nextWeek); err != nil {
+		t.Errorf("cycle exactly 7 days after the credit: %v, want it linked", err)
 	}
 }
 

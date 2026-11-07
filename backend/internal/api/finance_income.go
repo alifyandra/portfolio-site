@@ -123,7 +123,7 @@ type createIncomeReceiptInput struct {
 	ID   int `path:"id" doc:"Recurring income ID"`
 	Body struct {
 		TransactionID  int    `json:"transaction_id" minimum:"1" doc:"Posted credit that paid the cycle: not already a receipt of any income, and posted to the income's account when it has one"`
-		OccurrenceDate string `json:"occurrence_date,omitempty" doc:"Pay date, YYYY-MM-DD; must be one of the income's derived occurrences, on or after anchor_date, on or before today and on or before ended_on. Defaults to the cycle nearest the transaction's posted date"`
+		OccurrenceDate string `json:"occurrence_date,omitempty" doc:"Pay date, YYYY-MM-DD; must be one of the income's derived occurrences, on or after anchor_date, at most 7 days after the transaction's posted date (pay due on a weekend lands early) and on or before ended_on. Defaults to the cycle nearest the transaction's posted date"`
 	}
 }
 
