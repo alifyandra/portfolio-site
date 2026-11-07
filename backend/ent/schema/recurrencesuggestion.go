@@ -77,7 +77,9 @@ func (RecurrenceSuggestion) Fields() []ent.Field {
 // Edges of the RecurrenceSuggestion. The account is the one every evidence row posted to
 // (a run never spans accounts). evidence is many-to-many through a join table, so it adds
 // no column to transactions. bill and income record what accepting created; both FKs
-// live here and are optional, so deleting that declaration later only clears the link.
+// live here and are optional. Deleting that declaration through the API reopens the
+// suggestion as pending (finance.ReopenSuggestionForBill / ForIncome) before the link
+// clears.
 func (RecurrenceSuggestion) Edges() []ent.Edge {
 	return []ent.Edge{
 		edge.From("account", Account.Type).

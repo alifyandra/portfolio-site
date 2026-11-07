@@ -40,6 +40,7 @@ func newFinanceSuggestionsTestAPI(t *testing.T) (humatest.TestAPI, *ent.Client) 
 	api.UseMiddleware(svc.Middleware)
 	h := New(Deps{Auth: svc, Ent: client})
 	h.registerFinanceIncome(api)
+	h.registerAdminFinanceBills(api)
 	h.registerFinanceSuggestions(api)
 	return api, client
 }
@@ -226,14 +227,60 @@ func TestFinanceSuggestions_ScanAcceptDismiss(t *testing.T) {
 		t.Errorf("pending = %s, want an empty list", resp.Body.String())
 	}
 
-	// Deleting the accepted income only clears the suggestion's link to it.
+	// Deleting the accepted income reopens its suggestion for review; the dismissed one
+	// stays dismissed.
 	if resp := api.Delete("/api/admin/finance/income/"+itoa(*accepted.IncomeID), admin); resp.Code != http.StatusNoContent {
 		t.Fatalf("delete accepted income = %d %s", resp.Code, resp.Body.String())
 	}
-	resp = api.Get("/api/admin/finance/suggestions?status=accepted", admin)
+	resp = api.Get("/api/admin/finance/suggestions", admin)
 	_ = json.Unmarshal(resp.Body.Bytes(), &list)
-	if list.Count != 1 || list.Suggestions[0].IncomeID != nil {
-		t.Errorf("accepted after the income went = %s, want income_id null", resp.Body.String())
+	if list.Count != 1 || list.Suggestions[0].ID != income.ID || list.Suggestions[0].IncomeID != nil || list.Suggestions[0].DecidedAt != nil {
+		t.Errorf("pending after the income went = %s, want the income suggestion reopened and unlinked", resp.Body.String())
+	}
+	resp = api.Get("/api/admin/finance/suggestions?status=dismissed", admin)
+	_ = json.Unmarshal(resp.Body.Bytes(), &list)
+	if list.Count != 1 || list.Suggestions[0].ID != bill.ID {
+		t.Errorf("dismissed = %s, want the bill suggestion still dismissed", resp.Body.String())
+	}
+}
+
+// TestFinanceSuggestions_DeletingAnAcceptedBillReopens: deleting the bill an accepted
+// suggestion created puts the suggestion back to pending, so the run can be accepted
+// again; a bill not made from a suggestion deletes as before.
+func TestFinanceSuggestions_DeletingAnAcceptedBillReopens(t *testing.T) {
+	api, client := newFinanceSuggestionsTestAPI(t)
+	ctx := context.Background()
+	admin := sessionCookieFor(t, ctx, client, user.RoleAdmin)
+	seedSuggestionLedger(t, ctx, client)
+	if resp := api.Post("/api/admin/finance/suggestions/scan", admin, map[string]any{}); resp.Code != http.StatusOK {
+		t.Fatalf("scan = %d", resp.Code)
+	}
+	var list suggestionList
+	_ = json.Unmarshal(api.Get("/api/admin/finance/suggestions", admin).Body.Bytes(), &list)
+	var bill FinanceSuggestionDTO
+	for _, s := range list.Suggestions {
+		if s.Kind == "bill" {
+			bill = s
+		}
+	}
+	resp := api.Post("/api/admin/finance/suggestions/"+itoa(bill.ID)+"/accept", admin, map[string]any{"match_pattern": "zylo streaming"})
+	var accepted struct {
+		BillID *int `json:"bill_id"`
+	}
+	_ = json.Unmarshal(resp.Body.Bytes(), &accepted)
+	if resp.Code != http.StatusOK || accepted.BillID == nil {
+		t.Fatalf("accept = %d %s", resp.Code, resp.Body.String())
+	}
+	if resp := api.Delete("/api/admin/finance/bills/"+itoa(*accepted.BillID), admin); resp.Code != http.StatusNoContent {
+		t.Fatalf("delete bill = %d %s", resp.Code, resp.Body.String())
+	}
+	var got FinanceSuggestionDTO
+	_ = json.Unmarshal(api.Get("/api/admin/finance/suggestions/"+itoa(bill.ID), admin).Body.Bytes(), &got)
+	if got.Status != "pending" || got.BillID != nil || got.DecidedAt != nil {
+		t.Fatalf("suggestion after its bill went = %+v, want pending and unlinked", got)
+	}
+	if resp := api.Post("/api/admin/finance/suggestions/"+itoa(bill.ID)+"/accept", admin, map[string]any{"match_pattern": ""}); resp.Code != http.StatusOK {
+		t.Errorf("accept again = %d %s, want 200", resp.Code, resp.Body.String())
 	}
 }
 

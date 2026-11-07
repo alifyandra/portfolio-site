@@ -20,6 +20,7 @@ import {
   useReconcileFinanceBills,
   useListFinanceAccounts,
   getListFinanceBillsQueryKey,
+  getListFinanceSuggestionsQueryKey,
 } from '@/lib/api/generated';
 import type { FinanceBillDTO } from '@/lib/api/model';
 import { UpdateBillInputBodyStatus } from '@/lib/api/model';
@@ -214,7 +215,18 @@ export function BillsSection() {
 
   const del = (b: FinanceBillDTO) => {
     if (!confirm(`Delete "${b.name}"? Its reconciliation links go too.`)) return;
-    remove.mutate({ id: b.id }, { onSuccess: invalidate });
+    remove.mutate(
+      { id: b.id },
+      {
+        onSuccess: () => {
+          invalidate();
+          // A bill accepted from a suggestion reopens it on delete.
+          queryClient.invalidateQueries({
+            queryKey: getListFinanceSuggestionsQueryKey(),
+          });
+        },
+      },
+    );
   };
 
   return (

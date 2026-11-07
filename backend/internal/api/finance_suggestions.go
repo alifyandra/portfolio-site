@@ -40,8 +40,8 @@ type FinanceSuggestionDTO struct {
 	DecidedAt      *string                        `json:"decided_at" doc:"When the owner accepted or dismissed it; null while pending"`
 	AccountID      *int                           `json:"account_id" doc:"The account every evidence row posted to"`
 	AccountName    string                         `json:"account_name"`
-	BillID         *int                           `json:"bill_id" doc:"The recurring bill accepting created; null otherwise, or once that bill is deleted"`
-	IncomeID       *int                           `json:"income_id" doc:"The recurring income accepting created; null otherwise, or once that income is deleted"`
+	BillID         *int                           `json:"bill_id" doc:"The recurring bill accepting created; null otherwise. Deleting that bill reopens the suggestion as pending"`
+	IncomeID       *int                           `json:"income_id" doc:"The recurring income accepting created; null otherwise. Deleting that income reopens the suggestion as pending"`
 	Evidence       []FinanceSuggestionEvidenceDTO `json:"evidence" doc:"The run's transactions, newest first: the newest 5 in the list, all of them from GET /api/admin/finance/suggestions/{id}"`
 	EvidenceCount  int                            `json:"evidence_count" doc:"How many transactions the run rests on, whether or not evidence lists them all"`
 	EvidenceSince  string                         `json:"evidence_since" doc:"YYYY-MM-DD the run's oldest transaction posted"`

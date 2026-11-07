@@ -1575,7 +1575,7 @@ components:
           description: YYYY-MM-DD; the grid that best fits the evidence, on its oldest cycle
           type: string
         bill_id:
-          description: The recurring bill accepting created; null otherwise, or once that bill is deleted
+          description: The recurring bill accepting created; null otherwise. Deleting that bill reopens the suggestion as pending
           format: int64
           type:
             - integer
@@ -1621,7 +1621,7 @@ components:
           format: int64
           type: integer
         income_id:
-          description: The recurring income accepting created; null otherwise, or once that income is deleted
+          description: The recurring income accepting created; null otherwise. Deleting that income reopens the suggestion as pending
           format: int64
           type:
             - integer

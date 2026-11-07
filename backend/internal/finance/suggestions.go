@@ -1248,6 +1248,30 @@ func AcceptSuggestion(ctx context.Context, client *ent.Client, id int, name, mat
 	return res, nil
 }
 
+// ReopenSuggestionForBill puts the suggestion a bill was accepted from back to pending,
+// unlinked and undecided, so the run is offered again once its declaration is gone. Call
+// it inside the bill delete's transaction, before the delete clears the link. Only an
+// accepted suggestion is touched: a dismissal is the owner's and stays.
+func ReopenSuggestionForBill(ctx context.Context, tx *ent.Tx, billID int) error {
+	return reopenSuggestions(ctx, tx, recurrencesuggestion.HasBillWith(recurringbill.IDEQ(billID)))
+}
+
+// ReopenSuggestionForIncome is ReopenSuggestionForBill for a recurring income.
+func ReopenSuggestionForIncome(ctx context.Context, tx *ent.Tx, incomeID int) error {
+	return reopenSuggestions(ctx, tx, recurrencesuggestion.HasIncomeWith(recurringincome.IDEQ(incomeID)))
+}
+
+func reopenSuggestions(ctx context.Context, tx *ent.Tx, made predicate.RecurrenceSuggestion) error {
+	_, err := tx.RecurrenceSuggestion.Update().
+		Where(made, recurrencesuggestion.StatusEQ(recurrencesuggestion.StatusAccepted)).
+		SetStatus(recurrencesuggestion.StatusPending).
+		ClearDecidedAt().
+		ClearBill().
+		ClearIncome().
+		Save(ctx)
+	return err
+}
+
 // idSet turns an id query's result into a set, passing its error through.
 func idSet(ids []int, err error) (map[int]bool, error) {
 	if err != nil {

@@ -23,6 +23,7 @@ import {
   useReconcileFinanceIncome,
   useListFinanceAccounts,
   getListFinanceIncomeQueryKey,
+  getListFinanceSuggestionsQueryKey,
 } from '@/lib/api/generated';
 import type { FinanceIncomeDTO } from '@/lib/api/model';
 import {
@@ -215,7 +216,18 @@ export function IncomeSection() {
 
   const del = (i: FinanceIncomeDTO) => {
     if (!confirm(`Delete "${i.name}"? Its receipt links go too.`)) return;
-    remove.mutate({ id: i.id }, { onSuccess: invalidate });
+    remove.mutate(
+      { id: i.id },
+      {
+        onSuccess: () => {
+          invalidate();
+          // An income accepted from a suggestion reopens it on delete.
+          queryClient.invalidateQueries({
+            queryKey: getListFinanceSuggestionsQueryKey(),
+          });
+        },
+      },
+    );
   };
 
   return (

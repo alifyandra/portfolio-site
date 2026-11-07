@@ -442,8 +442,13 @@ func (h *Handler) registerFinanceIncome(api huma.API) {
 		}
 		// The receipts carry a required FK to the income, so they go first, in one
 		// transaction. They are links only; the ledger rows they point at are untouched.
+		// An income accepted from a suggestion reopens that suggestion for review.
 		tx, err := h.deps.Ent.Tx(ctx)
 		if err != nil {
+			return nil, huma.Error500InternalServerError("failed to delete recurring income", err)
+		}
+		if err := finance.ReopenSuggestionForIncome(ctx, tx, in.ID); err != nil {
+			_ = tx.Rollback()
 			return nil, huma.Error500InternalServerError("failed to delete recurring income", err)
 		}
 		if _, err := tx.IncomeReceipt.Delete().
