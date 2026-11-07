@@ -67,3 +67,36 @@ export function scheduleText(
   const next = `Next ${fmt(i.next_expected)} · ${whenLabel(i.days_until)}`;
   return i.ended_on ? `${next} · ends ${fmt(i.ended_on)}` : next;
 }
+
+/** Whole days from a to b, both YYYY-MM-DD calendar dates (negative when b is earlier). */
+function daysFromTo(a: string, b: string): number {
+  return Math.round(
+    (Date.parse(`${b}T00:00:00Z`) - Date.parse(`${a}T00:00:00Z`)) / 86_400_000,
+  );
+}
+
+/**
+ * How a receipt's credit landed against the pay date it settles: "on the day", "2 days
+ * early" (pay due on a weekend usually posts the Friday before), or "3 days late".
+ */
+export function paidTimingLabel(
+  occurrenceDate: string,
+  postedDate: string,
+): string {
+  const early = daysFromTo(postedDate, occurrenceDate);
+  if (early === 0) return 'on the day';
+  const n = Math.abs(early);
+  return `${n} day${n === 1 ? '' : 's'} ${early > 0 ? 'early' : 'late'}`;
+}
+
+/**
+ * The confirm step before a receipt is removed. Only the link goes: the transaction is
+ * ledger data and stays, so the cycle can be linked again afterwards.
+ */
+export function removeReceiptPrompt(
+  incomeName: string,
+  occurrenceDate: string,
+  fmt: (d: string) => string,
+): string {
+  return `Remove the receipt for "${incomeName}" on ${fmt(occurrenceDate)}? The transaction stays in the ledger; only the link goes.`;
+}

@@ -7,7 +7,8 @@
 // comes from /api/finance/income.
 //
 // Receipts are linked by hand through the API for now, so there is no reconcile button
-// and no match fields here; the row shows when money last arrived once a link exists.
+// and no match fields here; the row shows when money last arrived once a link exists,
+// and expands to list its receipts with a Remove action (IncomeReceiptList).
 // The status and date rules live in incomeRules.ts, where node --test reaches them.
 
 import { useState } from 'react';
@@ -32,10 +33,10 @@ import {
   ghostBtn,
   editBtn,
   dangerBtn,
-  rowClass,
 } from '@/components/admin/ui';
 import { formatDate } from './format';
 import { AmountField, FigureSlot, useMoney } from './censor';
+import { IncomeReceiptList } from './IncomeReceiptList';
 import {
   melbourneTodayISO,
   pauseToggleTarget,
@@ -122,6 +123,8 @@ export function IncomeSection() {
   // null = closed, 'new' = create form, number = editing that income id.
   const [editing, setEditing] = useState<number | 'new' | null>(null);
   const [form, setForm] = useState<IncomeForm>(newIncomeForm);
+  // Which income's receipts are expanded; one at a time keeps the list fetch lazy.
+  const [openReceipts, setOpenReceipts] = useState<number | null>(null);
 
   const invalidate = () =>
     queryClient.invalidateQueries({ queryKey: getListFinanceIncomeQueryKey() });
@@ -355,80 +358,100 @@ export function IncomeSection() {
       ) : (
         <ul className="flex flex-col gap-2">
           {incomes.map((i) => (
-            <li key={i.id} className={rowClass}>
-              <div className="flex min-w-0 flex-col gap-0.5">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="truncate font-medium text-white">
-                    {i.name}
-                  </span>
-                  <span className="font-mono text-xs uppercase tracking-wide text-slate-400">
-                    {CADENCE_LABELS[i.cadence as Cadence] ?? i.cadence}
-                  </span>
-                  {i.status !== 'active' ? (
-                    <span className="rounded-sm bg-white/5 px-1.5 py-0.5 text-xs text-slate-300">
-                      {i.status}
+            <li
+              key={i.id}
+              className="flex flex-col gap-2 rounded-lg border border-slate-700 bg-deepsea/40 p-3"
+            >
+              <div className="flex items-start justify-between gap-4">
+                <div className="flex min-w-0 flex-col gap-0.5">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="truncate font-medium text-white">
+                      {i.name}
                     </span>
-                  ) : null}
+                    <span className="font-mono text-xs uppercase tracking-wide text-slate-400">
+                      {CADENCE_LABELS[i.cadence as Cadence] ?? i.cadence}
+                    </span>
+                    {i.status !== 'active' ? (
+                      <span className="rounded-sm bg-white/5 px-1.5 py-0.5 text-xs text-slate-300">
+                        {i.status}
+                      </span>
+                    ) : null}
+                  </div>
+                  <span className="truncate text-xs text-slate-400">
+                    {scheduleText(i, formatDate)}
+                    {i.account_name ? ` · ${i.account_name}` : ''}
+                  </span>
+                  <span className="truncate text-xs text-slate-400">
+                    {i.last_received_date && i.last_received_amount != null ? (
+                      <>
+                        Last received {formatDate(i.last_received_date)} ·{' '}
+                        {money(i.last_received_amount)}
+                      </>
+                    ) : (
+                      'No receipt linked yet'
+                    )}
+                  </span>
                 </div>
-                <span className="truncate text-xs text-slate-400">
-                  {scheduleText(i, formatDate)}
-                  {i.account_name ? ` · ${i.account_name}` : ''}
-                </span>
-                <span className="truncate text-xs text-slate-400">
-                  {i.last_received_date && i.last_received_amount != null ? (
-                    <>
-                      Last received {formatDate(i.last_received_date)} ·{' '}
-                      {money(i.last_received_amount)}
-                    </>
-                  ) : (
-                    'No receipt linked yet'
-                  )}
-                </span>
-              </div>
 
-              <div className="flex shrink-0 flex-col items-end gap-1.5">
-                <span className="text-sm font-semibold tabular-nums text-white">
-                  {money(i.expected_amount)}
-                </span>
-                <div className="flex items-center gap-1.5">
-                  <button
-                    type="button"
-                    className={editBtn}
-                    disabled={listBusy}
-                    onClick={() => openEdit(i)}
-                  >
-                    Edit
-                  </button>
-                  {pauseToggleTarget(i.status) !== null ? (
+                <div className="flex shrink-0 flex-col items-end gap-1.5">
+                  <span className="text-sm font-semibold tabular-nums text-white">
+                    {money(i.expected_amount)}
+                  </span>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      className={editBtn}
+                      disabled={listBusy}
+                      onClick={() => openEdit(i)}
+                    >
+                      Edit
+                    </button>
+                    {pauseToggleTarget(i.status) !== null ? (
+                      <button
+                        type="button"
+                        className={rowGhostBtn}
+                        disabled={listBusy}
+                        onClick={() => togglePause(i)}
+                      >
+                        {i.status === 'paused' ? 'Resume' : 'Pause'}
+                      </button>
+                    ) : null}
+                    {canEnd(i.status) ? (
+                      <button
+                        type="button"
+                        className={rowGhostBtn}
+                        disabled={listBusy}
+                        onClick={() => end(i)}
+                      >
+                        End
+                      </button>
+                    ) : null}
                     <button
                       type="button"
                       className={rowGhostBtn}
-                      disabled={listBusy}
-                      onClick={() => togglePause(i)}
+                      aria-expanded={openReceipts === i.id}
+                      onClick={() =>
+                        setOpenReceipts((cur) => (cur === i.id ? null : i.id))
+                      }
                     >
-                      {i.status === 'paused' ? 'Resume' : 'Pause'}
+                      {openReceipts === i.id ? 'Hide receipts' : 'Receipts'}
                     </button>
-                  ) : null}
-                  {canEnd(i.status) ? (
                     <button
                       type="button"
-                      className={rowGhostBtn}
+                      className={dangerBtn}
                       disabled={listBusy}
-                      onClick={() => end(i)}
+                      onClick={() => del(i)}
                     >
-                      End
+                      Delete
                     </button>
-                  ) : null}
-                  <button
-                    type="button"
-                    className={dangerBtn}
-                    disabled={listBusy}
-                    onClick={() => del(i)}
-                  >
-                    Delete
-                  </button>
+                  </div>
                 </div>
               </div>
+              {openReceipts === i.id ? (
+                <div className="border-t border-slate-700 pt-2">
+                  <IncomeReceiptList incomeId={i.id} incomeName={i.name} />
+                </div>
+              ) : null}
             </li>
           ))}
         </ul>

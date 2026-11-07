@@ -9,15 +9,26 @@ import {
   canEnd,
   endPatch,
   scheduleText,
+  paidTimingLabel,
+  removeReceiptPrompt,
 } from './incomeRules.ts';
 
 test('today is the Melbourne calendar day, not the UTC one', () => {
   // 07:00 AEDT on 8 Nov is still 7 Nov in UTC: the anchor must default to the 8th.
-  assert.equal(melbourneTodayISO(new Date('2026-11-07T20:00:00Z')), '2026-11-08');
+  assert.equal(
+    melbourneTodayISO(new Date('2026-11-07T20:00:00Z')),
+    '2026-11-08',
+  );
   // 01:30 AEST on 1 Jul (winter, +10).
-  assert.equal(melbourneTodayISO(new Date('2026-06-30T15:30:00Z')), '2026-07-01');
+  assert.equal(
+    melbourneTodayISO(new Date('2026-06-30T15:30:00Z')),
+    '2026-07-01',
+  );
   // 23:59 local stays on the same day.
-  assert.equal(melbourneTodayISO(new Date('2026-11-08T12:59:00Z')), '2026-11-08');
+  assert.equal(
+    melbourneTodayISO(new Date('2026-11-08T12:59:00Z')),
+    '2026-11-08',
+  );
 });
 
 test('pause and resume never apply to an ended income', () => {
@@ -63,5 +74,23 @@ test('the row names the next pay date, and ended_on once set', () => {
   assert.equal(
     scheduleText({ next_expected: null, days_until: null, ended_on: null }, id),
     'No pay date ahead',
+  );
+});
+
+test('a receipt says how its credit landed against the pay date', () => {
+  // A Sunday pay date paid on the Friday.
+  assert.equal(paidTimingLabel('2026-11-15', '2026-11-13'), '2 days early');
+  assert.equal(paidTimingLabel('2026-11-15', '2026-11-14'), '1 day early');
+  assert.equal(paidTimingLabel('2026-11-15', '2026-11-15'), 'on the day');
+  assert.equal(paidTimingLabel('2026-11-15', '2026-11-18'), '3 days late');
+  // Across a month end and a daylight-saving change.
+  assert.equal(paidTimingLabel('2026-10-04', '2026-09-30'), '4 days early');
+});
+
+test('removing a receipt asks first and says the transaction stays', () => {
+  const text = removeReceiptPrompt('Salary', '2026-11-15', (d) => `[${d}]`);
+  assert.equal(
+    text,
+    'Remove the receipt for "Salary" on [2026-11-15]? The transaction stays in the ledger; only the link goes.',
   );
 });
