@@ -49,7 +49,9 @@ make fe-dev    # Next.js at :3000 (separate terminal)
 - **Codegen pipeline:** Go handlers → `make generate-spec` → `backend/openapi.yaml`
   → `make codegen` → frontend hooks. **After changing any handler, run `make generate`
   and commit `openapi.yaml`** — CI fails if the committed spec is stale.
-- **Go 1.25 required** (Huma v2 needs it). Generated Ent code and frontend hooks are
+- **Go 1.26.10 required** (security floor for crypto/x509; Huma v2 alone needs
+  1.25). Bump `go.mod`, `backend/Dockerfile`, CI `setup-go`, the `Makefile` image and
+  the pinned govulncheck together. Generated Ent code and frontend hooks are
   **gitignored** — regenerated on build/CI. Schema + `openapi.yaml` are committed.
 - **Ent generation must run BEFORE `go mod tidy`** (else the not-yet-generated
   `ent/*` packages look like missing remote modules). The Dockerfile/CI do this order.
