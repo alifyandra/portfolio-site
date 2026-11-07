@@ -12,6 +12,7 @@ import { useQueryClient } from '@tanstack/react-query';
 
 import {
   useListFinanceSuggestions,
+  useGetFinanceSuggestion,
   useScanFinanceSuggestions,
   useAcceptFinanceSuggestion,
   useDismissFinanceSuggestion,
@@ -39,6 +40,7 @@ import {
   scanSummaryText,
   kindLabel,
   evidenceSpanText,
+  evidenceMoreText,
   acceptIntroText,
   acceptPatternHint,
   acceptButtonText,
@@ -199,7 +201,17 @@ export function SuggestionsSection() {
                     </span>
                   </div>
                   <span className="truncate text-xs text-slate-400">
-                    {evidenceSpanText(s.kind, s.evidence ?? [], formatDate)}
+                    {evidenceSpanText(
+                      s.kind,
+                      {
+                        count: s.evidence_count,
+                        since: s.evidence_since,
+                        newest:
+                          s.evidence?.[0]?.posted_date ?? s.evidence_since,
+                        gaps: s.gaps,
+                      },
+                      formatDate,
+                    )}
                     {s.account_name ? ` · ${s.account_name}` : ''} · next{' '}
                     {formatDate(s.next_expected)}
                   </span>
@@ -260,31 +272,58 @@ export function SuggestionsSection() {
                   onSubmit={() => onAccept(s, draft)}
                 />
               ) : null}
-              {openEvidence === s.id ? (
-                <ul className="flex flex-col divide-y divide-slate-700/60 border-t border-slate-700 pt-1">
-                  {(s.evidence ?? []).map((e) => (
-                    <li
-                      key={e.transaction_id}
-                      className="flex items-center justify-between gap-3 py-1.5 text-xs"
-                    >
-                      <span className="min-w-0 truncate text-slate-400">
-                        <span className="text-slate-200">
-                          {formatDate(e.posted_date)}
-                        </span>{' '}
-                        · {e.description}
-                      </span>
-                      <span className="shrink-0 tabular-nums text-white">
-                        {money(e.amount)}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              ) : null}
+              {openEvidence === s.id ? <EvidenceList suggestion={s} /> : null}
             </li>
           ))}
         </ul>
       )}
     </section>
+  );
+}
+
+/**
+ * One suggestion's evidence. The list response carries only the newest few rows, so
+ * "Show all" fetches the suggestion on its own for the rest.
+ */
+function EvidenceList({ suggestion: s }: { suggestion: FinanceSuggestionDTO }) {
+  const { money } = useMoney();
+  const [all, setAll] = useState(false);
+  const detail = useGetFinanceSuggestion(s.id, { query: { enabled: all } });
+  const rows = (all ? detail.data?.evidence : undefined) ?? s.evidence ?? [];
+  const more = evidenceMoreText(rows.length, s.evidence_count);
+  return (
+    <div className="flex flex-col gap-1 border-t border-slate-700 pt-1">
+      <ul className="flex flex-col divide-y divide-slate-700/60">
+        {rows.map((e) => (
+          <li
+            key={e.transaction_id}
+            className="flex items-center justify-between gap-3 py-1.5 text-xs"
+          >
+            <span className="min-w-0 truncate text-slate-400">
+              <span className="text-slate-200">
+                {formatDate(e.posted_date)}
+              </span>{' '}
+              · {e.description}
+            </span>
+            <span className="shrink-0 tabular-nums text-white">
+              {money(e.amount)}
+            </span>
+          </li>
+        ))}
+      </ul>
+      {detail.isError ? (
+        <p className="text-xs text-coral">Could not load the rest.</p>
+      ) : more ? (
+        <button
+          type="button"
+          className="self-start text-xs text-sky underline-offset-2 hover:underline disabled:opacity-50"
+          disabled={all && detail.isFetching}
+          onClick={() => setAll(true)}
+        >
+          {all && detail.isFetching ? 'Loading…' : more}
+        </button>
+      ) : null}
+    </div>
   );
 }
 

@@ -8,6 +8,7 @@ interface ScanSummary {
   refreshed: number;
   declared: number;
   dismissed: number;
+  reopened: number;
   dropped: number;
 }
 
@@ -24,6 +25,7 @@ export function scanSummaryText(s: ScanSummary): string {
     [s.refreshed, 'updated'],
     [s.declared, 'already declared'],
     [s.dismissed, 'dismissed before'],
+    [s.reopened, 'reopened after its declaration ended'],
     [s.dropped, 'removed'],
   ]
     .filter(([n]) => (n as number) > 0)
@@ -36,23 +38,44 @@ export function kindLabel(kind: string): string {
   return kind === 'income' ? 'Income' : 'Bill';
 }
 
+/** What the evidence span line needs: the run's size, oldest and newest dates, skips. */
+interface EvidenceSpan {
+  count: number;
+  since: string;
+  newest: string;
+  gaps: number;
+}
+
 /**
- * The evidence span, e.g. "4 debits, 5 Aug 2026 to 5 Nov 2026". Evidence arrives newest
- * first, so the oldest row is the last one.
+ * The evidence span, e.g. "5 debits, 1 skipped cycle, 3 Jun 2026 to 3 Nov 2026". It is
+ * built from the run's count and dates, not from the listed rows, since the list carries
+ * only the newest few.
  */
 export function evidenceSpanText(
   kind: string,
-  evidence: { posted_date: string }[],
+  span: EvidenceSpan,
   fmt: (d: string) => string,
 ): string {
-  const n = evidence.length;
-  const rows = `${n} ${kind === 'income' ? 'credit' : 'debit'}${n === 1 ? '' : 's'}`;
-  if (n === 0) return rows;
-  const newest = evidence[0].posted_date;
-  const oldest = evidence[n - 1].posted_date;
-  return newest === oldest
-    ? `${rows}, ${fmt(newest)}`
-    : `${rows}, ${fmt(oldest)} to ${fmt(newest)}`;
+  const n = span.count;
+  const parts = [
+    `${n} ${kind === 'income' ? 'credit' : 'debit'}${n === 1 ? '' : 's'}`,
+  ];
+  if (span.gaps > 0) {
+    parts.push(`${span.gaps} skipped cycle${span.gaps === 1 ? '' : 's'}`);
+  }
+  if (n > 0) {
+    parts.push(
+      span.since === span.newest
+        ? fmt(span.newest)
+        : `${fmt(span.since)} to ${fmt(span.newest)}`,
+    );
+  }
+  return parts.join(', ');
+}
+
+/** The note under a trimmed evidence list; empty when every row is already shown. */
+export function evidenceMoreText(shown: number, count: number): string {
+  return shown < count ? `Newest ${shown} of ${count}. Show all` : '';
 }
 
 /** The line above the accept form: what accepting creates and links. */

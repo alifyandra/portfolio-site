@@ -6,6 +6,7 @@ import {
   scanSummaryText,
   kindLabel,
   evidenceSpanText,
+  evidenceMoreText,
   acceptIntroText,
   acceptPatternHint,
   acceptButtonText,
@@ -19,6 +20,7 @@ const zero = {
   refreshed: 0,
   declared: 0,
   dismissed: 0,
+  reopened: 0,
   dropped: 0,
 };
 
@@ -45,6 +47,10 @@ test('a scan summary names only the counts that are not zero', () => {
     scanSummaryText({ ...zero, rows_scanned: 40, dropped: 1 }),
     'Scanned 40 transactions: no regular runs, 1 old suggestion removed.',
   );
+  assert.equal(
+    scanSummaryText({ ...zero, rows_scanned: 9, runs_found: 1, reopened: 1 }),
+    'Scanned 9 transactions and found 1 regular run: 1 reopened after its declaration ended.',
+  );
 });
 
 test('the kind says what accepting creates', () => {
@@ -52,22 +58,45 @@ test('the kind says what accepting creates', () => {
   assert.equal(kindLabel('income'), 'Income');
 });
 
-test('the evidence span runs oldest to newest though the rows arrive newest first', () => {
+test('the evidence span counts every row, not just the ones listed', () => {
   const fmt = (d) => `[${d}]`;
-  const rows = [
-    { posted_date: '2026-11-05' },
-    { posted_date: '2026-10-05' },
-    { posted_date: '2026-09-05' },
-  ];
   assert.equal(
-    evidenceSpanText('bill', rows, fmt),
-    '3 debits, [2026-09-05] to [2026-11-05]',
+    evidenceSpanText(
+      'bill',
+      { count: 8, since: '2026-09-05', newest: '2026-11-05', gaps: 0 },
+      fmt,
+    ),
+    '8 debits, [2026-09-05] to [2026-11-05]',
   );
   assert.equal(
-    evidenceSpanText('income', rows.slice(0, 1), fmt),
+    evidenceSpanText(
+      'income',
+      { count: 1, since: '2026-11-05', newest: '2026-11-05', gaps: 0 },
+      fmt,
+    ),
     '1 credit, [2026-11-05]',
   );
-  assert.equal(evidenceSpanText('income', [], fmt), '0 credits');
+  assert.equal(
+    evidenceSpanText(
+      'bill',
+      { count: 5, since: '2026-06-03', newest: '2026-11-03', gaps: 1 },
+      fmt,
+    ),
+    '5 debits, 1 skipped cycle, [2026-06-03] to [2026-11-03]',
+  );
+  assert.equal(
+    evidenceSpanText(
+      'income',
+      { count: 0, since: '', newest: '', gaps: 0 },
+      fmt,
+    ),
+    '0 credits',
+  );
+});
+
+test('a trimmed evidence list says how much more there is', () => {
+  assert.equal(evidenceMoreText(5, 8), 'Newest 5 of 8. Show all');
+  assert.equal(evidenceMoreText(4, 4), '');
 });
 
 test('accept says what it creates and dismiss asks first', () => {
