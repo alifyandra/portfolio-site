@@ -8,6 +8,7 @@
 //
 // Receipts are linked by hand through the API for now, so there is no reconcile button
 // and no match fields here; the row shows when money last arrived once a link exists.
+// The status and date rules live in incomeRules.ts, where node --test reaches them.
 
 import { useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
@@ -21,7 +22,6 @@ import {
   getListFinanceIncomeQueryKey,
 } from '@/lib/api/generated';
 import type { FinanceIncomeDTO } from '@/lib/api/model';
-import { UpdateIncomeInputBodyStatus } from '@/lib/api/model';
 import {
   citronCard,
   citronBadge,
@@ -36,6 +36,13 @@ import {
 } from '@/components/admin/ui';
 import { formatDate } from './format';
 import { AmountField, FigureSlot, useMoney } from './censor';
+import {
+  melbourneTodayISO,
+  pauseToggleTarget,
+  canEnd,
+  endPatch,
+  scheduleText,
+} from './incomeRules';
 
 const CADENCES = [
   'weekly',
@@ -64,22 +71,22 @@ interface IncomeForm {
   notes: string;
 }
 
-function todayISO(): string {
-  return new Date().toISOString().slice(0, 10);
-}
-
 // Neutral row-action button, sized like editBtn/dangerBtn (same as the bills section).
 const rowGhostBtn =
   'rounded-md border border-slate-700 px-2.5 py-1 text-xs font-semibold text-white transition hover:border-slate-500 disabled:cursor-not-allowed disabled:opacity-50';
 
-const emptyForm: IncomeForm = {
-  name: '',
-  expected_amount: '',
-  cadence: 'fortnightly',
-  anchor_date: todayISO(),
-  account_id: '',
-  notes: '',
-};
+// A function, not a constant, so the default anchor is today when the form opens rather
+// than whenever the module loaded.
+function newIncomeForm(): IncomeForm {
+  return {
+    name: '',
+    expected_amount: '',
+    cadence: 'fortnightly',
+    anchor_date: melbourneTodayISO(),
+    account_id: '',
+    notes: '',
+  };
+}
 
 function incomeToForm(i: FinanceIncomeDTO): IncomeForm {
   return {
@@ -90,14 +97,6 @@ function incomeToForm(i: FinanceIncomeDTO): IncomeForm {
     account_id: i.account_id == null ? '' : String(i.account_id),
     notes: i.notes,
   };
-}
-
-/** "in 4 days" / "today" / "8 days ago", from the signed days_until. */
-function whenLabel(days: number): string {
-  if (days === 0) return 'today';
-  if (days > 0) return `in ${days} day${days === 1 ? '' : 's'}`;
-  const ago = -days;
-  return `${ago} day${ago === 1 ? '' : 's'} ago`;
 }
 
 // The headline is quoted over the same window as the bills' committed figure, so the two
@@ -122,7 +121,7 @@ export function IncomeSection() {
 
   // null = closed, 'new' = create form, number = editing that income id.
   const [editing, setEditing] = useState<number | 'new' | null>(null);
-  const [form, setForm] = useState<IncomeForm>(emptyForm);
+  const [form, setForm] = useState<IncomeForm>(newIncomeForm);
 
   const invalidate = () =>
     queryClient.invalidateQueries({ queryKey: getListFinanceIncomeQueryKey() });
@@ -139,7 +138,7 @@ export function IncomeSection() {
     setForm((f) => ({ ...f, [key]: value }));
 
   const openNew = () => {
-    setForm(emptyForm);
+    setForm(newIncomeForm());
     setEditing('new');
   };
   const openEdit = (i: FinanceIncomeDTO) => {
@@ -181,11 +180,23 @@ export function IncomeSection() {
   };
 
   const togglePause = (i: FinanceIncomeDTO) => {
-    const status =
-      i.status === 'paused'
-        ? UpdateIncomeInputBodyStatus.active
-        : UpdateIncomeInputBodyStatus.paused;
+    const status = pauseToggleTarget(i.status);
+    if (status === null) return;
     update.mutate({ id: i.id, data: { status } }, { onSuccess: invalidate });
+  };
+
+  // Ending takes a date, defaulting to today; the API checks its format and refuses an
+  // end without one.
+  const end = (i: FinanceIncomeDTO) => {
+    const endedOn = prompt(
+      `End "${i.name}" on which date? (YYYY-MM-DD; no pay date after it is expected)`,
+      melbourneTodayISO(),
+    )?.trim();
+    if (!endedOn) return;
+    update.mutate(
+      { id: i.id, data: endPatch(endedOn) },
+      { onSuccess: invalidate },
+    );
   };
 
   const del = (i: FinanceIncomeDTO) => {
@@ -360,8 +371,7 @@ export function IncomeSection() {
                   ) : null}
                 </div>
                 <span className="truncate text-xs text-slate-400">
-                  {i.status === 'ended' ? 'Last' : 'Next'}{' '}
-                  {formatDate(i.next_expected)} · {whenLabel(i.days_until)}
+                  {scheduleText(i, formatDate)}
                   {i.account_name ? ` · ${i.account_name}` : ''}
                 </span>
                 <span className="truncate text-xs text-slate-400">
@@ -389,14 +399,26 @@ export function IncomeSection() {
                   >
                     Edit
                   </button>
-                  <button
-                    type="button"
-                    className={rowGhostBtn}
-                    disabled={listBusy}
-                    onClick={() => togglePause(i)}
-                  >
-                    {i.status === 'paused' ? 'Resume' : 'Pause'}
-                  </button>
+                  {pauseToggleTarget(i.status) !== null ? (
+                    <button
+                      type="button"
+                      className={rowGhostBtn}
+                      disabled={listBusy}
+                      onClick={() => togglePause(i)}
+                    >
+                      {i.status === 'paused' ? 'Resume' : 'Pause'}
+                    </button>
+                  ) : null}
+                  {canEnd(i.status) ? (
+                    <button
+                      type="button"
+                      className={rowGhostBtn}
+                      disabled={listBusy}
+                      onClick={() => end(i)}
+                    >
+                      End
+                    </button>
+                  ) : null}
                   <button
                     type="button"
                     className={dangerBtn}
