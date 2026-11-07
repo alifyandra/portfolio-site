@@ -188,3 +188,35 @@ func TestReconcileIncome_PatternOnWordBoundaries(t *testing.T) {
 		t.Error("the ATO credit did not settle its cycle")
 	}
 }
+
+// TestReconcileIncome_SkipsTransfersAndRefunds: a move in from the owner's own savings
+// and a refund-looking credit at the income's amount never settle a pay cycle, even when
+// the pattern matches; the real pay credit still does.
+func TestReconcileIncome_SkipsTransfersAndRefunds(t *testing.T) {
+	client := newFinanceTestClient(t)
+	ctx := context.Background()
+	today := localToday()
+	everyday := client.Account.Create().SetSource("commbank").SetName("Everyday").SetCurrency("AUD").
+		SetMaskedNumber("xxxx 4242").SetType(account.TypeEveryday).SetClass(account.ClassAsset).SaveX(ctx)
+	client.Account.Create().SetSource("commbank").SetName("Savings").SetCurrency("AUD").
+		SetMaskedNumber("xxxx 5353").SetType(account.TypeSavings).SetClass(account.ClassAsset).SaveX(ctx)
+	payday := recentDay(today, 1)
+	anchor := payday.AddDate(0, -3, 0)
+	inc := seedIncome(t, ctx, client, "Acme", 1000, recurringincome.CadenceMonthly, anchor, func(c *ent.RecurringIncomeCreate) {
+		c.SetMatchPattern("acme")
+	})
+	seedTxn(t, ctx, client, everyday, "own", payday, 1000, "Transfer from xx5353 ACME pay buffer", "")
+	seedTxn(t, ctx, client, everyday, "refund", payday.AddDate(0, -1, 0), 1000, "ACME REFUND 0042", "")
+	seedTxn(t, ctx, client, everyday, "reversal", payday.AddDate(0, -2, 0), 1000, "Reversal ACME payroll", "")
+	seedTxn(t, ctx, client, everyday, "chargeback", anchor, 1000, "ACME", "Acme Chargeback")
+	if sum, err := ReconcileIncome(ctx, client, ReconcileOptions{}); err != nil || sum.ReceiptsLinked != 0 {
+		t.Fatalf("pass = %+v (%v), want nothing linked from a transfer or a refund", sum, err)
+	}
+	seedTxn(t, ctx, client, everyday, "pay", payday, 1000, "Salary ACME", "")
+	if sum, err := ReconcileIncome(ctx, client, ReconcileOptions{}); err != nil || sum.ReceiptsLinked != 1 {
+		t.Fatalf("pass = %+v (%v), want the pay credit linked", sum, err)
+	}
+	if r := receiptFor(t, ctx, client, inc.ID, payday); r == nil || r.Edges.Transaction.Description != "Salary ACME" {
+		t.Errorf("payday receipt = %+v, want the salary credit", r)
+	}
+}

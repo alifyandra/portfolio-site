@@ -3,6 +3,7 @@ package finance
 import (
 	"context"
 	"math"
+	"regexp"
 	"strings"
 	"time"
 	"unicode"
@@ -19,7 +20,12 @@ import (
 // posted credit that paid it, as an IncomeReceipt with method auto, and like the bill
 // pass it runs after the ingest transaction commits, over rows already in the ledger.
 //
-// The rule is a per-income AND of five clauses:
+// The rule is a per-income AND of five clauses, over credits that are eligible at all:
+// never a move between the owner's own accounts (isInternalTransfer, the spending
+// roll-ups' rule) and never a credit that reads like money coming back (refundRe: a
+// refund, reversal or chargeback), since neither is anyone paying the owner. A hand link
+// can still settle a cycle with either.
+//
 //
 //  1. match_pattern occurs case-insensitively in the description OR merchant on word
 //     boundaries (containsToken: "ATO" is not found in "POTATO"); an empty pattern never
@@ -33,6 +39,16 @@ import (
 //
 // Unlike a bill the tolerance and window are constants, not columns: pay is regular
 // enough for one rule, and a hand link covers the exception.
+
+// refundRe finds the words that mark a credit as money coming back rather than money
+// earned. Such a credit can match an income's pattern and amount (a refund from the
+// employer's salary-packaging provider) and is never that income's pay.
+var refundRe = regexp.MustCompile(`(?i)\b(?:refund(?:s|ed)?|reversal|reversed|charge ?backs?)\b`)
+
+// autoMatchable reports whether a credit may be considered by the matching pass at all.
+func autoMatchable(t *ent.Transaction, own4 map[string]bool) bool {
+	return !isInternalTransfer(t.Description, own4) && !refundRe.MatchString(t.Description) && !refundRe.MatchString(t.Merchant)
+}
 
 const (
 	// incomeMatchLateDays is how long after its pay date a credit may post and still
@@ -206,8 +222,15 @@ func ReconcileIncome(ctx context.Context, client *ent.Client, opts ReconcileOpti
 	if err != nil {
 		return sum, err
 	}
+	own4, err := loadOwnLast4(ctx, client)
+	if err != nil {
+		return sum, err
+	}
 	byDay := make(map[int64][]candidate, len(rows))
 	for _, t := range rows {
+		if !autoMatchable(t, own4) {
+			continue
+		}
 		c := newCandidate(t)
 		byDay[c.day.Unix()] = append(byDay[c.day.Unix()], c)
 	}
