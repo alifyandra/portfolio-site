@@ -43,7 +43,7 @@ func (RecurrenceSuggestion) Fields() []ent.Field {
 			Comment("Suggested name for the declaration, at most 120 bytes; the owner may replace it when accepting"),
 		field.String("match_pattern").
 			Optional().
-			Comment("Suggested match pattern: text that every evidence row's description or merchant contains, case-insensitively. Empty when the run shares no distinctive text, and the declaration is then reconciled by hand"),
+			Comment("Suggested match pattern: text that every evidence row's description or merchant contains, case-insensitively. Only ever shown to the owner on accept, who confirms, edits or clears it; it is never copied into the declaration unseen, because a declaration's match pattern is owner-typed. Empty when the run shares no distinctive text"),
 		field.Enum("cadence").
 			Values("weekly", "fortnightly", "monthly", "quarterly", "annual").
 			Immutable().

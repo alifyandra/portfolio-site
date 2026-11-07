@@ -577,7 +577,7 @@ func TestScanRecurrences_ReopensAcceptedRunAfterItsDeclarationEnded(t *testing.T
 		t.Fatalf("scan: %v", err)
 	}
 	s := client.RecurrenceSuggestion.Query().OnlyX(ctx)
-	res, err := AcceptSuggestion(ctx, client, s.ID, "Streaming")
+	res, err := AcceptSuggestion(ctx, client, s.ID, "Streaming", s.MatchPattern)
 	if err != nil {
 		t.Fatalf("accept: %v", err)
 	}
@@ -638,7 +638,7 @@ func TestAcceptSuggestion_Bill(t *testing.T) {
 	}
 	s := client.RecurrenceSuggestion.Query().OnlyX(ctx)
 
-	res, err := AcceptSuggestion(ctx, client, s.ID, "Streaming")
+	res, err := AcceptSuggestion(ctx, client, s.ID, "Streaming", "ZYLO STREAMING")
 	if err != nil {
 		t.Fatalf("accept: %v", err)
 	}
@@ -660,10 +660,10 @@ func TestAcceptSuggestion_Bill(t *testing.T) {
 	if s.Status != recurrencesuggestion.StatusAccepted || s.DecidedAt == nil || s.Edges.Bill == nil || s.Edges.Bill.ID != b.ID {
 		t.Errorf("suggestion = %+v, want accepted and linked to the bill", s)
 	}
-	if _, err := AcceptSuggestion(ctx, client, s.ID, ""); !errors.Is(err, ErrSuggestionDecided) {
+	if _, err := AcceptSuggestion(ctx, client, s.ID, "", ""); !errors.Is(err, ErrSuggestionDecided) {
 		t.Errorf("second accept = %v, want ErrSuggestionDecided", err)
 	}
-	if _, err := AcceptSuggestion(ctx, client, 9999, ""); !ent.IsNotFound(err) {
+	if _, err := AcceptSuggestion(ctx, client, 9999, "", ""); !ent.IsNotFound(err) {
 		t.Errorf("unknown accept = %v, want not found", err)
 	}
 	sum, err := ScanRecurrences(ctx, client)
@@ -698,7 +698,7 @@ func TestAcceptSuggestion_LosesARaceCleanly(t *testing.T) {
 			return next.Mutate(ctx, m)
 		})
 	})
-	if _, err := AcceptSuggestion(ctx, client, s.ID, "Streaming"); !errors.Is(err, ErrSuggestionDecided) {
+	if _, err := AcceptSuggestion(ctx, client, s.ID, "Streaming", ""); !errors.Is(err, ErrSuggestionDecided) {
 		t.Fatalf("accept after another accept won = %v, want ErrSuggestionDecided", err)
 	}
 	if n := client.RecurringBill.Query().CountX(ctx); n != 0 {
@@ -727,7 +727,7 @@ func TestAcceptSuggestion_TwoConcurrentAccepts(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, err := AcceptSuggestion(ctx, client, s.ID, name)
+			_, err := AcceptSuggestion(ctx, client, s.ID, name, "")
 			errs <- err
 		}()
 	}
@@ -823,7 +823,7 @@ func TestAcceptSuggestion_OneLinkedLookup(t *testing.T) {
 	}
 	for _, s := range client.RecurrenceSuggestion.Query().AllX(ctx) {
 		log.reset()
-		res, err := AcceptSuggestion(ctx, client, s.ID, "")
+		res, err := AcceptSuggestion(ctx, client, s.ID, "", s.MatchPattern)
 		if err != nil || res.Linked != 6 {
 			t.Fatalf("accept %s = %+v (%v), want 6 linked", s.Kind, res, err)
 		}
@@ -857,7 +857,7 @@ func TestAcceptSuggestion_IncomeLinksEarlyPay(t *testing.T) {
 		t.Fatalf("suggestion = %s/%s, want income/fortnightly", s.Kind, s.Cadence)
 	}
 
-	res, err := AcceptSuggestion(ctx, client, s.ID, "")
+	res, err := AcceptSuggestion(ctx, client, s.ID, "", " acme widgets ")
 	if err != nil {
 		t.Fatalf("accept: %v", err)
 	}
@@ -865,8 +865,8 @@ func TestAcceptSuggestion_IncomeLinksEarlyPay(t *testing.T) {
 		t.Fatalf("accept = %+v, want an income with 4 receipts", res)
 	}
 	inc := client.RecurringIncome.GetX(ctx, res.IncomeID)
-	if inc.Name != "Salary ACME WIDGETS" || inc.MatchPattern != "Salary ACME WIDGETS" {
-		t.Errorf("income = %q / %q, want the label as name and the pattern", inc.Name, inc.MatchPattern)
+	if inc.Name != "Salary ACME WIDGETS" || inc.MatchPattern != "acme widgets" {
+		t.Errorf("income = %q / %q, want the label as name and the owner's pattern trimmed", inc.Name, inc.MatchPattern)
 	}
 	early := client.IncomeReceipt.Query().
 		Where(incomereceipt.OccurrenceDateEQ(payday.AddDate(0, 0, -14))).
@@ -874,6 +874,31 @@ func TestAcceptSuggestion_IncomeLinksEarlyPay(t *testing.T) {
 		OnlyX(ctx)
 	if early.Method != incomereceipt.MethodAuto || !early.Edges.Transaction.PostedDate.Equal(payday.AddDate(0, 0, -16)) {
 		t.Errorf("early cycle = %+v, want the credit posted two days before it, method auto", early)
+	}
+}
+
+// TestAcceptSuggestion_PatternIsTheOwners: the declaration takes the match pattern the
+// owner gave, never the suggested one. Clearing it makes a hand-linked bill, and the
+// evidence is still linked as its history.
+func TestAcceptSuggestion_PatternIsTheOwners(t *testing.T) {
+	client := newFinanceTestClient(t)
+	ctx := context.Background()
+	today := localToday()
+	acc := seedAccount(t, ctx, client, "Everyday", account.ClassAsset, account.TypeEveryday)
+	seedMonthlyRun(t, ctx, client, acc, "zylo", recentDay(today, 3), 4, -15.99, "ZYLO STREAMING")
+	if _, err := ScanRecurrences(ctx, client); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	s := client.RecurrenceSuggestion.Query().OnlyX(ctx)
+	if s.MatchPattern != "ZYLO STREAMING" {
+		t.Fatalf("suggested pattern = %q, want ZYLO STREAMING", s.MatchPattern)
+	}
+	res, err := AcceptSuggestion(ctx, client, s.ID, "Streaming", "   ")
+	if err != nil || res.Linked != 4 {
+		t.Fatalf("accept = %+v (%v), want 4 linked", res, err)
+	}
+	if b := client.RecurringBill.GetX(ctx, res.BillID); b.MatchPattern != "" {
+		t.Errorf("bill pattern = %q, want empty: the owner cleared it", b.MatchPattern)
 	}
 }
 
@@ -890,7 +915,7 @@ func TestAcceptSuggestion_NameTaken(t *testing.T) {
 		t.Fatalf("scan: %v", err)
 	}
 	s := client.RecurrenceSuggestion.Query().OnlyX(ctx)
-	if _, err := AcceptSuggestion(ctx, client, s.ID, "Streaming"); !errors.Is(err, ErrDeclarationNameTaken) {
+	if _, err := AcceptSuggestion(ctx, client, s.ID, "Streaming", ""); !errors.Is(err, ErrDeclarationNameTaken) {
 		t.Fatalf("accept onto a taken name = %v, want ErrDeclarationNameTaken", err)
 	}
 	if n := client.BillPayment.Query().CountX(ctx); n != 0 {

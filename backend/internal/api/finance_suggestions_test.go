@@ -70,16 +70,22 @@ func TestFinanceSuggestions_RequiresAdmin(t *testing.T) {
 	api, client := newFinanceSuggestionsTestAPI(t)
 	ctx := context.Background()
 	member := sessionCookieFor(t, ctx, client, user.RoleMember)
-	for _, r := range []struct{ method, path string }{
-		{http.MethodGet, "/api/admin/finance/suggestions"},
-		{http.MethodPost, "/api/admin/finance/suggestions/scan"},
-		{http.MethodPost, "/api/admin/finance/suggestions/1/accept"},
-		{http.MethodPost, "/api/admin/finance/suggestions/1/dismiss"},
-		{http.MethodPost, "/api/admin/finance/income/reconcile"},
+	for _, r := range []struct {
+		method, path string
+		body         map[string]any
+	}{
+		{http.MethodGet, "/api/admin/finance/suggestions", nil},
+		{http.MethodPost, "/api/admin/finance/suggestions/scan", nil},
+		{http.MethodPost, "/api/admin/finance/suggestions/1/accept", map[string]any{"match_pattern": ""}},
+		{http.MethodPost, "/api/admin/finance/suggestions/1/dismiss", nil},
+		{http.MethodPost, "/api/admin/finance/income/reconcile", nil},
 	} {
 		var body []any
 		if r.method == http.MethodPost {
-			body = []any{map[string]any{}}
+			if r.body == nil {
+				r.body = map[string]any{}
+			}
+			body = []any{r.body}
 		}
 		if resp := api.Do(r.method, r.path, body...); resp.Code != http.StatusUnauthorized {
 			t.Errorf("anon %s %s = %d, want 401", r.method, r.path, resp.Code)
@@ -136,13 +142,21 @@ func TestFinanceSuggestions_ScanAcceptDismiss(t *testing.T) {
 	}
 
 	base := "/api/admin/finance/suggestions/"
-	if resp := api.Post(base+itoa(bill.ID)+"/accept", admin, map[string]any{"name": strings.Repeat("é", 61)}); resp.Code != http.StatusUnprocessableEntity {
+	if resp := api.Post(base+itoa(bill.ID)+"/accept", admin, map[string]any{"name": strings.Repeat("é", 61), "match_pattern": ""}); resp.Code != http.StatusUnprocessableEntity {
 		t.Errorf("accept with a 122-byte name = %d, want 422", resp.Code)
 	}
-	if resp := api.Post(base+"9999/accept", admin, map[string]any{}); resp.Code != http.StatusNotFound {
+	if resp := api.Post(base+itoa(bill.ID)+"/accept", admin, map[string]any{"match_pattern": strings.Repeat("é", 101)}); resp.Code != http.StatusUnprocessableEntity {
+		t.Errorf("accept with a 202-byte pattern = %d, want 422", resp.Code)
+	}
+	if resp := api.Post(base+"9999/accept", admin, map[string]any{"match_pattern": ""}); resp.Code != http.StatusNotFound {
 		t.Errorf("accept unknown = %d, want 404", resp.Code)
 	}
-	resp = api.Post(base+itoa(income.ID)+"/accept", admin, map[string]any{"name": "Salary"})
+	// The match pattern is the owner's: an accept that does not state one is refused, so
+	// the suggested text is never copied into the declaration unseen.
+	if resp := api.Post(base+itoa(income.ID)+"/accept", admin, map[string]any{"name": "Salary"}); resp.Code != http.StatusUnprocessableEntity {
+		t.Errorf("accept without match_pattern = %d, want 422", resp.Code)
+	}
+	resp = api.Post(base+itoa(income.ID)+"/accept", admin, map[string]any{"name": "Salary", "match_pattern": "  acme widgets "})
 	if resp.Code != http.StatusOK {
 		t.Fatalf("accept = %d %s", resp.Code, resp.Body.String())
 	}
@@ -157,14 +171,14 @@ func TestFinanceSuggestions_ScanAcceptDismiss(t *testing.T) {
 		t.Fatalf("accept = %+v, want an income with 4 receipts", accepted)
 	}
 	resp = api.Get("/api/finance/income", admin)
-	if !strings.Contains(resp.Body.String(), `"match_pattern":"Salary ACME WIDGETS"`) || !strings.Contains(resp.Body.String(), `"name":"Salary"`) {
-		t.Errorf("income list = %s, want Salary with the suggested pattern", resp.Body.String())
+	if !strings.Contains(resp.Body.String(), `"match_pattern":"acme widgets"`) || !strings.Contains(resp.Body.String(), `"name":"Salary"`) {
+		t.Errorf("income list = %s, want Salary with the owner's edited pattern", resp.Body.String())
 	}
 	resp = api.Get("/api/admin/finance/income/"+itoa(*accepted.IncomeID)+"/receipts", admin)
 	if strings.Count(resp.Body.String(), `"method":"auto"`) != 4 {
 		t.Errorf("receipts = %s, want 4 auto", resp.Body.String())
 	}
-	if resp := api.Post(base+itoa(income.ID)+"/accept", admin, map[string]any{}); resp.Code != http.StatusConflict {
+	if resp := api.Post(base+itoa(income.ID)+"/accept", admin, map[string]any{"match_pattern": ""}); resp.Code != http.StatusConflict {
 		t.Errorf("accept twice = %d, want 409", resp.Code)
 	}
 
@@ -177,7 +191,7 @@ func TestFinanceSuggestions_ScanAcceptDismiss(t *testing.T) {
 	if resp := api.Post(base+itoa(bill.ID)+"/dismiss", admin, map[string]any{}); resp.Code != http.StatusConflict {
 		t.Errorf("dismiss twice = %d, want 409", resp.Code)
 	}
-	if resp := api.Post(base+itoa(bill.ID)+"/accept", admin, map[string]any{}); resp.Code != http.StatusConflict {
+	if resp := api.Post(base+itoa(bill.ID)+"/accept", admin, map[string]any{"match_pattern": ""}); resp.Code != http.StatusConflict {
 		t.Errorf("accept a dismissed one = %d, want 409", resp.Code)
 	}
 	if resp := api.Post(base+"9999/dismiss", admin, map[string]any{}); resp.Code != http.StatusNotFound {

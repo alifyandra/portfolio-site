@@ -6,7 +6,9 @@ import {
   scanSummaryText,
   kindLabel,
   evidenceSpanText,
-  acceptPromptText,
+  acceptIntroText,
+  acceptPatternHint,
+  acceptButtonText,
   dismissPromptText,
 } from './suggestionRules.ts';
 
@@ -68,17 +70,41 @@ test('the evidence span runs oldest to newest though the rows arrive newest firs
   assert.equal(evidenceSpanText('income', [], fmt), '0 credits');
 });
 
-test('accept and dismiss both ask first, in the words of what happens', () => {
+test('accept says what it creates and dismiss asks first', () => {
   assert.equal(
-    acceptPromptText('income'),
-    'Name for the new recurring income? Its history is linked as receipts.',
+    acceptIntroText('income'),
+    'Creates a recurring income and links this history as its receipts.',
   );
   assert.equal(
-    acceptPromptText('bill'),
-    'Name for the new recurring bill? Its history is linked as payments.',
+    acceptIntroText('bill'),
+    'Creates a recurring bill and links this history as its payments.',
   );
   assert.equal(
     dismissPromptText('ZYLO STREAMING'),
     'Dismiss "ZYLO STREAMING"? The same run will not be suggested again.',
   );
+});
+
+test('the accept form shows the suggested pattern as a suggestion the owner confirms', () => {
+  assert.equal(
+    acceptPatternHint('bill', 'ZYLO STREAMING', 'ZYLO STREAMING'),
+    'Suggested from the evidence. Payments containing this text will link automatically; edit it, or clear it to link each one by hand.',
+  );
+  assert.equal(
+    acceptPatternHint('income', 'Salary ACME', '  acme  '),
+    'Your pattern. Receipts containing this text will link automatically.',
+  );
+  assert.equal(
+    acceptPatternHint('income', 'Salary ACME', '  '),
+    'No pattern: each receipt is linked by hand.',
+  );
+  assert.equal(
+    acceptPatternHint('bill', '', ''),
+    'Nothing in the evidence to match on; type a pattern, or leave it empty to link each payment by hand.',
+  );
+  assert.equal(
+    acceptButtonText('bill', 'ZYLO'),
+    'Create bill with this pattern',
+  );
+  assert.equal(acceptButtonText('income', ' '), 'Create income, link by hand');
 });

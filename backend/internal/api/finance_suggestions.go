@@ -30,7 +30,7 @@ type FinanceSuggestionDTO struct {
 	ID             int                            `json:"id"`
 	Kind           string                         `json:"kind" enum:"bill,income" doc:"What accepting creates: a recurring bill (a run of debits) or a recurring income (a run of credits)"`
 	Label          string                         `json:"label" doc:"Suggested name; accepting can replace it"`
-	MatchPattern   string                         `json:"match_pattern" doc:"Suggested match pattern; empty when the run shares no distinctive text"`
+	MatchPattern   string                         `json:"match_pattern" doc:"Suggested match pattern, shown to the owner to confirm, edit or clear when accepting (it is never copied unseen); empty when the run shares no distinctive text"`
 	Cadence        string                         `json:"cadence" enum:"weekly,fortnightly,monthly,quarterly,annual"`
 	ExpectedAmount float64                        `json:"expected_amount" doc:"Median magnitude of the evidence, rounded to the cent"`
 	AnchorDate     string                         `json:"anchor_date" doc:"YYYY-MM-DD; the grid that best fits the evidence, on its oldest cycle"`
@@ -78,7 +78,8 @@ type suggestionIDInput struct {
 type acceptFinanceSuggestionInput struct {
 	ID   int `path:"id" doc:"Recurrence suggestion ID"`
 	Body struct {
-		Name string `json:"name,omitempty" maxLength:"120" doc:"Name for the new declaration, at most 120 bytes; defaults to the suggestion's label"`
+		Name         string `json:"name,omitempty" maxLength:"120" doc:"Name for the new declaration, at most 120 bytes; defaults to the suggestion's label"`
+		MatchPattern string `json:"match_pattern" maxLength:"200" doc:"The owner's match pattern for the new declaration, at most 200 bytes: the suggestion's match_pattern as the owner confirmed or edited it, or \"\" to link payments by hand. Required, and never defaulted from the suggestion, because a declaration's match pattern is owner-typed"`
 	}
 }
 
@@ -214,7 +215,11 @@ func (h *Handler) registerFinanceSuggestions(api huma.API) {
 		if err := checkIncomeName(name); err != nil { // the bill name carries the same 120-byte cap
 			return nil, err
 		}
-		res, err := finance.AcceptSuggestion(ctx, h.deps.Ent, in.ID, name)
+		pattern := strings.TrimSpace(in.Body.MatchPattern)
+		if err := checkIncomeMatchPattern(pattern); err != nil { // and the same 200-byte pattern cap
+			return nil, err
+		}
+		res, err := finance.AcceptSuggestion(ctx, h.deps.Ent, in.ID, name, pattern)
 		switch {
 		case ent.IsNotFound(err):
 			return nil, huma.Error404NotFound("suggestion not found")

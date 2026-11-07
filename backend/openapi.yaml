@@ -10,10 +10,16 @@ components:
           format: uri
           readOnly: true
           type: string
+        match_pattern:
+          description: "The owner's match pattern for the new declaration, at most 200 bytes: the suggestion's match_pattern as the owner confirmed or edited it, or \"\" to link payments by hand. Required, and never defaulted from the suggestion, because a declaration's match pattern is owner-typed"
+          maxLength: 200
+          type: string
         name:
           description: Name for the new declaration, at most 120 bytes; defaults to the suggestion's label
           maxLength: 120
           type: string
+      required:
+        - match_pattern
       type: object
     AcceptFinanceSuggestionOutputBody:
       additionalProperties: false
@@ -1623,7 +1629,7 @@ components:
           description: Suggested name; accepting can replace it
           type: string
         match_pattern:
-          description: Suggested match pattern; empty when the run shares no distinctive text
+          description: Suggested match pattern, shown to the owner to confirm, edit or clear when accepting (it is never copied unseen); empty when the run shares no distinctive text
           type: string
         next_expected:
           description: YYYY-MM-DD; the grid's next date on or after today

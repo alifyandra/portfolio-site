@@ -27,8 +27,11 @@ import {
   citronCard,
   citronBadge,
   primaryBtn,
+  ghostBtn,
   editBtn,
   dangerBtn,
+  inputClass,
+  labelClass,
 } from '@/components/admin/ui';
 import { formatDate } from './format';
 import { useMoney } from './censor';
@@ -36,9 +39,23 @@ import {
   scanSummaryText,
   kindLabel,
   evidenceSpanText,
-  acceptPromptText,
+  acceptIntroText,
+  acceptPatternHint,
+  acceptButtonText,
   dismissPromptText,
 } from './suggestionRules';
+
+// The declaration's own byte caps (Ent MaxLen counts bytes; the API pre-checks them).
+const NAME_MAX_BYTES = 120;
+const PATTERN_MAX_BYTES = 200;
+const byteLength = (s: string) => new TextEncoder().encode(s).length;
+
+/** The open accept form: which suggestion, and the name and pattern the owner is typing. */
+interface AcceptDraft {
+  id: number;
+  name: string;
+  pattern: string;
+}
 
 const CADENCE_LABELS: Record<string, string> = {
   weekly: 'Weekly',
@@ -62,6 +79,7 @@ export function SuggestionsSection() {
   const [lastScan, setLastScan] =
     useState<ScanFinanceSuggestionsOutputBody | null>(null);
   const [openEvidence, setOpenEvidence] = useState<number | null>(null);
+  const [draft, setDraft] = useState<AcceptDraft | null>(null);
 
   const scan = useScanFinanceSuggestions();
   const accept = useAcceptFinanceSuggestion();
@@ -82,13 +100,19 @@ export function SuggestionsSection() {
       },
     });
 
-  const onAccept = (s: FinanceSuggestionDTO) => {
-    const name = prompt(acceptPromptText(s.kind), s.label)?.trim();
+  // Accepting opens a form rather than acting at once: the match pattern is the owner's
+  // (ADR 0019), so the suggested one is shown, editable, and only used if they confirm it.
+  const openAccept = (s: FinanceSuggestionDTO) =>
+    setDraft({ id: s.id, name: s.label, pattern: s.match_pattern });
+
+  const onAccept = (s: FinanceSuggestionDTO, d: AcceptDraft) => {
+    const name = d.name.trim();
     if (!name) return;
     accept.mutate(
-      { id: s.id, data: { name } },
+      { id: s.id, data: { name, match_pattern: d.pattern.trim() } },
       {
         onSuccess: () => {
+          setDraft(null);
           invalidateSuggestions();
           // The new declaration shows up in its own section straight away.
           queryClient.invalidateQueries({
@@ -182,13 +206,13 @@ export function SuggestionsSection() {
                   <span className="truncate text-xs text-slate-400">
                     {s.match_pattern ? (
                       <>
-                        Matches{' '}
+                        Suggested pattern{' '}
                         <span className="font-mono text-slate-300">
                           {s.match_pattern}
                         </span>
                       </>
                     ) : (
-                      'No shared text to match on; payments link by hand'
+                      'No shared text to suggest a pattern from'
                     )}
                   </span>
                 </div>
@@ -210,8 +234,8 @@ export function SuggestionsSection() {
                     <button
                       type="button"
                       className={editBtn}
-                      disabled={busy}
-                      onClick={() => onAccept(s)}
+                      disabled={busy || draft?.id === s.id}
+                      onClick={() => openAccept(s)}
                     >
                       Accept
                     </button>
@@ -226,6 +250,16 @@ export function SuggestionsSection() {
                   </div>
                 </div>
               </div>
+              {draft?.id === s.id ? (
+                <AcceptForm
+                  suggestion={s}
+                  draft={draft}
+                  busy={busy}
+                  onChange={setDraft}
+                  onCancel={() => setDraft(null)}
+                  onSubmit={() => onAccept(s, draft)}
+                />
+              ) : null}
               {openEvidence === s.id ? (
                 <ul className="flex flex-col divide-y divide-slate-700/60 border-t border-slate-700 pt-1">
                   {(s.evidence ?? []).map((e) => (
@@ -251,6 +285,86 @@ export function SuggestionsSection() {
         </ul>
       )}
     </section>
+  );
+}
+
+/**
+ * The accept step: the declaration's name and its match pattern, both editable. The
+ * pattern starts as the suggested one and says so; the owner confirms it by creating,
+ * edits it, or clears it to link by hand.
+ */
+function AcceptForm({
+  suggestion: s,
+  draft,
+  busy,
+  onChange,
+  onCancel,
+  onSubmit,
+}: {
+  suggestion: FinanceSuggestionDTO;
+  draft: AcceptDraft;
+  busy: boolean;
+  onChange: (d: AcceptDraft) => void;
+  onCancel: () => void;
+  onSubmit: () => void;
+}) {
+  const nameBytes = byteLength(draft.name.trim());
+  const patternBytes = byteLength(draft.pattern.trim());
+  const invalid =
+    draft.name.trim() === '' ||
+    nameBytes > NAME_MAX_BYTES ||
+    patternBytes > PATTERN_MAX_BYTES;
+  return (
+    <form
+      className="flex flex-col gap-3 border-t border-slate-700 pt-3"
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (!invalid) onSubmit();
+      }}
+    >
+      <p className="text-xs text-slate-400">{acceptIntroText(s.kind)}</p>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <label className={labelClass}>
+          Name
+          <input
+            type="text"
+            className={inputClass}
+            value={draft.name}
+            onChange={(e) => onChange({ ...draft, name: e.target.value })}
+          />
+        </label>
+        <label className={labelClass}>
+          Match pattern
+          <input
+            type="text"
+            className={`${inputClass} font-mono`}
+            value={draft.pattern}
+            onChange={(e) => onChange({ ...draft, pattern: e.target.value })}
+          />
+        </label>
+      </div>
+      <p className="text-xs text-slate-400">
+        {acceptPatternHint(s.kind, s.match_pattern, draft.pattern)}
+      </p>
+      {nameBytes > NAME_MAX_BYTES ? (
+        <p className="text-xs text-coral">
+          The name is {nameBytes} bytes; the limit is {NAME_MAX_BYTES}.
+        </p>
+      ) : null}
+      {patternBytes > PATTERN_MAX_BYTES ? (
+        <p className="text-xs text-coral">
+          The pattern is {patternBytes} bytes; the limit is {PATTERN_MAX_BYTES}.
+        </p>
+      ) : null}
+      <div className="flex flex-wrap items-center gap-2">
+        <button type="submit" className={primaryBtn} disabled={busy || invalid}>
+          {acceptButtonText(s.kind, draft.pattern)}
+        </button>
+        <button type="button" className={ghostBtn} onClick={onCancel}>
+          Cancel
+        </button>
+      </div>
+    </form>
   );
 }
 

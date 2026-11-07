@@ -55,9 +55,41 @@ export function evidenceSpanText(
     : `${rows}, ${fmt(oldest)} to ${fmt(newest)}`;
 }
 
-/** The question asked before accepting: the name the new declaration gets. */
-export function acceptPromptText(kind: string): string {
-  return `Name for the new recurring ${kind === 'income' ? 'income' : 'bill'}? Its history is linked as ${kind === 'income' ? 'receipts' : 'payments'}.`;
+/** The line above the accept form: what accepting creates and links. */
+export function acceptIntroText(kind: string): string {
+  const income = kind === 'income';
+  return `Creates a recurring ${income ? 'income' : 'bill'} and links this history as its ${income ? 'receipts' : 'payments'}.`;
+}
+
+/**
+ * The hint under the accept form's match pattern. The pattern is the owner's: the
+ * suggested one is only a starting value, so the hint says which it is and what it does.
+ */
+export function acceptPatternHint(
+  kind: string,
+  suggested: string,
+  current: string,
+): string {
+  const rows = kind === 'income' ? 'Receipts' : 'Payments';
+  const one = kind === 'income' ? 'receipt' : 'payment';
+  const pattern = current.trim();
+  if (pattern === '') {
+    return suggested.trim() === ''
+      ? `Nothing in the evidence to match on; type a pattern, or leave it empty to link each ${one} by hand.`
+      : `No pattern: each ${one} is linked by hand.`;
+  }
+  if (pattern === suggested.trim()) {
+    return `Suggested from the evidence. ${rows} containing this text will link automatically; edit it, or clear it to link each one by hand.`;
+  }
+  return `Your pattern. ${rows} containing this text will link automatically.`;
+}
+
+/** The accept form's confirm button, naming what the pattern will do. */
+export function acceptButtonText(kind: string, pattern: string): string {
+  const what = kind === 'income' ? 'income' : 'bill';
+  return pattern.trim() === ''
+    ? `Create ${what}, link by hand`
+    : `Create ${what} with this pattern`;
 }
 
 /** The confirm step before dismissing: a dismissal is remembered. */

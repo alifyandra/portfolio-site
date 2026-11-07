@@ -988,14 +988,18 @@ type AcceptResult struct {
 // transaction: it claims the suggestion (a status write conditional on it still being
 // pending, so two concurrent accepts make one declaration and the other gets
 // ErrSuggestionDecided), creates the Recurring Bill or Recurring Income from it (name
-// defaults to the label; cadence, anchor, amount, account and match pattern as
-// suggested), links each evidence row to its cycle as method auto, and links the
-// suggestion to what it created.
+// defaults to the label; cadence, anchor, amount and account as suggested), links each
+// evidence row to its cycle as method auto, and links the suggestion to what it created.
+//
+// matchPattern is the owner's, taken as given and never copied from the suggestion: a
+// declaration's match pattern is owner-typed (CONTEXT.md, Bill Payment) and owner-authored
+// fields are never inferred (ADR 0019). The suggested pattern is only shown to the owner,
+// who confirms, edits or clears it; empty means the declaration is linked by hand.
 //
 // Each evidence row still has to pass the rules a hand link would: one row settles one
 // cycle, a row already linked anywhere is skipped, and an income receipt keeps to the
 // early-pay bound (cyclePayable). Skipped rows are counted, not errors.
-func AcceptSuggestion(ctx context.Context, client *ent.Client, id int, name string) (AcceptResult, error) {
+func AcceptSuggestion(ctx context.Context, client *ent.Client, id int, name, matchPattern string) (AcceptResult, error) {
 	res := AcceptResult{}
 	tx, err := client.Tx(ctx)
 	if err != nil {
@@ -1033,6 +1037,7 @@ func AcceptSuggestion(ctx context.Context, client *ent.Client, id int, name stri
 	if name == "" {
 		name = s.Label
 	}
+	matchPattern = strings.TrimSpace(matchPattern)
 	res.Kind = string(s.Kind)
 	c := recurringbill.Cadence(s.Cadence)
 	anchor := normalizeDate(s.AnchorDate)
@@ -1049,7 +1054,7 @@ func AcceptSuggestion(ctx context.Context, client *ent.Client, id int, name stri
 			SetExpectedAmount(s.ExpectedAmount).
 			SetCadence(c).
 			SetAnchorDate(anchor).
-			SetMatchPattern(s.MatchPattern)
+			SetMatchPattern(matchPattern)
 		if a := s.Edges.Account; a != nil {
 			create.SetAccountID(a.ID)
 		}
@@ -1094,7 +1099,7 @@ func AcceptSuggestion(ctx context.Context, client *ent.Client, id int, name stri
 			SetExpectedAmount(s.ExpectedAmount).
 			SetCadence(recurringincome.Cadence(s.Cadence)).
 			SetAnchorDate(anchor).
-			SetMatchPattern(s.MatchPattern)
+			SetMatchPattern(matchPattern)
 		if a := s.Edges.Account; a != nil {
 			create.SetAccountID(a.ID)
 		}
