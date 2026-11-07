@@ -6,12 +6,14 @@ import (
 	"maps"
 	"math"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/alifyandra/portfolio-site/backend/ent"
 	"github.com/alifyandra/portfolio-site/backend/ent/account"
 	"github.com/alifyandra/portfolio-site/backend/ent/billpayment"
+	"github.com/alifyandra/portfolio-site/backend/ent/hook"
 	"github.com/alifyandra/portfolio-site/backend/ent/incomereceipt"
 	"github.com/alifyandra/portfolio-site/backend/ent/recurrencesuggestion"
 	"github.com/alifyandra/portfolio-site/backend/ent/recurringbill"
@@ -661,6 +663,89 @@ func TestAcceptSuggestion_Bill(t *testing.T) {
 	sum, err := ScanRecurrences(ctx, client)
 	if err != nil || sum.Created != 0 || sum.Declared != 1 {
 		t.Errorf("scan after accept = %+v (%v), want the run left as declared", sum, err)
+	}
+}
+
+// TestAcceptSuggestion_LosesARaceCleanly: under READ COMMITTED two accepts can both read
+// the suggestion as pending. The hook plays the other accept committing between this
+// one's read and its status write; the status change must then fail as already decided,
+// and nothing this accept created may survive.
+func TestAcceptSuggestion_LosesARaceCleanly(t *testing.T) {
+	client := newFinanceTestClient(t)
+	ctx := context.Background()
+	today := localToday()
+	acc := seedAccount(t, ctx, client, "Everyday", account.ClassAsset, account.TypeEveryday)
+	seedMonthlyRun(t, ctx, client, acc, "zylo", recentDay(today, 3), 4, -15.99, "ZYLO STREAMING")
+	if _, err := ScanRecurrences(ctx, client); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	s := client.RecurrenceSuggestion.Query().OnlyX(ctx)
+	fired := false
+	client.RecurrenceSuggestion.Use(func(next ent.Mutator) ent.Mutator {
+		return hook.RecurrenceSuggestionFunc(func(ctx context.Context, m *ent.RecurrenceSuggestionMutation) (ent.Value, error) {
+			if !fired && m.Op().Is(ent.OpUpdate|ent.OpUpdateOne) {
+				fired = true
+				if err := m.Client().RecurrenceSuggestion.UpdateOneID(s.ID).SetStatus(recurrencesuggestion.StatusAccepted).Exec(ctx); err != nil {
+					return nil, err
+				}
+			}
+			return next.Mutate(ctx, m)
+		})
+	})
+	if _, err := AcceptSuggestion(ctx, client, s.ID, "Streaming"); !errors.Is(err, ErrSuggestionDecided) {
+		t.Fatalf("accept after another accept won = %v, want ErrSuggestionDecided", err)
+	}
+	if n := client.RecurringBill.Query().CountX(ctx); n != 0 {
+		t.Errorf("bills after the lost race = %d, want 0", n)
+	}
+	if n := client.BillPayment.Query().CountX(ctx); n != 0 {
+		t.Errorf("payments after the lost race = %d, want 0", n)
+	}
+}
+
+// TestAcceptSuggestion_TwoConcurrentAccepts: two accepts of one suggestion at once, under
+// different names, make exactly one declaration; the other is told it was decided.
+func TestAcceptSuggestion_TwoConcurrentAccepts(t *testing.T) {
+	client := newFinanceTestClient(t)
+	ctx := context.Background()
+	today := localToday()
+	acc := seedAccount(t, ctx, client, "Everyday", account.ClassAsset, account.TypeEveryday)
+	seedMonthlyRun(t, ctx, client, acc, "zylo", recentDay(today, 3), 4, -15.99, "ZYLO STREAMING")
+	if _, err := ScanRecurrences(ctx, client); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	s := client.RecurrenceSuggestion.Query().OnlyX(ctx)
+	errs := make(chan error, 2)
+	var wg sync.WaitGroup
+	for _, name := range []string{"Streaming A", "Streaming B"} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := AcceptSuggestion(ctx, client, s.ID, name)
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	won, decided := 0, 0
+	for err := range errs {
+		switch {
+		case err == nil:
+			won++
+		case errors.Is(err, ErrSuggestionDecided):
+			decided++
+		default:
+			t.Errorf("accept: %v", err)
+		}
+	}
+	if won != 1 || decided != 1 {
+		t.Errorf("won/decided = %d/%d, want 1/1", won, decided)
+	}
+	if n := client.RecurringBill.Query().CountX(ctx); n != 1 {
+		t.Errorf("bills = %d, want 1", n)
+	}
+	if n := client.BillPayment.Query().CountX(ctx); n != 4 {
+		t.Errorf("payments = %d, want 4", n)
 	}
 }
 

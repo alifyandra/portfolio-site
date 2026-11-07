@@ -985,10 +985,12 @@ type AcceptResult struct {
 }
 
 // AcceptSuggestion turns a pending suggestion into the owner's declaration, in one
-// transaction: it creates the Recurring Bill or Recurring Income from the suggestion
-// (name defaults to the label; cadence, anchor, amount, account and match pattern as
-// suggested), links each evidence row to its cycle as method auto, and marks the
-// suggestion accepted with a link to what it created.
+// transaction: it claims the suggestion (a status write conditional on it still being
+// pending, so two concurrent accepts make one declaration and the other gets
+// ErrSuggestionDecided), creates the Recurring Bill or Recurring Income from it (name
+// defaults to the label; cadence, anchor, amount, account and match pattern as
+// suggested), links each evidence row to its cycle as method auto, and links the
+// suggestion to what it created.
 //
 // Each evidence row still has to pass the rules a hand link would: one row settles one
 // cycle, a row already linked anywhere is skipped, and an income receipt keeps to the
@@ -1012,6 +1014,21 @@ func AcceptSuggestion(ctx context.Context, client *ent.Client, id int, name stri
 	if s.Status != recurrencesuggestion.StatusPending {
 		return res, rollback(tx, ErrSuggestionDecided)
 	}
+	// Claim it before creating anything. The read above is not a lock: under READ
+	// COMMITTED a second accept can read pending too. This write is conditional on the
+	// row still being pending, so the second one waits on the first's row lock, then
+	// re-checks the condition against the committed row and claims nothing.
+	claimed, err := tx.RecurrenceSuggestion.Update().
+		Where(recurrencesuggestion.IDEQ(id), recurrencesuggestion.StatusEQ(recurrencesuggestion.StatusPending)).
+		SetStatus(recurrencesuggestion.StatusAccepted).
+		SetDecidedAt(time.Now()).
+		Save(ctx)
+	if err != nil {
+		return res, rollback(tx, err)
+	}
+	if claimed == 0 {
+		return res, rollback(tx, ErrSuggestionDecided)
+	}
 	name = strings.TrimSpace(name)
 	if name == "" {
 		name = s.Label
@@ -1019,9 +1036,7 @@ func AcceptSuggestion(ctx context.Context, client *ent.Client, id int, name stri
 	res.Kind = string(s.Kind)
 	c := recurringbill.Cadence(s.Cadence)
 	anchor := normalizeDate(s.AnchorDate)
-	accept := tx.RecurrenceSuggestion.UpdateOne(s).
-		SetStatus(recurrencesuggestion.StatusAccepted).
-		SetDecidedAt(time.Now())
+	accept := tx.RecurrenceSuggestion.UpdateOneID(id)
 
 	switch s.Kind {
 	case recurrencesuggestion.KindBill:
