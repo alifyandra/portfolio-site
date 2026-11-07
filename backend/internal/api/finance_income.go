@@ -119,8 +119,8 @@ type incomeIDInput struct {
 type createIncomeReceiptInput struct {
 	ID   int `path:"id" doc:"Recurring income ID"`
 	Body struct {
-		TransactionID  int    `json:"transaction_id" minimum:"1" doc:"Posted credit that paid the cycle"`
-		OccurrenceDate string `json:"occurrence_date,omitempty" doc:"Pay date, YYYY-MM-DD; must be one of the income's derived occurrences. Defaults to the cycle nearest the transaction's posted date"`
+		TransactionID  int    `json:"transaction_id" minimum:"1" doc:"Posted credit that paid the cycle: not already a receipt of any income, and posted to the income's account when it has one"`
+		OccurrenceDate string `json:"occurrence_date,omitempty" doc:"Pay date, YYYY-MM-DD; must be one of the income's derived occurrences, on or after anchor_date, on or before today and on or before ended_on. Defaults to the cycle nearest the transaction's posted date"`
 	}
 }
 
@@ -362,12 +362,15 @@ func (h *Handler) registerFinanceIncome(api huma.API) {
 		switch {
 		case ent.IsNotFound(err):
 			return nil, huma.Error404NotFound("recurring income or transaction not found")
-		case errors.Is(err, finance.ErrNotAPayDate), errors.Is(err, finance.ErrNotACredit):
+		case errors.Is(err, finance.ErrNotAPayDate), errors.Is(err, finance.ErrNotACredit),
+			errors.Is(err, finance.ErrCycleOutOfRange), errors.Is(err, finance.ErrWrongAccount):
 			return nil, huma.Error422UnprocessableEntity(err.Error())
-		case errors.Is(err, finance.ErrIncomeCycleReceived):
+		case errors.Is(err, finance.ErrIncomeCycleReceived), errors.Is(err, finance.ErrTransactionReceived):
 			return nil, huma.Error409Conflict(err.Error())
 		case ent.IsConstraintError(err):
-			return nil, huma.Error409Conflict("that transaction is already linked to this income")
+			// LinkIncomeReceipt re-checks both unique rules after a constraint error and
+			// names the one that fired, so reaching here means neither row is visible.
+			return nil, huma.Error409Conflict("the receipt conflicts with another link; reload and try again")
 		case err != nil:
 			return nil, huma.Error500InternalServerError("failed to link the receipt", err)
 		}

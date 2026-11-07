@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -283,5 +284,76 @@ func TestFinanceIncome_LinkReceipt(t *testing.T) {
 	}
 	if n := client.Transaction.Query().CountX(ctx); n != 2 {
 		t.Errorf("transactions after delete = %d, want 2 (the ledger is untouched)", n)
+	}
+}
+
+// TestFinanceIncome_LinkReceiptRules: the window, account and one-receipt-per-credit
+// rules reach the wire as 422 / 422 / 409, and a link that loses a race on the cycle is
+// reported as the cycle taken rather than as the transaction already linked.
+func TestFinanceIncome_LinkReceiptRules(t *testing.T) {
+	api, client := newFinanceIncomeTestAPI(t)
+	ctx := context.Background()
+	admin := sessionCookieFor(t, ctx, client, user.RoleAdmin)
+	today := melbourneToday(t)
+
+	everyday := client.Account.Create().SetSource("commbank").SetName("Everyday").
+		SetType(account.TypeEveryday).SetClass(account.ClassAsset).SetCurrency("AUD").SaveX(ctx)
+	savings := client.Account.Create().SetSource("commbank").SetName("Savings").
+		SetType(account.TypeSavings).SetClass(account.ClassAsset).SetCurrency("AUD").SaveX(ctx)
+	credit := func(hash string, acc *ent.Account) *ent.Transaction {
+		return client.Transaction.Create().SetDedupHash(hash).SetPostedDate(today).
+			SetAmount(500).SetDescription("PAY CREDIT").SetAccountID(acc.ID).SaveX(ctx)
+	}
+	pay, other, wrong := credit("rules-pay", everyday), credit("rules-other", everyday), credit("rules-wrong", savings)
+
+	create := func(name string) FinanceIncomeDTO {
+		resp := api.Post("/api/admin/finance/income", admin, map[string]any{
+			"name": name, "expected_amount": 500, "cadence": "weekly",
+			"anchor_date": today.AddDate(0, 0, -14).Format(dateLayout), "account_id": everyday.ID,
+		})
+		if resp.Code != http.StatusCreated {
+			t.Fatalf("create %s = %d; body=%s", name, resp.Code, resp.Body.String())
+		}
+		var inc FinanceIncomeDTO
+		_ = json.Unmarshal(resp.Body.Bytes(), &inc)
+		return inc
+	}
+	salary, bonus := create("Salary"), create("Bonus")
+	link := func(inc FinanceIncomeDTO, body map[string]any) *httptest.ResponseRecorder {
+		return api.Post("/api/admin/finance/income/"+itoa(inc.ID)+"/receipts", admin, body)
+	}
+
+	if resp := link(salary, map[string]any{"transaction_id": pay.ID, "occurrence_date": today.AddDate(0, 0, 7).Format(dateLayout)}); resp.Code != http.StatusUnprocessableEntity {
+		t.Errorf("future cycle = %d, want 422; body=%s", resp.Code, resp.Body.String())
+	}
+	if resp := link(salary, map[string]any{"transaction_id": pay.ID, "occurrence_date": today.AddDate(0, 0, -21).Format(dateLayout)}); resp.Code != http.StatusUnprocessableEntity {
+		t.Errorf("pre-anchor cycle = %d, want 422; body=%s", resp.Code, resp.Body.String())
+	}
+	if resp := link(salary, map[string]any{"transaction_id": wrong.ID}); resp.Code != http.StatusUnprocessableEntity {
+		t.Errorf("wrong account = %d, want 422; body=%s", resp.Code, resp.Body.String())
+	}
+	if resp := link(salary, map[string]any{"transaction_id": pay.ID}); resp.Code != http.StatusCreated {
+		t.Fatalf("link = %d, want 201; body=%s", resp.Code, resp.Body.String())
+	}
+	resp := link(bonus, map[string]any{"transaction_id": pay.ID})
+	if resp.Code != http.StatusConflict || !strings.Contains(resp.Body.String(), "transaction is already linked") {
+		t.Errorf("one credit on two incomes = %d %s, want 409 naming the transaction", resp.Code, resp.Body.String())
+	}
+
+	// A concurrent link takes bonus's current cycle between the pre-check and the insert.
+	fired := false
+	client.IncomeReceipt.Use(func(next ent.Mutator) ent.Mutator {
+		return ent.MutateFunc(func(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+			if !fired && m.Op().Is(ent.OpCreate) {
+				fired = true
+				client.IncomeReceipt.Create().SetIncomeID(bonus.ID).SetTransactionID(wrong.ID).
+					SetOccurrenceDate(today).SaveX(ctx)
+			}
+			return next.Mutate(ctx, m)
+		})
+	})
+	resp = link(bonus, map[string]any{"transaction_id": other.ID, "occurrence_date": today.Format(dateLayout)})
+	if resp.Code != http.StatusConflict || !strings.Contains(resp.Body.String(), "pay cycle already has a receipt") {
+		t.Errorf("lost race on the cycle = %d %s, want 409 naming the cycle", resp.Code, resp.Body.String())
 	}
 }

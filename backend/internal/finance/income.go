@@ -13,6 +13,7 @@ import (
 	"github.com/alifyandra/portfolio-site/backend/ent/incomereceipt"
 	"github.com/alifyandra/portfolio-site/backend/ent/recurringbill"
 	"github.com/alifyandra/portfolio-site/backend/ent/recurringincome"
+	"github.com/alifyandra/portfolio-site/backend/ent/transaction"
 )
 
 // Recurring Income (ADR 0019). A RecurringIncome is a DECLARED repeating receipt
@@ -42,6 +43,20 @@ var ErrNotAPayDate = errors.New("finance: that date is not one of the income's p
 // ErrNotACredit is returned when a hand link names a debit. Income is money in, so a row
 // with a non-positive amount can never be what paid a cycle. The API maps it to a 422.
 var ErrNotACredit = errors.New("finance: only a credit (a positive amount) can be an income receipt")
+
+// ErrCycleOutOfRange is returned when a hand link targets a pay date that is on the grid
+// but is not a cycle that can have been paid: before the anchor (no cycle existed), after
+// ended_on (none was expected), or after today (not paid yet). The API maps it to a 422.
+var ErrCycleOutOfRange = errors.New("finance: that pay date is outside the income's cycles: it must fall between the anchor date and today, and not after ended_on")
+
+// ErrTransactionReceived is returned when the credit already settles a receipt of ANY
+// income. One posted credit is one payment, so it pays at most one cycle. The API maps it
+// to a 409.
+var ErrTransactionReceived = errors.New("finance: that transaction is already linked as an income receipt")
+
+// ErrWrongAccount is returned when the income names the account it is paid into and the
+// credit posted to a different one. The API maps it to a 422.
+var ErrWrongAccount = errors.New("finance: that transaction was posted to a different account than the income is paid into")
 
 // IncomeFilter narrows a recurring-income query. Status is "active", "paused", "ended",
 // or "" / "all" for every status. WithinDays > 0 keeps only incomes whose next pay day
@@ -220,21 +235,36 @@ func incomeTotals(views []IncomeView) IncomeTotals {
 //
 // occurrence is optional: when nil the pay date closest to the transaction's posted date
 // is used, and when given it must be one of the income's derived pay dates
-// (ErrNotAPayDate otherwise). The transaction must be a credit (ErrNotACredit). A cycle
-// that already has a receipt is refused with ErrIncomeCycleReceived rather than replaced,
-// since every receipt is a human decision; the (income, transaction) unique index refuses
-// one credit settling two cycles, surfacing as an ent constraint error.
+// (ErrNotAPayDate otherwise). Either way the cycle must be one that can have been paid:
+// not before the anchor, not after ended_on, not after today (ErrCycleOutOfRange). The
+// transaction must be a credit (ErrNotACredit) and, when the income names its account,
+// posted to that account (ErrWrongAccount).
+//
+// A cycle that already has a receipt is refused with ErrIncomeCycleReceived rather than
+// replaced, since every receipt is a human decision, and a credit that already settles a
+// receipt of any income is refused with ErrTransactionReceived. Both are checked before
+// the insert and again after a constraint error, so a concurrent link that wins the race
+// is still reported as the conflict it is.
 func LinkIncomeReceipt(ctx context.Context, client *ent.Client, incomeID, txnID int, occurrence *time.Time) (*ent.IncomeReceipt, error) {
-	inc, err := client.RecurringIncome.Get(ctx, incomeID)
+	inc, err := client.RecurringIncome.Query().
+		Where(recurringincome.IDEQ(incomeID)).
+		WithAccount().
+		Only(ctx)
 	if err != nil {
 		return nil, err
 	}
-	t, err := client.Transaction.Get(ctx, txnID)
+	t, err := client.Transaction.Query().
+		Where(transaction.IDEQ(txnID)).
+		WithAccount().
+		Only(ctx)
 	if err != nil {
 		return nil, err
 	}
 	if t.Amount <= 0 {
 		return nil, ErrNotACredit
+	}
+	if a := inc.Edges.Account; a != nil && (t.Edges.Account == nil || t.Edges.Account.ID != a.ID) {
+		return nil, ErrWrongAccount
 	}
 	c := billCadence(inc.Cadence)
 	occ := nearestOccurrence(inc.AnchorDate, c, t.PostedDate)
@@ -244,7 +274,45 @@ func LinkIncomeReceipt(ctx context.Context, client *ent.Client, incomeID, txnID 
 			return nil, ErrNotAPayDate
 		}
 	}
+	if !cyclePayable(inc, occ, localToday()) {
+		return nil, ErrCycleOutOfRange
+	}
 
+	if err := receiptConflict(ctx, client, incomeID, txnID, occ); err != nil {
+		return nil, err
+	}
+	r, err := client.IncomeReceipt.Create().
+		SetIncomeID(incomeID).
+		SetTransactionID(t.ID).
+		SetOccurrenceDate(occ).
+		Save(ctx)
+	if ent.IsConstraintError(err) {
+		// Someone linked between the check and the insert: name what they took.
+		if conflict := receiptConflict(ctx, client, incomeID, txnID, occ); conflict != nil {
+			return nil, conflict
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	return r, nil
+}
+
+// cyclePayable reports whether occ is a cycle that can have been paid: on or after the
+// anchor (there is no cycle before it), on or before ended_on when the income has one
+// (nothing after it was expected), and on or before today (a future cycle is not paid
+// yet). occ is already known to be on the grid.
+func cyclePayable(inc *ent.RecurringIncome, occ, today time.Time) bool {
+	if occ.Before(normalizeDate(inc.AnchorDate)) || occ.After(today) {
+		return false
+	}
+	return inc.EndedOn == nil || !occ.After(normalizeDate(*inc.EndedOn))
+}
+
+// receiptConflict names which unique rule a new receipt would break, or returns nil: the
+// cycle already received (ErrIncomeCycleReceived) is checked first, then the credit
+// already used by any income (ErrTransactionReceived).
+func receiptConflict(ctx context.Context, client *ent.Client, incomeID, txnID int, occ time.Time) error {
 	taken, err := client.IncomeReceipt.Query().
 		Where(
 			incomereceipt.HasIncomeWith(recurringincome.IDEQ(incomeID)),
@@ -252,18 +320,19 @@ func LinkIncomeReceipt(ctx context.Context, client *ent.Client, incomeID, txnID 
 		).
 		Exist(ctx)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if taken {
-		return nil, ErrIncomeCycleReceived
+		return ErrIncomeCycleReceived
 	}
-	r, err := client.IncomeReceipt.Create().
-		SetIncomeID(incomeID).
-		SetTransactionID(t.ID).
-		SetOccurrenceDate(occ).
-		Save(ctx)
+	used, err := client.IncomeReceipt.Query().
+		Where(incomereceipt.HasTransactionWith(transaction.IDEQ(txnID))).
+		Exist(ctx)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	return r, nil
+	if used {
+		return ErrTransactionReceived
+	}
+	return nil
 }

@@ -49,11 +49,13 @@ func (IncomeReceipt) Edges() []ent.Edge {
 }
 
 // Indexes of the IncomeReceipt. (income, occurrence_date) so one cycle is received at
-// most once, and (income, transaction) so one credit cannot settle two cycles of the
-// same income.
+// most once, and the transaction alone so one posted credit settles at most one receipt
+// across EVERY income: a credit is one payment, so it cannot pay two cycles, nor two
+// incomes. The transaction index replaces an earlier (income, transaction) one, which it
+// implies; the table had no rows when it changed.
 func (IncomeReceipt) Indexes() []ent.Index {
 	return []ent.Index{
 		index.Fields("occurrence_date").Edges("income").Unique(),
-		index.Edges("income", "transaction").Unique(),
+		index.Edges("transaction").Unique(),
 	}
 }

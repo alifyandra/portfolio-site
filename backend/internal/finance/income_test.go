@@ -310,8 +310,8 @@ func TestLinkIncomeReceipt_RejectsDebit(t *testing.T) {
 	}
 }
 
-// TestLinkIncomeReceipt_OneCreditOneCycle: the (income, transaction) unique index means a
-// credit already settling one cycle cannot also settle another.
+// TestLinkIncomeReceipt_OneCreditOneCycle: a credit already settling one cycle cannot
+// also settle another, named before the insert rather than left to the index.
 func TestLinkIncomeReceipt_OneCreditOneCycle(t *testing.T) {
 	client := newFinanceTestClient(t)
 	ctx := context.Background()
@@ -325,7 +325,173 @@ func TestLinkIncomeReceipt_OneCreditOneCycle(t *testing.T) {
 		t.Fatalf("first link: %v", err)
 	}
 	next := day(2026, time.April, 15)
-	if _, err := LinkIncomeReceipt(ctx, client, inc.ID, txn.ID, &next); !ent.IsConstraintError(err) {
-		t.Errorf("same credit on a second cycle = %v, want a constraint error", err)
+	if _, err := LinkIncomeReceipt(ctx, client, inc.ID, txn.ID, &next); !errors.Is(err, ErrTransactionReceived) {
+		t.Errorf("same credit on a second cycle = %v, want ErrTransactionReceived", err)
 	}
+}
+
+// TestLinkIncomeReceipt_OneReceiptPerTransaction: one posted credit is one payment, so it
+// settles at most one receipt across EVERY income, not just within one. The service names
+// it; the unique index on the transaction edge is the backstop under a direct write.
+func TestLinkIncomeReceipt_OneReceiptPerTransaction(t *testing.T) {
+	client := newFinanceTestClient(t)
+	ctx := context.Background()
+	acc := seedAccount(t, ctx, client, "Everyday", account.ClassAsset, account.TypeEveryday)
+	anchor := day(2026, time.March, 15)
+	salary := seedIncome(t, ctx, client, "Salary", 1000, recurringincome.CadenceMonthly, anchor)
+	bonus := seedIncome(t, ctx, client, "Bonus", 1000, recurringincome.CadenceMonthly, anchor)
+	seedTxn(t, ctx, client, acc, "pay-1", anchor, 1000, "PAY CREDIT", "")
+	txn := client.Transaction.Query().OnlyX(ctx)
+
+	if _, err := LinkIncomeReceipt(ctx, client, salary.ID, txn.ID, &anchor); err != nil {
+		t.Fatalf("first link: %v", err)
+	}
+	if _, err := LinkIncomeReceipt(ctx, client, bonus.ID, txn.ID, &anchor); !errors.Is(err, ErrTransactionReceived) {
+		t.Errorf("same credit on another income = %v, want ErrTransactionReceived", err)
+	}
+	_, err := client.IncomeReceipt.Create().
+		SetIncomeID(bonus.ID).SetTransactionID(txn.ID).SetOccurrenceDate(anchor).
+		Save(ctx)
+	if !ent.IsConstraintError(err) {
+		t.Errorf("direct second receipt on one transaction = %v, want a constraint error from the unique index", err)
+	}
+}
+
+// TestLinkIncomeReceipt_OccurrenceWindow: being on the grid is not enough. A cycle before
+// the anchor never existed, one after ended_on was never expected, and one still in the
+// future has not been paid yet, whether the caller names it or it is derived as nearest.
+func TestLinkIncomeReceipt_OccurrenceWindow(t *testing.T) {
+	client := newFinanceTestClient(t)
+	ctx := context.Background()
+	today := localToday()
+	acc := seedAccount(t, ctx, client, "Everyday", account.ClassAsset, account.TypeEveryday)
+	anchor := today.AddDate(0, 0, -28) // weekly: cycles at -28, -21, -14, -7, 0, +7 ...
+	inc := seedIncome(t, ctx, client, "Contract", 300, recurringincome.CadenceWeekly, anchor)
+	seedTxn(t, ctx, client, acc, "early", today.AddDate(0, 0, -33), 300, "PAY CREDIT", "")
+	seedTxn(t, ctx, client, acc, "pay", today, 300, "PAY CREDIT", "")
+	early := client.Transaction.Query().Order(ent.Asc("id")).FirstX(ctx)
+	pay := client.Transaction.Query().Order(ent.Desc("id")).FirstX(ctx)
+
+	beforeAnchor := today.AddDate(0, 0, -35)
+	future := today.AddDate(0, 0, 7)
+	for name, occ := range map[string]*time.Time{"before anchor": &beforeAnchor, "future": &future} {
+		if _, err := LinkIncomeReceipt(ctx, client, inc.ID, pay.ID, occ); !errors.Is(err, ErrCycleOutOfRange) {
+			t.Errorf("%s = %v, want ErrCycleOutOfRange", name, err)
+		}
+	}
+	// Posted 33 days back: the nearest grid date is -35, before the anchor.
+	if _, err := LinkIncomeReceipt(ctx, client, inc.ID, early.ID, nil); !errors.Is(err, ErrCycleOutOfRange) {
+		t.Errorf("derived pre-anchor cycle = %v, want ErrCycleOutOfRange", err)
+	}
+
+	inc = inc.Update().SetStatus(recurringincome.StatusEnded).SetEndedOn(today.AddDate(0, 0, -14)).SaveX(ctx)
+	afterEnd := today.AddDate(0, 0, -7)
+	if _, err := LinkIncomeReceipt(ctx, client, inc.ID, pay.ID, &afterEnd); !errors.Is(err, ErrCycleOutOfRange) {
+		t.Errorf("after ended_on = %v, want ErrCycleOutOfRange", err)
+	}
+	if n := client.IncomeReceipt.Query().CountX(ctx); n != 0 {
+		t.Fatalf("receipts = %d after rejected links, want 0", n)
+	}
+	lastCycle := today.AddDate(0, 0, -14)
+	if _, err := LinkIncomeReceipt(ctx, client, inc.ID, pay.ID, &lastCycle); err != nil {
+		t.Errorf("the ended_on cycle itself failed: %v", err)
+	}
+}
+
+// TestLinkIncomeReceipt_TodayIsLinkable: the window is inclusive of today, so a pay day's
+// own credit links the same day it posts.
+func TestLinkIncomeReceipt_TodayIsLinkable(t *testing.T) {
+	client := newFinanceTestClient(t)
+	ctx := context.Background()
+	today := localToday()
+	acc := seedAccount(t, ctx, client, "Everyday", account.ClassAsset, account.TypeEveryday)
+	inc := seedIncome(t, ctx, client, "Contract", 300, recurringincome.CadenceWeekly, today.AddDate(0, 0, -7))
+	seedTxn(t, ctx, client, acc, "pay", today, 300, "PAY CREDIT", "")
+	txn := client.Transaction.Query().OnlyX(ctx)
+	if _, err := LinkIncomeReceipt(ctx, client, inc.ID, txn.ID, &today); err != nil {
+		t.Errorf("today's cycle failed: %v", err)
+	}
+}
+
+// TestLinkIncomeReceipt_AccountMustMatch: an income paid into a known account can only be
+// settled by a credit posted to that account. An income with no account takes any.
+func TestLinkIncomeReceipt_AccountMustMatch(t *testing.T) {
+	client := newFinanceTestClient(t)
+	ctx := context.Background()
+	everyday := seedAccount(t, ctx, client, "Everyday", account.ClassAsset, account.TypeEveryday)
+	savings := seedAccount(t, ctx, client, "Savings", account.ClassAsset, account.TypeSavings)
+	anchor := day(2026, time.March, 15)
+	inc := seedIncome(t, ctx, client, "Salary", 1000, recurringincome.CadenceMonthly, anchor, func(c *ent.RecurringIncomeCreate) {
+		c.SetAccountID(everyday.ID)
+	})
+	loose := seedIncome(t, ctx, client, "Side work", 100, recurringincome.CadenceMonthly, anchor)
+	seedTxn(t, ctx, client, savings, "wrong", anchor, 1000, "PAY CREDIT", "")
+	seedTxn(t, ctx, client, everyday, "right", anchor, 1000, "PAY CREDIT", "")
+	wrong := client.Transaction.Query().Order(ent.Asc("id")).FirstX(ctx)
+	right := client.Transaction.Query().Order(ent.Desc("id")).FirstX(ctx)
+
+	if _, err := LinkIncomeReceipt(ctx, client, inc.ID, wrong.ID, &anchor); !errors.Is(err, ErrWrongAccount) {
+		t.Errorf("credit on another account = %v, want ErrWrongAccount", err)
+	}
+	if _, err := LinkIncomeReceipt(ctx, client, inc.ID, right.ID, &anchor); err != nil {
+		t.Errorf("credit on the income's account failed: %v", err)
+	}
+	if _, err := LinkIncomeReceipt(ctx, client, loose.ID, wrong.ID, &anchor); err != nil {
+		t.Errorf("an income with no account refused a credit: %v", err)
+	}
+}
+
+// raceReceipt registers a hook that, on the first receipt insert, writes a competing
+// receipt first: the window between the pre-check and the insert that a concurrent link
+// would land in.
+func raceReceipt(client *ent.Client, incomeID, txnID int, occ time.Time) {
+	fired := false
+	client.IncomeReceipt.Use(func(next ent.Mutator) ent.Mutator {
+		return ent.MutateFunc(func(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+			if !fired && m.Op().Is(ent.OpCreate) {
+				fired = true
+				client.IncomeReceipt.Create().
+					SetIncomeID(incomeID).SetTransactionID(txnID).SetOccurrenceDate(occ).
+					SaveX(ctx)
+			}
+			return next.Mutate(ctx, m)
+		})
+	})
+}
+
+// TestLinkIncomeReceipt_RaceNamesTheRealConflict: when a concurrent link wins the race
+// past the pre-check, the constraint error is re-checked and reported as what it is: the
+// cycle taken, or the transaction taken, never a raw constraint error.
+func TestLinkIncomeReceipt_RaceNamesTheRealConflict(t *testing.T) {
+	t.Run("cycle", func(t *testing.T) {
+		client := newFinanceTestClient(t)
+		ctx := context.Background()
+		acc := seedAccount(t, ctx, client, "Everyday", account.ClassAsset, account.TypeEveryday)
+		anchor := day(2026, time.March, 15)
+		inc := seedIncome(t, ctx, client, "Salary", 1000, recurringincome.CadenceMonthly, anchor)
+		seedTxn(t, ctx, client, acc, "mine", anchor, 1000, "PAY CREDIT", "")
+		seedTxn(t, ctx, client, acc, "theirs", anchor, 1000, "PAY CREDIT", "")
+		mine := client.Transaction.Query().Order(ent.Asc("id")).FirstX(ctx)
+		theirs := client.Transaction.Query().Order(ent.Desc("id")).FirstX(ctx)
+
+		raceReceipt(client, inc.ID, theirs.ID, anchor)
+		if _, err := LinkIncomeReceipt(ctx, client, inc.ID, mine.ID, &anchor); !errors.Is(err, ErrIncomeCycleReceived) {
+			t.Errorf("lost race on the cycle = %v, want ErrIncomeCycleReceived", err)
+		}
+	})
+	t.Run("transaction", func(t *testing.T) {
+		client := newFinanceTestClient(t)
+		ctx := context.Background()
+		acc := seedAccount(t, ctx, client, "Everyday", account.ClassAsset, account.TypeEveryday)
+		anchor := day(2026, time.March, 15)
+		salary := seedIncome(t, ctx, client, "Salary", 1000, recurringincome.CadenceMonthly, anchor)
+		bonus := seedIncome(t, ctx, client, "Bonus", 1000, recurringincome.CadenceMonthly, anchor)
+		seedTxn(t, ctx, client, acc, "pay", anchor, 1000, "PAY CREDIT", "")
+		txn := client.Transaction.Query().OnlyX(ctx)
+
+		raceReceipt(client, bonus.ID, txn.ID, anchor)
+		if _, err := LinkIncomeReceipt(ctx, client, salary.ID, txn.ID, &anchor); !errors.Is(err, ErrTransactionReceived) {
+			t.Errorf("lost race on the transaction = %v, want ErrTransactionReceived", err)
+		}
+	})
 }
