@@ -316,7 +316,63 @@ func LinkIncomeReceipt(ctx context.Context, client *ent.Client, incomeID, txnID 
 	if err != nil {
 		return nil, err
 	}
+	r.Edges.Transaction = t // already loaded, so the caller can render the receipt whole
 	return r, nil
+}
+
+// IncomeReceiptView is one receipt with the transaction it links: the cycle it settles,
+// and when and how much actually arrived, so a receipt can be recognised (and removed)
+// without a second lookup.
+type IncomeReceiptView struct {
+	ID             int
+	IncomeID       int
+	TransactionID  int
+	OccurrenceDate time.Time
+	PostedDate     time.Time
+	Amount         float64
+	Description    string
+	Merchant       string
+	CreatedAt      time.Time
+}
+
+// NewIncomeReceiptView maps a receipt to its view. The transaction edge must be loaded.
+func NewIncomeReceiptView(incomeID int, r *ent.IncomeReceipt) IncomeReceiptView {
+	v := IncomeReceiptView{
+		ID:             r.ID,
+		IncomeID:       incomeID,
+		OccurrenceDate: normalizeDate(r.OccurrenceDate),
+		CreatedAt:      r.CreatedAt,
+	}
+	if t := r.Edges.Transaction; t != nil {
+		v.TransactionID = t.ID
+		v.PostedDate = normalizeDate(t.PostedDate)
+		v.Amount = t.Amount
+		v.Description = t.Description
+		v.Merchant = t.Merchant
+	}
+	return v
+}
+
+// ListIncomeReceipts returns one income's receipts, newest cycle first. An unknown income
+// is an ent not-found error rather than an empty list, so a caller can tell "no receipts
+// yet" from "no such income".
+func ListIncomeReceipts(ctx context.Context, client *ent.Client, incomeID int) ([]IncomeReceiptView, error) {
+	if _, err := client.RecurringIncome.Get(ctx, incomeID); err != nil {
+		return nil, err
+	}
+	rows, err := client.IncomeReceipt.Query().
+		Where(incomereceipt.HasIncomeWith(recurringincome.IDEQ(incomeID))).
+		WithTransaction().
+		Order(ent.Desc(incomereceipt.FieldOccurrenceDate), ent.Desc(incomereceipt.FieldID)).
+		All(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]IncomeReceiptView, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, NewIncomeReceiptView(incomeID, r))
+	}
+	return out, nil
 }
 
 // cyclePayable reports whether occ is a cycle that a credit posted on posted can have

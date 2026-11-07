@@ -54,14 +54,39 @@ type FinanceIncomeDTO struct {
 	UpdatedAt          string   `json:"updated_at"`
 }
 
-// IncomeReceiptDTO is one hand-made link: which cycle of which income a posted credit
-// paid. No amount on purpose; it lives on the transaction, one hop away.
+// IncomeReceiptDTO is one link: which cycle of which income a posted credit paid. The
+// receipt row stores no amount; posted_date, amount and description are read through
+// from the linked transaction, so they can never disagree with the ledger.
 type IncomeReceiptDTO struct {
-	ID             int    `json:"id"`
-	IncomeID       int    `json:"income_id"`
-	TransactionID  int    `json:"transaction_id"`
-	OccurrenceDate string `json:"occurrence_date" doc:"YYYY-MM-DD pay date this receipt settles (not the posted date)"`
-	CreatedAt      string `json:"created_at"`
+	ID             int     `json:"id"`
+	IncomeID       int     `json:"income_id"`
+	TransactionID  int     `json:"transaction_id"`
+	OccurrenceDate string  `json:"occurrence_date" doc:"YYYY-MM-DD pay date this receipt settles (not the posted date)"`
+	PostedDate     string  `json:"posted_date" doc:"YYYY-MM-DD the linked credit posted; up to 7 days before occurrence_date when pay landed early"`
+	Amount         float64 `json:"amount" doc:"The linked credit's amount, rounded to the cent (read from the transaction, never stored on the receipt)"`
+	Description    string  `json:"description" doc:"The linked credit's narrative as the bank provides it"`
+	CreatedAt      string  `json:"created_at"`
+}
+
+type listIncomeReceiptsOutput struct {
+	Body struct {
+		Receipts []IncomeReceiptDTO `json:"receipts" doc:"Newest cycle first"`
+	}
+}
+
+// toIncomeReceiptDTO maps a receipt view to the wire, rounding the amount to the cent like
+// every other income money figure.
+func toIncomeReceiptDTO(v finance.IncomeReceiptView) IncomeReceiptDTO {
+	return IncomeReceiptDTO{
+		ID:             v.ID,
+		IncomeID:       v.IncomeID,
+		TransactionID:  v.TransactionID,
+		OccurrenceDate: v.OccurrenceDate.Format(dateLayout),
+		PostedDate:     v.PostedDate.Format(dateLayout),
+		Amount:         roundCents(v.Amount),
+		Description:    v.Description,
+		CreatedAt:      v.CreatedAt.UTC().Format(http.TimeFormat),
+	}
 }
 
 type listFinanceIncomeInput struct {
@@ -447,16 +472,46 @@ func (h *Handler) registerFinanceIncome(api huma.API) {
 		case err != nil:
 			return nil, huma.Error500InternalServerError("failed to link the receipt", err)
 		}
-		return &incomeReceiptOutput{Body: IncomeReceiptDTO{
-			ID:             r.ID,
-			IncomeID:       in.ID,
-			TransactionID:  in.Body.TransactionID,
-			OccurrenceDate: r.OccurrenceDate.UTC().Format(dateLayout),
-			CreatedAt:      r.CreatedAt.UTC().Format(http.TimeFormat),
-		}}, nil
+		return &incomeReceiptOutput{Body: toIncomeReceiptDTO(finance.NewIncomeReceiptView(in.ID, r))}, nil
 	})
 
+	h.registerFinanceIncomeReceiptList(api)
 	h.registerFinanceIncomeReceiptDelete(api)
+}
+
+// registerFinanceIncomeReceiptList lists one income's receipts with the credit each one
+// links, which is what the UI needs to show them and offer a remove: the delete route
+// takes the receipt id, and before this list the only place that id appeared was the
+// link response.
+func (h *Handler) registerFinanceIncomeReceiptList(api huma.API) {
+	huma.Register(api, huma.Operation{
+		OperationID: "list-finance-income-receipts",
+		Method:      http.MethodGet,
+		Path:        "/api/admin/finance/income/{id}/receipts",
+		Summary:     "List an income's receipts with the credit each one links, newest cycle first",
+		Tags:        adminTags,
+		Security:    cookieAuthSecurity,
+	}, func(ctx context.Context, in *incomeIDInput) (*listIncomeReceiptsOutput, error) {
+		if _, err := requireAdmin(ctx); err != nil {
+			return nil, err
+		}
+		if h.deps.Ent == nil {
+			return nil, huma.Error503ServiceUnavailable("finance is not available")
+		}
+		views, err := finance.ListIncomeReceipts(ctx, h.deps.Ent, in.ID)
+		if ent.IsNotFound(err) {
+			return nil, huma.Error404NotFound("recurring income not found")
+		}
+		if err != nil {
+			return nil, huma.Error500InternalServerError("failed to load the receipts", err)
+		}
+		out := &listIncomeReceiptsOutput{}
+		out.Body.Receipts = make([]IncomeReceiptDTO, 0, len(views))
+		for _, v := range views {
+			out.Body.Receipts = append(out.Body.Receipts, toIncomeReceiptDTO(v))
+		}
+		return out, nil
+	})
 }
 
 // registerFinanceIncomeReceiptDelete takes one hand-made link back. Only the link row

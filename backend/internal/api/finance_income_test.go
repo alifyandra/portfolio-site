@@ -94,6 +94,12 @@ func TestFinanceIncome_RequiresAdmin(t *testing.T) {
 	if resp := api.Post("/api/admin/finance/income/1/receipts", member, map[string]any{"transaction_id": 1}); resp.Code != http.StatusForbidden {
 		t.Errorf("member link = %d, want 403", resp.Code)
 	}
+	if resp := api.Get("/api/admin/finance/income/1/receipts"); resp.Code != http.StatusUnauthorized {
+		t.Errorf("anon receipts list = %d, want 401", resp.Code)
+	}
+	if resp := api.Get("/api/admin/finance/income/1/receipts", member); resp.Code != http.StatusForbidden {
+		t.Errorf("member receipts list = %d, want 403", resp.Code)
+	}
 	if resp := api.Delete("/api/admin/finance/income/1/receipts/1"); resp.Code != http.StatusUnauthorized {
 		t.Errorf("anon unlink = %d, want 401", resp.Code)
 	}
@@ -563,5 +569,77 @@ func TestFinanceIncome_MoneyRoundedToCents(t *testing.T) {
 	}
 	if list.ExpectedTotal != 1100 || list.MonthlyEquivalent != 2600.02 {
 		t.Errorf("totals = %v / %v, want 1100 / 2600.02", list.ExpectedTotal, list.MonthlyEquivalent)
+	}
+}
+
+// TestFinanceIncome_ListReceipts: an income's receipts come back newest cycle first, each
+// carrying the transaction it links (posted date, amount, description) so a row can be
+// recognised before it is removed. Another income's receipts stay out, an income with
+// none is an empty list, and an unknown income is a 404.
+func TestFinanceIncome_ListReceipts(t *testing.T) {
+	api, client := newFinanceIncomeTestAPI(t)
+	ctx := context.Background()
+	admin := sessionCookieFor(t, ctx, client, user.RoleAdmin)
+
+	acc := client.Account.Create().SetSource("commbank").SetName("Everyday").
+		SetType(account.TypeEveryday).SetClass(account.ClassAsset).SetCurrency("AUD").SaveX(ctx)
+	credit := func(hash string, posted time.Time, amount float64) *ent.Transaction {
+		return client.Transaction.Create().SetDedupHash(hash).SetPostedDate(posted).
+			SetAmount(amount).SetDescription("PAY CREDIT " + hash).SetAccountID(acc.ID).SaveX(ctx)
+	}
+	april := credit("list-april", time.Date(2026, time.April, 14, 0, 0, 0, 0, time.UTC), 1000)
+	may := credit("list-may", time.Date(2026, time.May, 15, 0, 0, 0, 0, time.UTC), 1000.004)
+	create := func(name string) FinanceIncomeDTO {
+		resp := api.Post("/api/admin/finance/income", admin, map[string]any{
+			"name": name, "expected_amount": 1000, "cadence": "monthly", "anchor_date": "2026-03-15",
+		})
+		if resp.Code != http.StatusCreated {
+			t.Fatalf("create %s = %d; body=%s", name, resp.Code, resp.Body.String())
+		}
+		var inc FinanceIncomeDTO
+		_ = json.Unmarshal(resp.Body.Bytes(), &inc)
+		return inc
+	}
+	salary, other := create("Salary"), create("Other")
+	base := "/api/admin/finance/income/" + itoa(salary.ID) + "/receipts"
+	for _, txn := range []*ent.Transaction{april, may} {
+		if resp := api.Post(base, admin, map[string]any{"transaction_id": txn.ID}); resp.Code != http.StatusCreated {
+			t.Fatalf("link = %d; body=%s", resp.Code, resp.Body.String())
+		}
+	}
+
+	resp := api.Get(base, admin)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("list = %d, want 200; body=%s", resp.Code, resp.Body.String())
+	}
+	var list struct {
+		Receipts []IncomeReceiptDTO `json:"receipts"`
+	}
+	_ = json.Unmarshal(resp.Body.Bytes(), &list)
+	if len(list.Receipts) != 2 {
+		t.Fatalf("receipts = %+v, want 2", list.Receipts)
+	}
+	newest, oldest := list.Receipts[0], list.Receipts[1]
+	if newest.OccurrenceDate != "2026-05-15" || oldest.OccurrenceDate != "2026-04-15" {
+		t.Errorf("cycles = %s, %s; want 2026-05-15 then 2026-04-15", newest.OccurrenceDate, oldest.OccurrenceDate)
+	}
+	if newest.TransactionID != may.ID || newest.IncomeID != salary.ID || newest.PostedDate != "2026-05-15" ||
+		newest.Amount != 1000 || newest.Description != "PAY CREDIT list-may" {
+		t.Errorf("newest = %+v, want the May credit, its amount rounded to the cent", newest)
+	}
+	if oldest.PostedDate != "2026-04-14" {
+		t.Errorf("oldest posted_date = %s, want 2026-04-14 (the posted date, not the cycle)", oldest.PostedDate)
+	}
+
+	resp = api.Get("/api/admin/finance/income/"+itoa(other.ID)+"/receipts", admin)
+	_ = json.Unmarshal(resp.Body.Bytes(), &list)
+	if resp.Code != http.StatusOK || len(list.Receipts) != 0 {
+		t.Errorf("other income = %d %+v, want 200 and no receipts", resp.Code, list.Receipts)
+	}
+	if !strings.Contains(resp.Body.String(), `"receipts":[]`) {
+		t.Errorf("empty list body = %s, want receipts:[] rather than null", resp.Body.String())
+	}
+	if resp := api.Get("/api/admin/finance/income/9999/receipts", admin); resp.Code != http.StatusNotFound {
+		t.Errorf("unknown income = %d, want 404", resp.Code)
 	}
 }

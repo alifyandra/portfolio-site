@@ -1670,7 +1670,14 @@ components:
           format: uri
           readOnly: true
           type: string
+        amount:
+          description: The linked credit's amount, rounded to the cent (read from the transaction, never stored on the receipt)
+          format: double
+          type: number
         created_at:
+          type: string
+        description:
+          description: The linked credit's narrative as the bank provides it
           type: string
         id:
           format: int64
@@ -1681,6 +1688,9 @@ components:
         occurrence_date:
           description: YYYY-MM-DD pay date this receipt settles (not the posted date)
           type: string
+        posted_date:
+          description: YYYY-MM-DD the linked credit posted; up to 7 days before occurrence_date when pay landed early
+          type: string
         transaction_id:
           format: int64
           type: integer
@@ -1689,6 +1699,9 @@ components:
         - income_id
         - transaction_id
         - occurrence_date
+        - posted_date
+        - amount
+        - description
         - created_at
       type: object
     Item:
@@ -2141,6 +2154,26 @@ components:
             - "null"
       required:
         - grants
+      type: object
+    ListIncomeReceiptsOutputBody:
+      additionalProperties: false
+      properties:
+        $schema:
+          description: A URL to the JSON Schema for this object.
+          examples:
+            - https://example.com/schemas/ListIncomeReceiptsOutputBody.json
+          format: uri
+          readOnly: true
+          type: string
+        receipts:
+          description: Newest cycle first
+          items:
+            $ref: "#/components/schemas/IncomeReceiptDTO"
+          type:
+            - array
+            - "null"
+      required:
+        - receipts
       type: object
     ListJobKindsOutputBody:
       additionalProperties: false
@@ -3732,6 +3765,35 @@ paths:
       tags:
         - admin
   /api/admin/finance/income/{id}/receipts:
+    get:
+      operationId: list-finance-income-receipts
+      parameters:
+        - description: Recurring income ID
+          in: path
+          name: id
+          required: true
+          schema:
+            description: Recurring income ID
+            format: int64
+            type: integer
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListIncomeReceiptsOutputBody"
+          description: OK
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ErrorModel"
+          description: Error
+      security:
+        - cookieAuth: []
+      summary: List an income's receipts with the credit each one links, newest cycle first
+      tags:
+        - admin
     post:
       operationId: create-finance-income-receipt
       parameters:
