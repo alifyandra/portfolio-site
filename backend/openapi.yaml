@@ -1596,12 +1596,19 @@ components:
             - string
             - "null"
         evidence:
-          description: The run's transactions, newest first
+          description: "The run's transactions, newest first: the newest 5 in the list, all of them from GET /api/admin/finance/suggestions/{id}"
           items:
             $ref: "#/components/schemas/FinanceSuggestionEvidenceDTO"
           type:
             - array
             - "null"
+        evidence_count:
+          description: How many transactions the run rests on, whether or not evidence lists them all
+          format: int64
+          type: integer
+        evidence_since:
+          description: YYYY-MM-DD the run's oldest transaction posted
+          type: string
         expected_amount:
           description: Median magnitude of the evidence, rounded to the cent
           format: double
@@ -1659,6 +1666,8 @@ components:
         - bill_id
         - income_id
         - evidence
+        - evidence_count
+        - evidence_since
         - created_at
         - updated_at
       type: object
@@ -4240,7 +4249,7 @@ paths:
           description: Error
       security:
         - cookieAuth: []
-      summary: List recurrence suggestions with their evidence
+      summary: List recurrence suggestions with their newest evidence
       tags:
         - admin
   /api/admin/finance/suggestions/scan:
@@ -4262,6 +4271,36 @@ paths:
       security:
         - cookieAuth: []
       summary: Scan the posted ledger for recurring runs and refresh the suggestions
+      tags:
+        - admin
+  /api/admin/finance/suggestions/{id}:
+    get:
+      operationId: get-finance-suggestion
+      parameters:
+        - description: Recurrence suggestion ID
+          in: path
+          name: id
+          required: true
+          schema:
+            description: Recurrence suggestion ID
+            format: int64
+            type: integer
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FinanceSuggestionDTO"
+          description: OK
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ErrorModel"
+          description: Error
+      security:
+        - cookieAuth: []
+      summary: Get one recurrence suggestion with all of its evidence
       tags:
         - admin
   /api/admin/finance/suggestions/{id}/accept:

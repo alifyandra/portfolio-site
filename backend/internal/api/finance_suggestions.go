@@ -42,7 +42,9 @@ type FinanceSuggestionDTO struct {
 	AccountName    string                         `json:"account_name"`
 	BillID         *int                           `json:"bill_id" doc:"The recurring bill accepting created; null otherwise, or once that bill is deleted"`
 	IncomeID       *int                           `json:"income_id" doc:"The recurring income accepting created; null otherwise, or once that income is deleted"`
-	Evidence       []FinanceSuggestionEvidenceDTO `json:"evidence" doc:"The run's transactions, newest first"`
+	Evidence       []FinanceSuggestionEvidenceDTO `json:"evidence" doc:"The run's transactions, newest first: the newest 5 in the list, all of them from GET /api/admin/finance/suggestions/{id}"`
+	EvidenceCount  int                            `json:"evidence_count" doc:"How many transactions the run rests on, whether or not evidence lists them all"`
+	EvidenceSince  string                         `json:"evidence_since" doc:"YYYY-MM-DD the run's oldest transaction posted"`
 	CreatedAt      string                         `json:"created_at"`
 	UpdatedAt      string                         `json:"updated_at"`
 }
@@ -121,6 +123,8 @@ func toFinanceSuggestionDTO(v finance.SuggestionView) FinanceSuggestionDTO {
 		BillID:         intPtrOrNil(v.BillID),
 		IncomeID:       intPtrOrNil(v.IncomeID),
 		Evidence:       make([]FinanceSuggestionEvidenceDTO, 0, len(v.Evidence)),
+		EvidenceCount:  v.EvidenceCount,
+		EvidenceSince:  v.EvidenceSince.Format(dateLayout),
 		CreatedAt:      v.CreatedAt.UTC().Format(http.TimeFormat),
 		UpdatedAt:      v.UpdatedAt.UTC().Format(http.TimeFormat),
 	}
@@ -144,7 +148,7 @@ func (h *Handler) registerFinanceSuggestions(api huma.API) {
 		OperationID: "list-finance-suggestions",
 		Method:      http.MethodGet,
 		Path:        "/api/admin/finance/suggestions",
-		Summary:     "List recurrence suggestions with their evidence",
+		Summary:     "List recurrence suggestions with their newest evidence",
 		Tags:        adminTags,
 		Security:    cookieAuthSecurity,
 	}, func(ctx context.Context, in *listFinanceSuggestionsInput) (*listFinanceSuggestionsOutput, error) {
@@ -165,6 +169,23 @@ func (h *Handler) registerFinanceSuggestions(api huma.API) {
 		}
 		out.Body.Count = len(views)
 		return out, nil
+	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "get-finance-suggestion",
+		Method:      http.MethodGet,
+		Path:        "/api/admin/finance/suggestions/{id}",
+		Summary:     "Get one recurrence suggestion with all of its evidence",
+		Tags:        adminTags,
+		Security:    cookieAuthSecurity,
+	}, func(ctx context.Context, in *suggestionIDInput) (*financeSuggestionOutput, error) {
+		if _, err := requireAdmin(ctx); err != nil {
+			return nil, err
+		}
+		if h.deps.Ent == nil {
+			return nil, huma.Error503ServiceUnavailable("finance is not available")
+		}
+		return h.suggestionResponse(ctx, in.ID)
 	})
 
 	huma.Register(api, huma.Operation{
@@ -260,15 +281,18 @@ func (h *Handler) registerFinanceSuggestions(api huma.API) {
 		case err != nil:
 			return nil, huma.Error500InternalServerError("failed to dismiss the suggestion", err)
 		}
-		views, err := finance.ListSuggestions(ctx, h.deps.Ent, "dismissed")
-		if err != nil {
-			return nil, huma.Error500InternalServerError("failed to load the suggestion", err)
-		}
-		for _, v := range views {
-			if v.ID == in.ID {
-				return &financeSuggestionOutput{Body: toFinanceSuggestionDTO(v)}, nil
-			}
-		}
-		return nil, huma.Error404NotFound("suggestion not found")
+		return h.suggestionResponse(ctx, in.ID)
 	})
+}
+
+// suggestionResponse reads one suggestion with all of its evidence as the response body.
+func (h *Handler) suggestionResponse(ctx context.Context, id int) (*financeSuggestionOutput, error) {
+	v, err := finance.GetSuggestion(ctx, h.deps.Ent, id)
+	if ent.IsNotFound(err) {
+		return nil, huma.Error404NotFound("suggestion not found")
+	}
+	if err != nil {
+		return nil, huma.Error500InternalServerError("failed to load the suggestion", err)
+	}
+	return &financeSuggestionOutput{Body: toFinanceSuggestionDTO(v)}, nil
 }

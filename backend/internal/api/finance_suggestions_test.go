@@ -75,6 +75,7 @@ func TestFinanceSuggestions_RequiresAdmin(t *testing.T) {
 		body         map[string]any
 	}{
 		{http.MethodGet, "/api/admin/finance/suggestions", nil},
+		{http.MethodGet, "/api/admin/finance/suggestions/1", nil},
 		{http.MethodPost, "/api/admin/finance/suggestions/scan", nil},
 		{http.MethodPost, "/api/admin/finance/suggestions/1/accept", map[string]any{"match_pattern": ""}},
 		{http.MethodPost, "/api/admin/finance/suggestions/1/dismiss", nil},
@@ -139,6 +140,18 @@ func TestFinanceSuggestions_ScanAcceptDismiss(t *testing.T) {
 	}
 	if income.Evidence[0].PostedDate <= income.Evidence[3].PostedDate {
 		t.Errorf("evidence not newest first: %+v", income.Evidence)
+	}
+	if bill.EvidenceCount != 4 || bill.EvidenceSince != bill.Evidence[3].PostedDate {
+		t.Errorf("bill evidence count/since = %d/%s, want 4 and the oldest row's date", bill.EvidenceCount, bill.EvidenceSince)
+	}
+	var detail FinanceSuggestionDTO
+	resp = api.Get("/api/admin/finance/suggestions/"+itoa(bill.ID), admin)
+	_ = json.Unmarshal(resp.Body.Bytes(), &detail)
+	if resp.Code != http.StatusOK || detail.ID != bill.ID || len(detail.Evidence) != 4 || detail.EvidenceCount != 4 {
+		t.Errorf("detail = %d %s, want the bill suggestion with all 4 rows", resp.Code, resp.Body.String())
+	}
+	if resp := api.Get("/api/admin/finance/suggestions/9999", admin); resp.Code != http.StatusNotFound {
+		t.Errorf("detail unknown = %d, want 404", resp.Code)
 	}
 
 	base := "/api/admin/finance/suggestions/"

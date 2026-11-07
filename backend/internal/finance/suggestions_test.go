@@ -477,6 +477,47 @@ func TestScanRecurrences_StoresGaps(t *testing.T) {
 	}
 }
 
+// TestListSuggestions_NewestEvidenceOnly: the list carries each suggestion's evidence
+// count, its oldest date and only its newest suggestListEvidence rows; GetSuggestion
+// returns all of them, newest first.
+func TestListSuggestions_NewestEvidenceOnly(t *testing.T) {
+	client := newFinanceTestClient(t)
+	ctx := context.Background()
+	today := localToday()
+	acc := seedAccount(t, ctx, client, "Everyday", account.ClassAsset, account.TypeEveryday)
+	newest := today.AddDate(0, 0, -2)
+	for i := 0; i < 8; i++ {
+		seedTxn(t, ctx, client, acc, "tutor-"+itoaTest(i), newest.AddDate(0, 0, -7*i), -60, "TUTORING KOALA LEARNING", "")
+	}
+	if _, err := ScanRecurrences(ctx, client); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	views, err := ListSuggestions(ctx, client, "pending")
+	if err != nil || len(views) != 1 {
+		t.Fatalf("list = %d (%v), want 1", len(views), err)
+	}
+	v := views[0]
+	if v.EvidenceCount != 8 || len(v.Evidence) != suggestListEvidence || !v.EvidenceSince.Equal(newest.AddDate(0, 0, -49)) {
+		t.Fatalf("list view = %d of %d since %s, want %d of 8 since the oldest row", len(v.Evidence), v.EvidenceCount,
+			v.EvidenceSince.Format(dateLayoutTest), suggestListEvidence)
+	}
+	for i, e := range v.Evidence {
+		if want := newest.AddDate(0, 0, -7*i); !e.PostedDate.Equal(want) || e.Amount != -60 || e.Description == "" {
+			t.Errorf("list evidence[%d] = %+v, want the row posted %s", i, e, want.Format(dateLayoutTest))
+		}
+	}
+	full, err := GetSuggestion(ctx, client, v.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if full.EvidenceCount != 8 || len(full.Evidence) != 8 || !full.Evidence[7].PostedDate.Equal(newest.AddDate(0, 0, -49)) {
+		t.Errorf("detail = %d of %d, want all 8 newest first", len(full.Evidence), full.EvidenceCount)
+	}
+	if _, err := GetSuggestion(ctx, client, 9999); !ent.IsNotFound(err) {
+		t.Errorf("get unknown = %v, want not found", err)
+	}
+}
+
 // TestScanRecurrences_SkipsDeclaredRuns: a run a declaration already covers is not
 // suggested, whether a bill's match pattern finds it or an income receipt already links
 // one of its rows.

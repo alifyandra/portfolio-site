@@ -905,7 +905,9 @@ type SuggestionEvidence struct {
 }
 
 // SuggestionView is one stored suggestion with its evidence (newest first) and the next
-// date its grid expects, so the owner can judge it before accepting.
+// date its grid expects, so the owner can judge it before accepting. Evidence holds every
+// row from GetSuggestion and only the newest suggestListEvidence from ListSuggestions;
+// EvidenceCount and EvidenceSince (the oldest row's date) always describe all of it.
 type SuggestionView struct {
 	ID             int
 	Kind           string
@@ -923,20 +925,40 @@ type SuggestionView struct {
 	BillID         int
 	IncomeID       int
 	Evidence       []SuggestionEvidence
+	EvidenceCount  int
+	EvidenceSince  time.Time
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
 }
 
-// ListSuggestions returns the stored suggestions with the given status ("pending",
-// "accepted", "dismissed", or "" / "all"), ordered by label.
-func ListSuggestions(ctx context.Context, client *ent.Client, status string) ([]SuggestionView, error) {
-	q := client.RecurrenceSuggestion.Query().
+// suggestListEvidence is how many evidence rows (the newest) each suggestion carries in
+// the list: enough to recognise the run at a glance. The detail read has the rest.
+const suggestListEvidence = 5
+
+// newestFirst orders evidence rows by posted date, then id, both descending.
+func newestFirst(a, b *ent.Transaction) int {
+	if c := b.PostedDate.Compare(a.PostedDate); c != 0 {
+		return c
+	}
+	return b.ID - a.ID
+}
+
+// suggestionsQuery is the read shared by the list and the detail: the suggestion with
+// its account and the ids of what accepting it created. Evidence is loaded by the caller.
+func suggestionsQuery(client *ent.Client) *ent.RecurrenceSuggestionQuery {
+	return client.RecurrenceSuggestion.Query().
 		WithAccount().
-		WithBill().
-		WithIncome().
-		WithEvidence(func(tq *ent.TransactionQuery) {
-			tq.Order(ent.Desc(transaction.FieldPostedDate), ent.Desc(transaction.FieldID))
-		})
+		WithBill(func(q *ent.RecurringBillQuery) { q.Select(recurringbill.FieldID) }).
+		WithIncome(func(q *ent.RecurringIncomeQuery) { q.Select(recurringincome.FieldID) })
+}
+
+// ListSuggestions returns the stored suggestions with the given status ("pending",
+// "accepted", "dismissed", or "" / "all"), ordered by label, each with its newest
+// suggestListEvidence evidence rows. It reads only the id and date of every evidence row
+// (to count them and pick the newest), then the full rows of just those picked.
+func ListSuggestions(ctx context.Context, client *ent.Client, status string) ([]SuggestionView, error) {
+	q := suggestionsQuery(client).
+		WithEvidence(func(tq *ent.TransactionQuery) { tq.Select(transaction.FieldPostedDate) })
 	switch s := strings.ToLower(strings.TrimSpace(status)); s {
 	case "", "all":
 	case string(recurrencesuggestion.StatusPending), string(recurrencesuggestion.StatusAccepted), string(recurrencesuggestion.StatusDismissed):
@@ -948,45 +970,96 @@ func ListSuggestions(ctx context.Context, client *ent.Client, status string) ([]
 	if err != nil {
 		return nil, err
 	}
+	var pick []int
+	for _, s := range rows {
+		ev := s.Edges.Evidence
+		slices.SortFunc(ev, newestFirst)
+		for _, t := range ev[:min(len(ev), suggestListEvidence)] {
+			pick = append(pick, t.ID)
+		}
+	}
+	full := map[int]*ent.Transaction{}
+	if len(pick) > 0 {
+		txns, err := client.Transaction.Query().Where(transaction.IDIn(pick...)).All(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, t := range txns {
+			full[t.ID] = t
+		}
+	}
 	today := localToday()
 	out := make([]SuggestionView, 0, len(rows))
 	for _, s := range rows {
-		c := recurringbill.Cadence(s.Cadence)
-		v := SuggestionView{
-			ID:             s.ID,
-			Kind:           string(s.Kind),
-			Label:          s.Label,
-			MatchPattern:   s.MatchPattern,
-			Cadence:        string(s.Cadence),
-			ExpectedAmount: s.ExpectedAmount,
-			AnchorDate:     normalizeDate(s.AnchorDate),
-			NextExpected:   nextDue(s.AnchorDate, c, today),
-			Gaps:           s.Gaps,
-			Status:         string(s.Status),
-			DecidedAt:      s.DecidedAt,
-			CreatedAt:      s.CreatedAt,
-			UpdatedAt:      s.UpdatedAt,
+		ev := s.Edges.Evidence
+		shown := make([]*ent.Transaction, 0, suggestListEvidence)
+		for _, t := range ev[:min(len(ev), suggestListEvidence)] {
+			if f := full[t.ID]; f != nil {
+				shown = append(shown, f)
+			}
 		}
-		if a := s.Edges.Account; a != nil {
-			v.AccountID, v.AccountName = a.ID, a.Name
-		}
-		if b := s.Edges.Bill; b != nil {
-			v.BillID = b.ID
-		}
-		if inc := s.Edges.Income; inc != nil {
-			v.IncomeID = inc.ID
-		}
-		for _, t := range s.Edges.Evidence {
-			v.Evidence = append(v.Evidence, SuggestionEvidence{
-				TransactionID: t.ID,
-				PostedDate:    normalizeDate(t.PostedDate),
-				Amount:        t.Amount,
-				Description:   t.Description,
-			})
-		}
-		out = append(out, v)
+		out = append(out, suggestionView(s, shown, ev, today))
 	}
 	return out, nil
+}
+
+// GetSuggestion returns one stored suggestion with all of its evidence, newest first. A
+// missing id is ent's not-found error.
+func GetSuggestion(ctx context.Context, client *ent.Client, id int) (SuggestionView, error) {
+	s, err := suggestionsQuery(client).
+		Where(recurrencesuggestion.IDEQ(id)).
+		WithEvidence().
+		Only(ctx)
+	if err != nil {
+		return SuggestionView{}, err
+	}
+	ev := s.Edges.Evidence
+	slices.SortFunc(ev, newestFirst)
+	return suggestionView(s, ev, ev, localToday()), nil
+}
+
+// suggestionView builds the view from a loaded suggestion: shown are the evidence rows to
+// return (full rows, newest first) and all is every evidence row, newest first, for the
+// count and the oldest date.
+func suggestionView(s *ent.RecurrenceSuggestion, shown, all []*ent.Transaction, today time.Time) SuggestionView {
+	c := recurringbill.Cadence(s.Cadence)
+	v := SuggestionView{
+		ID:             s.ID,
+		Kind:           string(s.Kind),
+		Label:          s.Label,
+		MatchPattern:   s.MatchPattern,
+		Cadence:        string(s.Cadence),
+		ExpectedAmount: s.ExpectedAmount,
+		AnchorDate:     normalizeDate(s.AnchorDate),
+		NextExpected:   nextDue(s.AnchorDate, c, today),
+		Gaps:           s.Gaps,
+		Status:         string(s.Status),
+		DecidedAt:      s.DecidedAt,
+		EvidenceCount:  len(all),
+		CreatedAt:      s.CreatedAt,
+		UpdatedAt:      s.UpdatedAt,
+	}
+	if len(all) > 0 {
+		v.EvidenceSince = normalizeDate(all[len(all)-1].PostedDate)
+	}
+	if a := s.Edges.Account; a != nil {
+		v.AccountID, v.AccountName = a.ID, a.Name
+	}
+	if b := s.Edges.Bill; b != nil {
+		v.BillID = b.ID
+	}
+	if inc := s.Edges.Income; inc != nil {
+		v.IncomeID = inc.ID
+	}
+	for _, t := range shown {
+		v.Evidence = append(v.Evidence, SuggestionEvidence{
+			TransactionID: t.ID,
+			PostedDate:    normalizeDate(t.PostedDate),
+			Amount:        t.Amount,
+			Description:   t.Description,
+		})
+	}
+	return v
 }
 
 // --- decisions ---
