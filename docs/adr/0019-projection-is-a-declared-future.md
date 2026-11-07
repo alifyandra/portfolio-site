@@ -22,9 +22,11 @@ decision) Recurring Income.
 
 A **Projection** is a forward Balance Series under one stated premise, *nothing
 changes*: start from each account's latest Balance Snapshot and walk forward applying
-only what the owner has declared, every Recurring Bill and Recurring Income
-occurrence in the horizon, and optionally each Wishlist Item that has both a cost and
-a deadline. Investment accounts are carried flat. Net worth is the sum. Every
+only what the owner has declared: every occurrence in the horizon of each *active*
+Recurring Bill and Recurring Income, and optionally each *wanted* Wishlist Item that
+has both a cost and a deadline. Paused and ended declarations are retained but feed
+nothing, and neither do bought or abandoned wishlist items: a bought item is already
+in the starting balance, and counting it again would charge the owner twice. Investment accounts are carried flat. Net worth is the sum. Every
 projected point is marked `projected` so it can never be read as a reading.
 
 **Recurring Income** is a sibling entity of Recurring Bill with the same shape
