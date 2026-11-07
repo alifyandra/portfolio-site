@@ -1,7 +1,7 @@
 # Portfolio site — common tasks. Run `make help` for the list.
 # Go tasks run inside a golang container so a local Go install is optional.
 
-GO_IMAGE := golang:1.25-alpine
+GO_IMAGE := golang:1.26.10-alpine
 GO_RUN   := docker run --rm -v "$(CURDIR)/backend":/src -w /src $(GO_IMAGE)
 
 .DEFAULT_GOAL := help
