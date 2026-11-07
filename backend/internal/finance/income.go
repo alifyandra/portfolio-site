@@ -29,7 +29,7 @@ import (
 // first appears.
 //
 // The occurrence arithmetic is the bill generator's (bills.go), reached through
-// billCadence. Nothing here rounds money; the caller formats.
+// billCadence. Nothing here rounds money: the API rounds to the cent at its DTO boundary.
 
 // ErrIncomeCycleReceived is returned when a hand link targets a cycle that already carries
 // a receipt. The API maps it to a 409.

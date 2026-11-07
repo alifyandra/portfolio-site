@@ -133,8 +133,8 @@ func TestFinanceIncome_CRUDAndDerivedFields(t *testing.T) {
 	if created.AccountID != nil || created.LastReceivedDate != nil || created.LastReceivedAmount != nil {
 		t.Errorf("optional fields = %+v, want null account and nothing received", created)
 	}
-	if want := 1000.0 * 26 / 12; created.ExpectedMonthly != want {
-		t.Errorf("expected_monthly = %v, want %v", created.ExpectedMonthly, want)
+	if created.ExpectedMonthly != 2166.67 {
+		t.Errorf("expected_monthly = %v, want 2166.67 (1000 x 26 / 12 to the cent)", created.ExpectedMonthly)
 	}
 
 	if resp := api.Post("/api/admin/finance/income", admin, map[string]any{
@@ -524,5 +524,44 @@ func TestFinanceIncome_DeleteReceipt(t *testing.T) {
 	}
 	if resp := api.Patch(base, admin, map[string]any{"cadence": "fortnightly"}); resp.Code != http.StatusOK {
 		t.Errorf("grid change after the last receipt went = %d, want 200; body=%s", resp.Code, resp.Body.String())
+	}
+}
+
+// TestFinanceIncome_MoneyRoundedToCents: the read service keeps full precision, and the
+// wire rounds every income money figure to the cent, so 26 or 52 cycles over 12 months
+// never reaches the client as a repeating fraction. The totals are rounded too.
+func TestFinanceIncome_MoneyRoundedToCents(t *testing.T) {
+	api, client := newFinanceIncomeTestAPI(t)
+	ctx := context.Background()
+	admin := sessionCookieFor(t, ctx, client, user.RoleAdmin)
+	today := melbourneToday(t).Format(dateLayout)
+
+	for _, body := range []map[string]any{
+		{"name": "Salary", "expected_amount": 1000, "cadence": "fortnightly", "anchor_date": today},
+		{"name": "Tutoring", "expected_amount": 100.004, "cadence": "weekly", "anchor_date": today},
+	} {
+		if resp := api.Post("/api/admin/finance/income", admin, body); resp.Code != http.StatusCreated {
+			t.Fatalf("create = %d; body=%s", resp.Code, resp.Body.String())
+		}
+	}
+	resp := api.Get("/api/finance/income", admin)
+	var list struct {
+		Income            []FinanceIncomeDTO `json:"income"`
+		ExpectedTotal     float64            `json:"expected_total"`
+		MonthlyEquivalent float64            `json:"monthly_equivalent"`
+	}
+	_ = json.Unmarshal(resp.Body.Bytes(), &list)
+	got := map[string]FinanceIncomeDTO{}
+	for _, inc := range list.Income {
+		got[inc.Name] = inc
+	}
+	if s := got["Salary"]; s.ExpectedMonthly != 2166.67 {
+		t.Errorf("salary expected_monthly = %v, want 2166.67", s.ExpectedMonthly)
+	}
+	if tu := got["Tutoring"]; tu.ExpectedAmount != 100 || tu.ExpectedMonthly != 433.35 {
+		t.Errorf("tutoring = %v / %v, want 100 / 433.35", tu.ExpectedAmount, tu.ExpectedMonthly)
+	}
+	if list.ExpectedTotal != 1100 || list.MonthlyEquivalent != 2600.02 {
+		t.Errorf("totals = %v / %v, want 1100 / 2600.02", list.ExpectedTotal, list.MonthlyEquivalent)
 	}
 }

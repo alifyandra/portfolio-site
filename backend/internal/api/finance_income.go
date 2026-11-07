@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"time"
 
@@ -48,7 +49,7 @@ type FinanceIncomeDTO struct {
 	DaysUntil          *int     `json:"days_until" doc:"Whole days from today to next_expected, never negative; null with it"`
 	LastReceivedDate   *string  `json:"last_received_date" doc:"YYYY-MM-DD the newest linked cycle actually posted; null until one is linked"`
 	LastReceivedAmount *float64 `json:"last_received_amount" doc:"Amount actually received for that cycle; null until one is linked"`
-	ExpectedMonthly    float64  `json:"expected_monthly" doc:"expected_amount normalised to a per-month figure so mixed cadences can be summed"`
+	ExpectedMonthly    float64  `json:"expected_monthly" doc:"expected_amount normalised to a per-month figure so mixed cadences can be summed, rounded to the cent"`
 	CreatedAt          string   `json:"created_at"`
 	UpdatedAt          string   `json:"updated_at"`
 }
@@ -200,8 +201,8 @@ func (h *Handler) registerFinanceIncome(api huma.API) {
 		}
 		out := &listFinanceIncomeOutput{}
 		out.Body.Income = toFinanceIncomeDTOs(incomes)
-		out.Body.ExpectedTotal = totals.ExpectedTotal
-		out.Body.MonthlyEquivalent = totals.MonthlyEquivalent
+		out.Body.ExpectedTotal = roundCents(totals.ExpectedTotal)
+		out.Body.MonthlyEquivalent = roundCents(totals.MonthlyEquivalent)
 		out.Body.Count = totals.Count
 		return out, nil
 	})
@@ -509,14 +510,31 @@ func (h *Handler) incomeResponse(ctx context.Context, id int) (*financeIncomeOut
 	return nil, huma.Error404NotFound("recurring income not found")
 }
 
-// toFinanceIncomeDTOs maps the read service's income views to their wire DTOs.
+// roundCents rounds a money figure to 2 dp. The read service keeps full precision (a
+// fortnightly 1000 is 2166.666... a month) and this is the one place income money is
+// rounded, at the wire, so totals are rounded from the exact sum rather than summed from
+// rounded parts. Bills are not rounded here.
+func roundCents(v float64) float64 {
+	return math.Round(v*100) / 100
+}
+
+func roundCentsPtr(v *float64) *float64 {
+	if v == nil {
+		return nil
+	}
+	r := roundCents(*v)
+	return &r
+}
+
+// toFinanceIncomeDTOs maps the read service's income views to their wire DTOs. Every
+// money figure leaves rounded to the cent (roundCents).
 func toFinanceIncomeDTOs(incomes []finance.IncomeView) []FinanceIncomeDTO {
 	out := make([]FinanceIncomeDTO, 0, len(incomes))
 	for _, v := range incomes {
 		dto := FinanceIncomeDTO{
 			ID:                 v.ID,
 			Name:               v.Name,
-			ExpectedAmount:     v.ExpectedAmount,
+			ExpectedAmount:     roundCents(v.ExpectedAmount),
 			Currency:           v.Currency,
 			Cadence:            v.Cadence,
 			AnchorDate:         v.AnchorDate.UTC().Format(dateLayout),
@@ -527,8 +545,8 @@ func toFinanceIncomeDTOs(incomes []finance.IncomeView) []FinanceIncomeDTO {
 			NextExpected:       dateOnlyPtr(v.NextExpected),
 			DaysUntil:          v.DaysUntil,
 			LastReceivedDate:   dateOnlyPtr(v.LastReceivedDate),
-			LastReceivedAmount: v.LastReceivedAmount,
-			ExpectedMonthly:    v.ExpectedMonthly,
+			LastReceivedAmount: roundCentsPtr(v.LastReceivedAmount),
+			ExpectedMonthly:    roundCents(v.ExpectedMonthly),
 			CreatedAt:          v.CreatedAt.UTC().Format(http.TimeFormat),
 			UpdatedAt:          v.UpdatedAt.UTC().Format(http.TimeFormat),
 		}

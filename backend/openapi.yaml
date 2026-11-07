@@ -1398,7 +1398,7 @@ components:
           format: double
           type: number
         expected_monthly:
-          description: expected_amount normalised to a per-month figure so mixed cadences can be summed
+          description: expected_amount normalised to a per-month figure so mixed cadences can be summed, rounded to the cent
           format: double
           type: number
         id:
