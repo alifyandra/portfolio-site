@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -104,8 +105,8 @@ type updateIncomeInput struct {
 		Name           *string  `json:"name,omitempty" minLength:"1" maxLength:"120"`
 		ExpectedAmount *float64 `json:"expected_amount,omitempty" exclusiveMinimum:"0"`
 		Currency       *string  `json:"currency,omitempty" maxLength:"3"`
-		Cadence        *string  `json:"cadence,omitempty" enum:"weekly,fortnightly,monthly,quarterly,annual"`
-		AnchorDate     *string  `json:"anchor_date,omitempty" doc:"YYYY-MM-DD"`
+		Cadence        *string  `json:"cadence,omitempty" enum:"weekly,fortnightly,monthly,quarterly,annual" doc:"A change is refused with 409 while the income has receipts"`
+		AnchorDate     *string  `json:"anchor_date,omitempty" doc:"YYYY-MM-DD; a change is refused with 409 while the income has receipts"`
 		Status         *string  `json:"status,omitempty" enum:"active,paused,ended" doc:"After the patch, ended requires ended_on and any other status refuses it"`
 		EndedOn        *string  `json:"ended_on,omitempty" doc:"YYYY-MM-DD, or \"\" to clear it"`
 		Notes          *string  `json:"notes,omitempty"`
@@ -139,6 +140,24 @@ func checkIncomeEnd(status recurringincome.Status, endedOn *time.Time) error {
 		return huma.Error422UnprocessableEntity("status ended requires ended_on (YYYY-MM-DD)")
 	case status != recurringincome.StatusEnded && endedOn != nil:
 		return huma.Error422UnprocessableEntity("ended_on is only allowed with status ended; send ended_on \"\" to clear it")
+	}
+	return nil
+}
+
+// checkIncomeGridFree refuses a change to anchor_date or cadence while the income has
+// receipts. Each receipt settles one derived pay date, so moving the grid would leave
+// them pointing at dates that are no longer cycles, and the "already received" check
+// would stop seeing them. Removing the receipts first is the explicit way through.
+func (h *Handler) checkIncomeGridFree(ctx context.Context, incomeID int) error {
+	n, err := h.deps.Ent.IncomeReceipt.Query().
+		Where(incomereceipt.HasIncomeWith(recurringincome.IDEQ(incomeID))).
+		Count(ctx)
+	if err != nil {
+		return huma.Error500InternalServerError("failed to check the income's receipts", err)
+	}
+	if n > 0 {
+		return huma.Error409Conflict(fmt.Sprintf(
+			"this income has %d linked receipt(s), and changing anchor_date or cadence would move its pay dates out from under them; remove the receipts first", n))
 	}
 	return nil
 }
@@ -283,7 +302,11 @@ func (h *Handler) registerFinanceIncome(api huma.API) {
 		if in.Body.Currency != nil {
 			upd.SetCurrency(*in.Body.Currency)
 		}
+		// gridMoved is a real change to the pay-date grid, not the same value resent: the
+		// edit form sends every field on each save.
+		gridMoved := false
 		if in.Body.Cadence != nil {
+			gridMoved = gridMoved || recurringincome.Cadence(*in.Body.Cadence) != cur.Cadence
 			upd.SetCadence(recurringincome.Cadence(*in.Body.Cadence))
 		}
 		if in.Body.AnchorDate != nil {
@@ -291,6 +314,7 @@ func (h *Handler) registerFinanceIncome(api huma.API) {
 			if err != nil {
 				return nil, err
 			}
+			gridMoved = gridMoved || anchor.Format(dateLayout) != cur.AnchorDate.UTC().Format(dateLayout)
 			upd.SetAnchorDate(anchor)
 		}
 		if in.Body.Status != nil {
@@ -312,6 +336,11 @@ func (h *Handler) registerFinanceIncome(api huma.API) {
 		}
 		if err := checkIncomeEnd(status, endedOn); err != nil {
 			return nil, err
+		}
+		if gridMoved {
+			if err := h.checkIncomeGridFree(ctx, in.ID); err != nil {
+				return nil, err
+			}
 		}
 		if in.Body.Notes != nil {
 			upd.SetNotes(*in.Body.Notes)

@@ -416,3 +416,56 @@ func TestFinanceIncome_StatusAndEndedOnAgree(t *testing.T) {
 		}
 	}
 }
+
+// TestFinanceIncome_GridLockedByReceipts: a receipt settles one derived pay date, so
+// moving the grid (anchor_date or cadence) under it would orphan it. That is a 409 while
+// receipts exist; a patch that resends the same grid, as the edit form does, still saves.
+func TestFinanceIncome_GridLockedByReceipts(t *testing.T) {
+	api, client := newFinanceIncomeTestAPI(t)
+	ctx := context.Background()
+	admin := sessionCookieFor(t, ctx, client, user.RoleAdmin)
+
+	acc := client.Account.Create().SetSource("commbank").SetName("Everyday").
+		SetType(account.TypeEveryday).SetClass(account.ClassAsset).SetCurrency("AUD").SaveX(ctx)
+	credit := client.Transaction.Create().SetDedupHash("grid-credit").SetPostedDate(time.Date(2026, time.June, 15, 0, 0, 0, 0, time.UTC)).
+		SetAmount(1000).SetDescription("PAY CREDIT").SetAccountID(acc.ID).SaveX(ctx)
+
+	resp := api.Post("/api/admin/finance/income", admin, map[string]any{
+		"name": "Salary", "expected_amount": 1000, "cadence": "monthly", "anchor_date": "2026-03-15",
+	})
+	var inc FinanceIncomeDTO
+	_ = json.Unmarshal(resp.Body.Bytes(), &inc)
+	path := "/api/admin/finance/income/" + itoa(inc.ID)
+
+	// No receipts yet: the grid moves freely.
+	if resp := api.Patch(path, admin, map[string]any{"anchor_date": "2026-03-14"}); resp.Code != http.StatusOK {
+		t.Fatalf("grid change with no receipts = %d; body=%s", resp.Code, resp.Body.String())
+	}
+	if resp := api.Patch(path, admin, map[string]any{"anchor_date": "2026-03-15"}); resp.Code != http.StatusOK {
+		t.Fatalf("grid change back = %d; body=%s", resp.Code, resp.Body.String())
+	}
+	if resp := api.Post(path+"/receipts", admin, map[string]any{"transaction_id": credit.ID}); resp.Code != http.StatusCreated {
+		t.Fatalf("link = %d; body=%s", resp.Code, resp.Body.String())
+	}
+
+	for name, body := range map[string]map[string]any{
+		"anchor":  {"anchor_date": "2026-03-16"},
+		"cadence": {"cadence": "fortnightly"},
+	} {
+		resp := api.Patch(path, admin, body)
+		if resp.Code != http.StatusConflict || !strings.Contains(resp.Body.String(), "receipt") {
+			t.Errorf("%s change with a receipt = %d %s, want 409 naming the receipts", name, resp.Code, resp.Body.String())
+		}
+	}
+	resp = api.Patch(path, admin, map[string]any{
+		"name": "Salary (main)", "cadence": "monthly", "anchor_date": "2026-03-15", "expected_amount": 1100,
+	})
+	if resp.Code != http.StatusOK {
+		t.Errorf("same grid resent with other edits = %d, want 200; body=%s", resp.Code, resp.Body.String())
+	}
+	var got FinanceIncomeDTO
+	_ = json.Unmarshal(resp.Body.Bytes(), &got)
+	if got.AnchorDate != "2026-03-15" || got.Cadence != "monthly" || got.Name != "Salary (main)" {
+		t.Errorf("after edit = %+v, want the grid unchanged and the name saved", got)
+	}
+}

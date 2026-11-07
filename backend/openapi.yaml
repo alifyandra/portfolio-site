@@ -3068,9 +3068,10 @@ components:
           format: int64
           type: integer
         anchor_date:
-          description: YYYY-MM-DD
+          description: YYYY-MM-DD; a change is refused with 409 while the income has receipts
           type: string
         cadence:
+          description: A change is refused with 409 while the income has receipts
           enum:
             - weekly
             - fortnightly
