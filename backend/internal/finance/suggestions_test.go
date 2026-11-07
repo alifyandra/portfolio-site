@@ -74,8 +74,8 @@ func TestDetectRuns_MonthlyDebitAroundWeekends(t *testing.T) {
 	if r.matchPattern != "ZYLO STREAMING" || r.label != "ZYLO STREAMING" {
 		t.Errorf("label/pattern = %q/%q, want ZYLO STREAMING for both", r.label, r.matchPattern)
 	}
-	if r.counterparty != "d:direct debit zylo streaming ref" {
-		t.Errorf("counterparty = %q, want the description's letters only", r.counterparty)
+	if r.counterparty != "d:zylo streaming" {
+		t.Errorf("counterparty = %q, want the description's distinctive words only", r.counterparty)
 	}
 }
 
@@ -142,6 +142,24 @@ func TestDetectRuns_MerchantIsLabelAndPattern(t *testing.T) {
 	}
 	if r := runs[0]; r.label != "Kestrel Energy" || r.matchPattern != "Kestrel Energy" || r.counterparty != "m:kestrel energy" {
 		t.Errorf("label/pattern/counterparty = %q/%q/%q, want the merchant", r.label, r.matchPattern, r.counterparty)
+	}
+}
+
+// TestDetectRuns_BankWordsAreNotACounterparty: the bank's own vocabulary is dropped
+// before keying, so a run whose narrative is nothing but bank words and reference numbers
+// names no counterparty and is not offered: it would group every payee paid that way.
+func TestDetectRuns_BankWordsAreNotACounterparty(t *testing.T) {
+	today := day(2026, time.November, 8)
+	var rows []*ent.Transaction
+	for i := 0; i < 4; i++ {
+		posted := day(2026, time.November, 3).AddDate(0, -i, 0)
+		rows = append(rows,
+			memTxn(10+i, 1, posted, 250, "Direct Credit 0"+itoaTest(4410+i), ""),
+			memTxn(20+i, 1, posted, -40, "Transfer To 012345 NetBank Ref "+itoaTest(77+i), ""),
+		)
+	}
+	if runs := detectRuns(rows, nil, today); len(runs) != 0 {
+		t.Errorf("runs = %+v, want none: bank words alone name no counterparty", runs)
 	}
 }
 

@@ -39,8 +39,9 @@ import (
 //     to savings is not a bill, and declaring one would project money leaving net worth.
 //  2. Group by (account, direction, counterparty). Debits make bill runs, credits make
 //     income runs. The counterparty is the parsed merchant when the bank gave one, else
-//     the description reduced to its letters, so a varying reference number, date or
-//     month name does not split a group (counterpartyKey).
+//     the description reduced to its distinctive words, so a varying reference number,
+//     date or month name does not split a group and the bank's own words do not join two
+//     (counterpartyKey). A row with nothing distinctive left is not grouped.
 //  3. Within a group, walk back from a recent row (the head) keeping each older row
 //     whose magnitude is within suggestAmountTolerance of the head's and whose gap to
 //     the previous kept row fits the cadence band; a row too close is skipped as noise
@@ -136,14 +137,16 @@ func (r detectedRun) fingerprint() string {
 	return hex.EncodeToString(sum[:])
 }
 
-// normalizeCounterparty reduces text to its lowercase letter words, dropping month names
-// and single letters, so the parts of a narrative that vary cycle to cycle (reference
-// numbers, dates, amounts) do not split one counterparty into many.
+// normalizeCounterparty reduces text to its lowercase letter words, dropping month names,
+// single letters and the bank's own vocabulary (genericWords), so the parts of a narrative
+// that vary cycle to cycle (reference numbers, dates, amounts) do not split one
+// counterparty into many, and the channel it was paid through ("direct credit",
+// "transfer to") does not join two. Empty when nothing distinctive is left.
 func normalizeCounterparty(s string) string {
 	words := strings.FieldsFunc(strings.ToLower(s), func(r rune) bool { return !unicode.IsLetter(r) })
 	kept := words[:0]
 	for _, w := range words {
-		if utf8.RuneCountInString(w) < 2 || monthWords[w] {
+		if utf8.RuneCountInString(w) < 2 || monthWords[w] || genericWords[w] {
 			continue
 		}
 		kept = append(kept, w)
@@ -153,7 +156,8 @@ func normalizeCounterparty(s string) string {
 
 // counterpartyKey is the grouping key: the merchant when the bank parsed one (prefixed so
 // a merchant and a description that happen to read the same stay apart), else the
-// description. Empty when neither has a letter in it.
+// description. Empty when neither has a distinctive word in it, and a row with no key is
+// never grouped: a run of bare "DIRECT CREDIT" rows says nothing about who paid.
 func counterpartyKey(t *ent.Transaction) string {
 	if m := normalizeCounterparty(t.Merchant); m != "" {
 		return "m:" + m
