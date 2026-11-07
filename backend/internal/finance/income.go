@@ -22,11 +22,10 @@ import (
 // It is what the Projection will walk forward alongside the bills, so this file answers
 // what is expected, when the next pay day falls, and when money last actually arrived.
 //
-// Every receipt is linked by hand for now (LinkIncomeReceipt). There is no matching pass
-// and so no "missed income" flag: an absence only means something where a pass could
-// have found the credit, which is the same reason a bill with no match_pattern is never
-// reported overdue. The Recurrence Suggestion pass is where a counterparty to match on
-// first appears.
+// A receipt is linked by hand (LinkIncomeReceipt), by the matching pass from the income's
+// match_pattern (ReconcileIncome, income_match.go), or as evidence when a Recurrence
+// Suggestion is accepted (suggestions.go); IncomeReceipt.method says which. There is
+// still no "missed income" flag: that is a read-time inference left for later.
 //
 // The occurrence arithmetic is the bill generator's (bills.go), reached through
 // billCadence. Nothing here rounds money: the API rounds to the cent at its DTO boundary.
@@ -93,6 +92,7 @@ type IncomeView struct {
 	Status         string
 	EndedOn        *time.Time
 	Notes          string
+	MatchPattern   string
 	AccountID      int
 	AccountName    string
 	CreatedAt      time.Time
@@ -201,6 +201,7 @@ func incomeView(ctx context.Context, client *ent.Client, inc *ent.RecurringIncom
 		Status:          string(inc.Status),
 		EndedOn:         inc.EndedOn,
 		Notes:           inc.Notes,
+		MatchPattern:    inc.MatchPattern,
 		CreatedAt:       inc.CreatedAt,
 		UpdatedAt:       inc.UpdatedAt,
 		ExpectedMonthly: monthlyEquivalent(inc.ExpectedAmount, c),
@@ -314,6 +315,7 @@ func LinkIncomeReceipt(ctx context.Context, client *ent.Client, incomeID, txnID 
 		SetIncomeID(incomeID).
 		SetTransactionID(t.ID).
 		SetOccurrenceDate(occ).
+		SetMethod(incomereceipt.MethodManual).
 		Save(ctx)
 	if ent.IsConstraintError(err) {
 		// Someone linked between the check and the insert: name what they took.
@@ -336,6 +338,7 @@ type IncomeReceiptView struct {
 	IncomeID       int
 	TransactionID  int
 	OccurrenceDate time.Time
+	Method         string
 	PostedDate     time.Time
 	Amount         float64
 	Description    string
@@ -349,6 +352,7 @@ func NewIncomeReceiptView(incomeID int, r *ent.IncomeReceipt) IncomeReceiptView 
 		ID:             r.ID,
 		IncomeID:       incomeID,
 		OccurrenceDate: normalizeDate(r.OccurrenceDate),
+		Method:         string(r.Method),
 		CreatedAt:      r.CreatedAt,
 	}
 	if t := r.Edges.Transaction; t != nil {

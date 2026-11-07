@@ -81,6 +81,7 @@ func (Account) Edges() []ent.Edge {
 		edge.To("balance_snapshots", BalanceSnapshot.Type),
 		edge.To("recurring_bills", RecurringBill.Type),
 		edge.To("recurring_incomes", RecurringIncome.Type),
+		edge.To("recurrence_suggestions", RecurrenceSuggestion.Type),
 	}
 }
 

@@ -13,16 +13,17 @@ import (
 // transfer in): the same shape as a RecurringBill (cadence, anchor date, expected amount,
 // optional account) in the opposite direction. It is its own entity rather than a signed
 // bill because a bill is a commitment and income is not (ADR 0019). Like a bill it is
-// owner-authored: nothing in the ingest or any detection pass writes one. The next
+// owner-authored: nothing in the ingest or any detection pass writes one; accepting a
+// Recurrence Suggestion is the owner creating it. The next
 // expected date is NOT stored, it is derived from (cadence, anchor_date) on read.
 type RecurringIncome struct {
 	ent.Schema
 }
 
-// Fields of the RecurringIncome. Deliberately only the declaration: there is no match
-// pattern, tolerance or window yet, so every IncomeReceipt is linked by hand. The
-// matcher arrives with the Recurrence Suggestion pass, which is what will know a
-// counterparty to match on.
+// Fields of the RecurringIncome. The declaration plus one owner-typed match pattern for
+// the auto-matcher (ReconcileIncome). Unlike a bill there is no per-income tolerance or
+// window: the matcher uses fixed ones (see internal/finance/income_match.go), since pay
+// is regular enough that one rule fits, and an absent column cannot drift.
 func (RecurringIncome) Fields() []ent.Field {
 	return []ent.Field{
 		field.String("name").
@@ -41,6 +42,10 @@ func (RecurringIncome) Fields() []ent.Field {
 			Comment("How often the income recurs; the same value set as RecurringBill.cadence, so one occurrence generator serves both"),
 		field.Time("anchor_date").
 			Comment("One known pay date (UTC midnight). Every occurrence is derived by stepping the cadence from here, so this is the only date the schema stores"),
+		field.String("match_pattern").
+			Optional().
+			MaxLen(200).
+			Comment("Case-insensitive substring matched against a posted credit's description OR merchant; empty means the income is never auto-matched and every receipt is linked by hand. Same rule as RecurringBill.match_pattern"),
 		field.Enum("status").
 			Values("active", "paused", "ended").
 			Default("active").
@@ -69,6 +74,9 @@ func (RecurringIncome) Edges() []ent.Edge {
 			Ref("recurring_incomes").
 			Unique(),
 		edge.To("receipts", IncomeReceipt.Type),
+		// The suggestion this income was accepted from, if any; the FK lives on the
+		// suggestion, so this adds no column here.
+		edge.To("suggestions", RecurrenceSuggestion.Type),
 	}
 }
 

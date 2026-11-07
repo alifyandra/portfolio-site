@@ -105,6 +105,14 @@ func (h *Handler) ingestFinance(ctx context.Context, in *ingestInput) (*ingestOu
 			slog.Info("finance: linked bill payments after ingest",
 				"linked", rec.PaymentsLinked, "cycles", rec.CyclesChecked, "compared", rec.CandidatesCompared)
 		}
+		// The income matcher follows the same rules: after the commit, bounded to the
+		// ingested window, best-effort.
+		if rec, rErr := finance.ReconcileIncome(ctx, h.deps.Ent, opts); rErr != nil {
+			slog.Warn("finance: post-ingest income matching failed", "error", rErr)
+		} else if rec.ReceiptsLinked > 0 {
+			slog.Info("finance: linked income receipts after ingest",
+				"linked", rec.ReceiptsLinked, "cycles", rec.CyclesChecked, "compared", rec.CandidatesCompared)
+		}
 	}
 
 	out := &ingestOutput{}

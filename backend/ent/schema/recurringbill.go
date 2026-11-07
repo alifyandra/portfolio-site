@@ -86,6 +86,9 @@ func (RecurringBill) Edges() []ent.Edge {
 			Ref("recurring_bills").
 			Unique(),
 		edge.To("payments", BillPayment.Type),
+		// The suggestion this bill was accepted from, if any; the FK lives on the
+		// suggestion, so this adds no column here.
+		edge.To("suggestions", RecurrenceSuggestion.Type),
 	}
 }
 
