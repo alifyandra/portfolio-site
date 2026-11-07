@@ -2,13 +2,19 @@ package finance
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"fmt"
 	"maps"
 	"math"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"entgo.io/ent/dialect"
+	entsql "entgo.io/ent/dialect/sql"
 
 	"github.com/alifyandra/portfolio-site/backend/ent"
 	"github.com/alifyandra/portfolio-site/backend/ent/account"
@@ -746,6 +752,88 @@ func TestAcceptSuggestion_TwoConcurrentAccepts(t *testing.T) {
 	}
 	if n := client.BillPayment.Query().CountX(ctx); n != 4 {
 		t.Errorf("payments = %d, want 4", n)
+	}
+}
+
+// stmtLog records every statement a debug driver runs, so a test can pin how many
+// queries an operation makes.
+type stmtLog struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (l *stmtLog) add(_ context.Context, v ...any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.lines = append(l.lines, fmt.Sprint(v...))
+}
+
+func (l *stmtLog) reset() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.lines = nil
+}
+
+// selectsFrom counts the logged SELECTs that read FROM table (quoted either way, since
+// SQLite's dialect quotes with backticks and Postgres's with double quotes).
+func (l *stmtLog) selectsFrom(table string) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	n := 0
+	for _, line := range l.lines {
+		if strings.Contains(line, "SELECT") &&
+			(strings.Contains(line, "FROM `"+table+"`") || strings.Contains(line, `FROM "`+table+`"`)) {
+			n++
+		}
+	}
+	return n
+}
+
+// newLoggedFinanceTestClient is newFinanceTestClient with every statement logged.
+func newLoggedFinanceTestClient(t *testing.T) (*ent.Client, *stmtLog) {
+	t.Helper()
+	dsn := "file:" + strings.ReplaceAll(t.Name(), "/", "_") + "?mode=memory&cache=shared&_pragma=foreign_keys(1)"
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+	log := &stmtLog{}
+	client := ent.NewClient(ent.Driver(dialect.DebugWithContext(entsql.OpenDB(dialect.SQLite, db), log.add)))
+	t.Cleanup(func() { _ = client.Close() })
+	if err := client.Schema.Create(context.Background()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	return client, log
+}
+
+// TestAcceptSuggestion_OneLinkedLookup: accepting checks which evidence rows are already
+// linked with one query, not one per row, for a bill and for an income.
+func TestAcceptSuggestion_OneLinkedLookup(t *testing.T) {
+	client, log := newLoggedFinanceTestClient(t)
+	ctx := context.Background()
+	today := localToday()
+	acc := seedAccount(t, ctx, client, "Everyday", account.ClassAsset, account.TypeEveryday)
+	seedMonthlyRun(t, ctx, client, acc, "zylo", recentDay(today, 3), 6, -15.99, "ZYLO STREAMING")
+	for i := 0; i < 6; i++ {
+		seedTxn(t, ctx, client, acc, "pay-"+itoaTest(i), today.AddDate(0, 0, -2-14*i), 2450, "Salary ACME WIDGETS", "")
+	}
+	if _, err := ScanRecurrences(ctx, client); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	for _, s := range client.RecurrenceSuggestion.Query().AllX(ctx) {
+		log.reset()
+		res, err := AcceptSuggestion(ctx, client, s.ID, "")
+		if err != nil || res.Linked != 6 {
+			t.Fatalf("accept %s = %+v (%v), want 6 linked", s.Kind, res, err)
+		}
+		table := "bill_payments"
+		if s.Kind == recurrencesuggestion.KindIncome {
+			table = "income_receipts"
+		}
+		if n := log.selectsFrom(table); n > 1 {
+			t.Errorf("accept %s read %s %d times, want once", s.Kind, table, n)
+		}
 	}
 }
 

@@ -1037,6 +1037,10 @@ func AcceptSuggestion(ctx context.Context, client *ent.Client, id int, name stri
 	c := recurringbill.Cadence(s.Cadence)
 	anchor := normalizeDate(s.AnchorDate)
 	accept := tx.RecurrenceSuggestion.UpdateOneID(id)
+	evidenceIDs := make([]int, 0, len(s.Edges.Evidence))
+	for _, t := range s.Edges.Evidence {
+		evidenceIDs = append(evidenceIDs, t.ID)
+	}
 
 	switch s.Kind {
 	case recurrencesuggestion.KindBill:
@@ -1058,26 +1062,31 @@ func AcceptSuggestion(ctx context.Context, client *ent.Client, id int, name stri
 		}
 		res.BillID = b.ID
 		accept.SetBillID(b.ID)
+		used, err := idSet(tx.BillPayment.Query().
+			Where(billpayment.HasTransactionWith(transaction.IDIn(evidenceIDs...))).
+			QueryTransaction().IDs(ctx))
+		if err != nil {
+			return res, rollback(tx, err)
+		}
 		taken := map[int64]bool{}
+		var links []*ent.BillPaymentCreate
 		for _, t := range s.Edges.Evidence {
 			occ := nearestOccurrence(anchor, c, t.PostedDate)
-			used, err := tx.BillPayment.Query().Where(billpayment.HasTransactionWith(transaction.IDEQ(t.ID))).Exist(ctx)
-			if err != nil {
-				return res, rollback(tx, err)
-			}
-			if t.Amount >= 0 || occ.Before(anchor) || taken[occ.Unix()] || used {
+			if t.Amount >= 0 || occ.Before(anchor) || taken[occ.Unix()] || used[t.ID] {
 				res.Skipped++
 				continue
 			}
-			if err := tx.BillPayment.Create().
+			links = append(links, tx.BillPayment.Create().
 				SetBillID(b.ID).SetTransactionID(t.ID).SetOccurrenceDate(occ).
-				SetMethod(billpayment.MethodAuto).
-				Exec(ctx); err != nil {
+				SetMethod(billpayment.MethodAuto))
+			taken[occ.Unix()] = true
+		}
+		if len(links) > 0 {
+			if err := tx.BillPayment.CreateBulk(links...).Exec(ctx); err != nil {
 				return res, rollback(tx, err)
 			}
-			taken[occ.Unix()] = true
-			res.Linked++
 		}
+		res.Linked = len(links)
 
 	case recurrencesuggestion.KindIncome:
 		create := tx.RecurringIncome.Create().
@@ -1098,26 +1107,31 @@ func AcceptSuggestion(ctx context.Context, client *ent.Client, id int, name stri
 		}
 		res.IncomeID = inc.ID
 		accept.SetIncomeID(inc.ID)
+		used, err := idSet(tx.IncomeReceipt.Query().
+			Where(incomereceipt.HasTransactionWith(transaction.IDIn(evidenceIDs...))).
+			QueryTransaction().IDs(ctx))
+		if err != nil {
+			return res, rollback(tx, err)
+		}
 		taken := map[int64]bool{}
+		var links []*ent.IncomeReceiptCreate
 		for _, t := range s.Edges.Evidence {
 			occ := nearestOccurrence(anchor, c, t.PostedDate)
-			used, err := tx.IncomeReceipt.Query().Where(incomereceipt.HasTransactionWith(transaction.IDEQ(t.ID))).Exist(ctx)
-			if err != nil {
-				return res, rollback(tx, err)
-			}
-			if t.Amount <= 0 || !cyclePayable(inc, occ, t.PostedDate) || taken[occ.Unix()] || used {
+			if t.Amount <= 0 || !cyclePayable(inc, occ, t.PostedDate) || taken[occ.Unix()] || used[t.ID] {
 				res.Skipped++
 				continue
 			}
-			if err := tx.IncomeReceipt.Create().
+			links = append(links, tx.IncomeReceipt.Create().
 				SetIncomeID(inc.ID).SetTransactionID(t.ID).SetOccurrenceDate(occ).
-				SetMethod(incomereceipt.MethodAuto).
-				Exec(ctx); err != nil {
+				SetMethod(incomereceipt.MethodAuto))
+			taken[occ.Unix()] = true
+		}
+		if len(links) > 0 {
+			if err := tx.IncomeReceipt.CreateBulk(links...).Exec(ctx); err != nil {
 				return res, rollback(tx, err)
 			}
-			taken[occ.Unix()] = true
-			res.Linked++
 		}
+		res.Linked = len(links)
 	}
 
 	if err := accept.Exec(ctx); err != nil {
@@ -1127,6 +1141,18 @@ func AcceptSuggestion(ctx context.Context, client *ent.Client, id int, name stri
 		return res, err
 	}
 	return res, nil
+}
+
+// idSet turns an id query's result into a set, passing its error through.
+func idSet(ids []int, err error) (map[int]bool, error) {
+	if err != nil {
+		return nil, err
+	}
+	set := make(map[int]bool, len(ids))
+	for _, id := range ids {
+		set[id] = true
+	}
+	return set, nil
 }
 
 // DismissSuggestion records the owner's "no": the suggestion is kept as dismissed, so
