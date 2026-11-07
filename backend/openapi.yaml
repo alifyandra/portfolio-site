@@ -3767,6 +3767,40 @@ paths:
       summary: Link a posted credit to one pay cycle of an income by hand
       tags:
         - admin
+  /api/admin/finance/income/{id}/receipts/{receipt_id}:
+    delete:
+      operationId: delete-finance-income-receipt
+      parameters:
+        - description: Recurring income ID
+          in: path
+          name: id
+          required: true
+          schema:
+            description: Recurring income ID
+            format: int64
+            type: integer
+        - description: Income receipt ID; must belong to that income
+          in: path
+          name: receipt_id
+          required: true
+          schema:
+            description: Income receipt ID; must belong to that income
+            format: int64
+            type: integer
+      responses:
+        "204":
+          description: No Content
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ErrorModel"
+          description: Error
+      security:
+        - cookieAuth: []
+      summary: Remove one hand-linked receipt from an income (the transaction stays)
+      tags:
+        - admin
   /api/admin/job-kinds:
     get:
       operationId: list-job-kinds

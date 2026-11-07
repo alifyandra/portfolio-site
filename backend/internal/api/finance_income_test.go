@@ -94,6 +94,12 @@ func TestFinanceIncome_RequiresAdmin(t *testing.T) {
 	if resp := api.Post("/api/admin/finance/income/1/receipts", member, map[string]any{"transaction_id": 1}); resp.Code != http.StatusForbidden {
 		t.Errorf("member link = %d, want 403", resp.Code)
 	}
+	if resp := api.Delete("/api/admin/finance/income/1/receipts/1"); resp.Code != http.StatusUnauthorized {
+		t.Errorf("anon unlink = %d, want 401", resp.Code)
+	}
+	if resp := api.Delete("/api/admin/finance/income/1/receipts/1", member); resp.Code != http.StatusForbidden {
+		t.Errorf("member unlink = %d, want 403", resp.Code)
+	}
 }
 
 // TestFinanceIncome_CRUDAndDerivedFields drives create -> read -> patch -> delete and
@@ -467,5 +473,56 @@ func TestFinanceIncome_GridLockedByReceipts(t *testing.T) {
 	_ = json.Unmarshal(resp.Body.Bytes(), &got)
 	if got.AnchorDate != "2026-03-15" || got.Cadence != "monthly" || got.Name != "Salary (main)" {
 		t.Errorf("after edit = %+v, want the grid unchanged and the name saved", got)
+	}
+}
+
+// TestFinanceIncome_DeleteReceipt: a receipt is a human decision, so it can be taken
+// back. Removing one is a 204 that leaves the ledger row alone and frees the cycle, the
+// credit and the grid; a receipt that is gone, or belongs to another income, is a 404.
+func TestFinanceIncome_DeleteReceipt(t *testing.T) {
+	api, client := newFinanceIncomeTestAPI(t)
+	ctx := context.Background()
+	admin := sessionCookieFor(t, ctx, client, user.RoleAdmin)
+
+	acc := client.Account.Create().SetSource("commbank").SetName("Everyday").
+		SetType(account.TypeEveryday).SetClass(account.ClassAsset).SetCurrency("AUD").SaveX(ctx)
+	credit := client.Transaction.Create().SetDedupHash("unlink-credit").SetPostedDate(time.Date(2026, time.June, 15, 0, 0, 0, 0, time.UTC)).
+		SetAmount(1000).SetDescription("PAY CREDIT").SetAccountID(acc.ID).SaveX(ctx)
+	create := func(name string) FinanceIncomeDTO {
+		resp := api.Post("/api/admin/finance/income", admin, map[string]any{
+			"name": name, "expected_amount": 1000, "cadence": "monthly", "anchor_date": "2026-03-15",
+		})
+		var inc FinanceIncomeDTO
+		_ = json.Unmarshal(resp.Body.Bytes(), &inc)
+		return inc
+	}
+	salary, other := create("Salary"), create("Other")
+	base := "/api/admin/finance/income/" + itoa(salary.ID)
+
+	resp := api.Post(base+"/receipts", admin, map[string]any{"transaction_id": credit.ID})
+	if resp.Code != http.StatusCreated {
+		t.Fatalf("link = %d; body=%s", resp.Code, resp.Body.String())
+	}
+	var receipt IncomeReceiptDTO
+	_ = json.Unmarshal(resp.Body.Bytes(), &receipt)
+	receiptPath := base + "/receipts/" + itoa(receipt.ID)
+
+	if resp := api.Delete("/api/admin/finance/income/"+itoa(other.ID)+"/receipts/"+itoa(receipt.ID), admin); resp.Code != http.StatusNotFound {
+		t.Errorf("unlink through another income = %d, want 404", resp.Code)
+	}
+	if resp := api.Delete(receiptPath, admin); resp.Code != http.StatusNoContent {
+		t.Fatalf("unlink = %d, want 204; body=%s", resp.Code, resp.Body.String())
+	}
+	if n := client.IncomeReceipt.Query().CountX(ctx); n != 0 {
+		t.Errorf("receipts after unlink = %d, want 0", n)
+	}
+	if n := client.Transaction.Query().CountX(ctx); n != 1 {
+		t.Errorf("transactions after unlink = %d, want 1 (the ledger is untouched)", n)
+	}
+	if resp := api.Delete(receiptPath, admin); resp.Code != http.StatusNotFound {
+		t.Errorf("unlink again = %d, want 404", resp.Code)
+	}
+	if resp := api.Patch(base, admin, map[string]any{"cadence": "fortnightly"}); resp.Code != http.StatusOK {
+		t.Errorf("grid change after the last receipt went = %d, want 200; body=%s", resp.Code, resp.Body.String())
 	}
 }

@@ -126,6 +126,11 @@ type createIncomeReceiptInput struct {
 	}
 }
 
+type incomeReceiptIDInput struct {
+	ID        int `path:"id" doc:"Recurring income ID"`
+	ReceiptID int `path:"receipt_id" doc:"Income receipt ID; must belong to that income"`
+}
+
 type incomeReceiptOutput struct {
 	Body IncomeReceiptDTO
 }
@@ -448,6 +453,44 @@ func (h *Handler) registerFinanceIncome(api huma.API) {
 			OccurrenceDate: r.OccurrenceDate.UTC().Format(dateLayout),
 			CreatedAt:      r.CreatedAt.UTC().Format(http.TimeFormat),
 		}}, nil
+	})
+
+	h.registerFinanceIncomeReceiptDelete(api)
+}
+
+// registerFinanceIncomeReceiptDelete takes one hand-made link back. Only the link row
+// goes; the transaction it pointed at is ledger data and is untouched. Scoping the delete
+// to the income in the path means a receipt id paired with the wrong income is a 404,
+// not a silent removal from somewhere else.
+func (h *Handler) registerFinanceIncomeReceiptDelete(api huma.API) {
+	huma.Register(api, huma.Operation{
+		OperationID:   "delete-finance-income-receipt",
+		Method:        http.MethodDelete,
+		Path:          "/api/admin/finance/income/{id}/receipts/{receipt_id}",
+		Summary:       "Remove one hand-linked receipt from an income (the transaction stays)",
+		Tags:          adminTags,
+		Security:      cookieAuthSecurity,
+		DefaultStatus: http.StatusNoContent,
+	}, func(ctx context.Context, in *incomeReceiptIDInput) (*struct{}, error) {
+		if _, err := requireAdmin(ctx); err != nil {
+			return nil, err
+		}
+		if h.deps.Ent == nil {
+			return nil, huma.Error503ServiceUnavailable("finance is not available")
+		}
+		n, err := h.deps.Ent.IncomeReceipt.Delete().
+			Where(
+				incomereceipt.IDEQ(in.ReceiptID),
+				incomereceipt.HasIncomeWith(recurringincome.IDEQ(in.ID)),
+			).
+			Exec(ctx)
+		if err != nil {
+			return nil, huma.Error500InternalServerError("failed to remove the receipt", err)
+		}
+		if n == 0 {
+			return nil, huma.Error404NotFound("receipt not found on that income")
+		}
+		return &struct{}{}, nil
 	})
 }
 
