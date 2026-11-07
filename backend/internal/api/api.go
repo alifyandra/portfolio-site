@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/redis/go-redis/v9"
@@ -62,6 +63,12 @@ type Deps struct {
 	FinanceSyncAckToken    string
 	FinanceBackfillYears   int
 	FinanceSyncOverlapDays int
+
+	// Now is the clock the recurring-bill handlers take "today" from; nil means time.Now.
+	// Tests pin it to an instant where the UTC and Melbourne dates differ, so the date
+	// boundary is exercised on every run instead of only when one lands in the first hours
+	// of a Melbourne day.
+	Now func() time.Time
 }
 
 // Handler holds dependencies and registers operations against a Huma API.

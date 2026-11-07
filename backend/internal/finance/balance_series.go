@@ -237,8 +237,14 @@ func BucketZone() *time.Location { return bucketLoc }
 // stored finance date is, so it keys straight into today's bucket. Callers that need a
 // default "to" bound use it rather than time.Now().UTC(), which is the previous local day
 // for the first ten hours of every Melbourne day.
-func LocalToday() time.Time {
-	n := time.Now().In(bucketLoc)
+func LocalToday() time.Time { return LocalDate(time.Now()) }
+
+// LocalDate is the bucket-zone calendar day containing the instant t, in the same
+// UTC-midnight form as LocalToday. It is LocalToday for a caller that holds its own clock
+// (an injected one, in tests), so "today" comes from one instant read in one zone instead
+// of a second read of the wall clock.
+func LocalDate(t time.Time) time.Time {
+	n := t.In(bucketLoc)
 	return time.Date(n.Year(), n.Month(), n.Day(), 0, 0, 0, 0, time.UTC)
 }
 

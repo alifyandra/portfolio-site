@@ -28,6 +28,19 @@ import (
 // get_net_worth returns a known value.
 func newMCPTestServer(t *testing.T) (http.Handler, *auth.Service, *ent.Client) {
 	t.Helper()
+	return newMCPTestServerAt(t, nil)
+}
+
+// boundaryNow is an instant where the UTC and Melbourne calendar days differ: 14:00 UTC on
+// 7 November 2026 is 01:00 AEDT on the 8th. Tests whose answer depends on "today" pin the
+// server clock here so every run crosses that boundary, instead of only the runs that land
+// in the first hours of a Melbourne day.
+var boundaryNow = time.Date(2026, 11, 7, 14, 0, 0, 0, time.UTC)
+
+// newMCPTestServerAt is newMCPTestServer with the server clock pinned to now (nil keeps
+// the wall clock).
+func newMCPTestServerAt(t *testing.T, now func() time.Time) (http.Handler, *auth.Service, *ent.Client) {
+	t.Helper()
 	dsn := "file:" + strings.ReplaceAll(t.Name(), "/", "_") + "?mode=memory&cache=shared&_pragma=foreign_keys(1)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -54,7 +67,7 @@ func newMCPTestServer(t *testing.T) (http.Handler, *auth.Service, *ent.Client) {
 		SaveX(ctx)
 
 	svc := auth.New(client, auth.Config{})
-	return Handler(Deps{Ent: client, Auth: svc}), svc, client
+	return Handler(Deps{Ent: client, Auth: svc, Now: now}), svc, client
 }
 
 // mintFinanceReadToken creates an owning user and a bearer token with the given scope.
@@ -237,12 +250,11 @@ func TestMCP_FullTranscript(t *testing.T) {
 // derived date, and an out-of-range status is a tool error (the enum is policed in Go, not
 // in the JSON schema).
 func TestMCP_ListRecurringBills(t *testing.T) {
-	h, svc, client := newMCPTestServer(t)
+	h, svc, client := newMCPTestServerAt(t, func() time.Time { return boundaryNow })
 	ctx := context.Background()
 	raw := mintToken(t, ctx, svc, client, []string{"finance.read"})
 
-	now := time.Now().UTC()
-	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	today := finance.LocalDate(boundaryNow) // the Melbourne day the tool measures from
 	client.RecurringBill.Create().SetName("Housing").SetExpectedAmount(600).
 		SetCadence("fortnightly").SetAnchorDate(today.AddDate(0, 0, 4)).SaveX(ctx)
 	client.RecurringBill.Create().SetName("Annual thing").SetExpectedAmount(240).
@@ -688,16 +700,14 @@ func TestMCP_BalanceHistory_DefaultsAndFanOut(t *testing.T) {
 // TestMCP_BalanceHistory_LedgerBasis: basis=ledger derives closes and per-bucket flows, and
 // carries source plus the series-level ledger metadata.
 func TestMCP_BalanceHistory_LedgerBasis(t *testing.T) {
-	h, svc, client := newMCPTestServer(t)
+	h, svc, client := newMCPTestServerAt(t, func() time.Time { return boundaryNow })
 	ctx := context.Background()
 	raw := mintToken(t, ctx, svc, client, []string{"finance.read"})
 	acc := client.Account.Query().OnlyX(ctx) // the seeded account
 
-	now := time.Now().UTC()
-	day := func(back int) time.Time {
-		d := now.AddDate(0, 0, -back)
-		return time.Date(d.Year(), d.Month(), d.Day(), 0, 0, 0, 0, time.UTC)
-	}
+	// Row days count back from the Melbourne day, which is where the tool's window ends.
+	today := finance.LocalDate(boundaryNow)
+	day := func(back int) time.Time { return today.AddDate(0, 0, -back) }
 	client.Transaction.Create().SetDedupHash("bh-1").SetPostedDate(day(2)).
 		SetAmount(-100).SetDescription("MERCHANT").SetBalanceAfter(900).SetAccountID(acc.ID).SaveX(ctx)
 	client.Transaction.Create().SetDedupHash("bh-2").SetPostedDate(day(1)).

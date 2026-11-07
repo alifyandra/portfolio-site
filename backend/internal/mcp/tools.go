@@ -387,7 +387,7 @@ func (s *server) callTool(ctx context.Context, name string, rawArgs json.RawMess
 		if err != nil {
 			return nil, err
 		}
-		fromT, toT := balanceWindow(from, to)
+		fromT, toT := balanceWindow(from, to, s.financeToday())
 		series, err := finance.BalanceSeries(ctx, s.deps.Ent, finance.BalanceSeriesFilter{
 			AccountID: a.AccountID,
 			From:      &fromT,
@@ -471,6 +471,7 @@ func (s *server) callTool(ctx context.Context, name string, rawArgs json.RawMess
 			Status:     status,
 			WithinDays: a.WithinDays,
 			AccountID:  a.AccountID,
+			Today:      s.financeToday(),
 		})
 		if err != nil {
 			return nil, err
@@ -936,12 +937,12 @@ func parseToolStep(s string) (finance.BalanceStep, error) {
 }
 
 // balanceWindow resolves the balance_history window from optional parsed bounds: `to`
-// defaults to today in Australia/Melbourne (not UTC, which is the previous local day for
-// the first ten hours of every Melbourne day), and `from` to 12 months before the effective
-// `to`, so a bare call means "the last 12 months". Both bounds are inclusive dates read at
-// bucket granularity.
-func balanceWindow(from, to *time.Time) (time.Time, time.Time) {
-	toT := finance.LocalToday()
+// defaults to today, the Australia/Melbourne day (not UTC, which is the previous local day
+// for the first ten hours of every Melbourne day), and `from` to 12 months before the
+// effective `to`, so a bare call means "the last 12 months". Both bounds are inclusive
+// dates read at bucket granularity.
+func balanceWindow(from, to *time.Time, today time.Time) (time.Time, time.Time) {
+	toT := today
 	if to != nil {
 		toT = *to
 	}
@@ -950,6 +951,16 @@ func balanceWindow(from, to *time.Time) (time.Time, time.Time) {
 		fromT = *from
 	}
 	return fromT, toT
+}
+
+// financeToday is the Melbourne calendar day at the server's clock, the "today" the bill
+// and balance tools measure from.
+func (s *server) financeToday() time.Time {
+	now := time.Now
+	if s.deps.Now != nil {
+		now = s.deps.Now
+	}
+	return finance.LocalDate(now())
 }
 
 func fmtRFC3339Ptr(t *time.Time) *string {
