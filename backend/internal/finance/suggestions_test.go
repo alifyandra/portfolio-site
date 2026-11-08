@@ -384,7 +384,7 @@ func itoaTest(n int) string { return strconv.Itoa(n) }
 
 // recentDay is a day about back days ago whose day of the month is at most the 28th, so
 // stepping it back whole months never overflows into the next month and the seeded run
-// stays a clean monthly one whatever day the test runs.
+// stays a clean monthly one whatever day today is pinned to.
 func recentDay(today time.Time, back int) time.Time {
 	d := today.AddDate(0, 0, -back)
 	if d.Day() > 28 {
@@ -399,18 +399,18 @@ func recentDay(today time.Time, back int) time.Time {
 func TestScanRecurrences_CreatesRefreshesAndRemembersDismissal(t *testing.T) {
 	client := newFinanceTestClient(t)
 	ctx := context.Background()
-	today := localToday()
+	today := day(2026, time.November, 8)
 	acc := seedAccount(t, ctx, client, "Everyday", account.ClassAsset, account.TypeEveryday)
 	seedMonthlyRun(t, ctx, client, acc, "zylo", recentDay(today, 3), 4, -15.99, "ZYLO STREAMING")
 
-	sum, err := ScanRecurrences(ctx, client, time.Time{})
+	sum, err := ScanRecurrences(ctx, client, today)
 	if err != nil {
 		t.Fatalf("scan: %v", err)
 	}
 	if sum.RunsFound != 1 || sum.Created != 1 {
 		t.Fatalf("first scan = %+v, want 1 run created", sum)
 	}
-	views, err := ListSuggestions(ctx, client, "pending", time.Time{})
+	views, err := ListSuggestions(ctx, client, "pending", today)
 	if err != nil || len(views) != 1 {
 		t.Fatalf("pending = %d (%v), want 1", len(views), err)
 	}
@@ -422,7 +422,7 @@ func TestScanRecurrences_CreatesRefreshesAndRemembersDismissal(t *testing.T) {
 		t.Error("evidence is not newest first")
 	}
 
-	sum, err = ScanRecurrences(ctx, client, time.Time{})
+	sum, err = ScanRecurrences(ctx, client, today)
 	if err != nil {
 		t.Fatalf("rescan: %v", err)
 	}
@@ -442,14 +442,14 @@ func TestScanRecurrences_CreatesRefreshesAndRemembersDismissal(t *testing.T) {
 	if err := DismissSuggestion(ctx, client, 9999); !ent.IsNotFound(err) {
 		t.Errorf("unknown dismiss = %v, want not found", err)
 	}
-	sum, err = ScanRecurrences(ctx, client, time.Time{})
+	sum, err = ScanRecurrences(ctx, client, today)
 	if err != nil {
 		t.Fatalf("scan after dismissal: %v", err)
 	}
 	if sum.Dismissed != 1 || sum.Created != 0 {
 		t.Errorf("scan after dismissal = %+v, want it remembered", sum)
 	}
-	if views, _ := ListSuggestions(ctx, client, "pending", time.Time{}); len(views) != 0 {
+	if views, _ := ListSuggestions(ctx, client, "pending", today); len(views) != 0 {
 		t.Errorf("pending after dismissal = %d, want 0", len(views))
 	}
 }
@@ -459,16 +459,16 @@ func TestScanRecurrences_CreatesRefreshesAndRemembersDismissal(t *testing.T) {
 func TestScanRecurrences_StoresGaps(t *testing.T) {
 	client := newFinanceTestClient(t)
 	ctx := context.Background()
-	today := localToday()
+	today := day(2026, time.November, 8)
 	acc := seedAccount(t, ctx, client, "Everyday", account.ClassAsset, account.TypeEveryday)
 	last := recentDay(today, 3)
 	for _, back := range []int{0, 1, 3, 4} {
 		seedTxn(t, ctx, client, acc, "pod-"+itoaTest(back), last.AddDate(0, -back, 0), -9.99, "PODCAST PLUS", "")
 	}
-	if _, err := ScanRecurrences(ctx, client, time.Time{}); err != nil {
+	if _, err := ScanRecurrences(ctx, client, today); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
-	views, err := ListSuggestions(ctx, client, "pending", time.Time{})
+	views, err := ListSuggestions(ctx, client, "pending", today)
 	if err != nil || len(views) != 1 {
 		t.Fatalf("pending = %d (%v), want 1", len(views), err)
 	}
@@ -483,16 +483,16 @@ func TestScanRecurrences_StoresGaps(t *testing.T) {
 func TestListSuggestions_NewestEvidenceOnly(t *testing.T) {
 	client := newFinanceTestClient(t)
 	ctx := context.Background()
-	today := localToday()
+	today := day(2026, time.November, 8)
 	acc := seedAccount(t, ctx, client, "Everyday", account.ClassAsset, account.TypeEveryday)
 	newest := today.AddDate(0, 0, -2)
 	for i := 0; i < 8; i++ {
 		seedTxn(t, ctx, client, acc, "tutor-"+itoaTest(i), newest.AddDate(0, 0, -7*i), -60, "TUTORING KOALA LEARNING", "")
 	}
-	if _, err := ScanRecurrences(ctx, client, time.Time{}); err != nil {
+	if _, err := ScanRecurrences(ctx, client, today); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
-	views, err := ListSuggestions(ctx, client, "pending", time.Time{})
+	views, err := ListSuggestions(ctx, client, "pending", today)
 	if err != nil || len(views) != 1 {
 		t.Fatalf("list = %d (%v), want 1", len(views), err)
 	}
@@ -506,14 +506,14 @@ func TestListSuggestions_NewestEvidenceOnly(t *testing.T) {
 			t.Errorf("list evidence[%d] = %+v, want the row posted %s", i, e, want.Format(dateLayoutTest))
 		}
 	}
-	full, err := GetSuggestion(ctx, client, v.ID, time.Time{})
+	full, err := GetSuggestion(ctx, client, v.ID, today)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
 	if full.EvidenceCount != 8 || len(full.Evidence) != 8 || !full.Evidence[7].PostedDate.Equal(newest.AddDate(0, 0, -49)) {
 		t.Errorf("detail = %d of %d, want all 8 newest first", len(full.Evidence), full.EvidenceCount)
 	}
-	if _, err := GetSuggestion(ctx, client, 9999, time.Time{}); !ent.IsNotFound(err) {
+	if _, err := GetSuggestion(ctx, client, 9999, today); !ent.IsNotFound(err) {
 		t.Errorf("get unknown = %v, want not found", err)
 	}
 }
@@ -524,7 +524,7 @@ func TestListSuggestions_NewestEvidenceOnly(t *testing.T) {
 func TestScanRecurrences_SkipsDeclaredRuns(t *testing.T) {
 	client := newFinanceTestClient(t)
 	ctx := context.Background()
-	today := localToday()
+	today := day(2026, time.November, 8)
 	acc := seedAccount(t, ctx, client, "Everyday", account.ClassAsset, account.TypeEveryday)
 	seedMonthlyRun(t, ctx, client, acc, "zylo", recentDay(today, 3), 4, -15.99, "ZYLO STREAMING")
 	rentDay := recentDay(today, 2)
@@ -536,7 +536,7 @@ func TestScanRecurrences_SkipsDeclaredRuns(t *testing.T) {
 	credit := client.Transaction.Query().Where(transaction.PostedDateEQ(rentDay), transaction.AmountGT(0)).OnlyX(ctx)
 	client.IncomeReceipt.Create().SetIncomeID(inc.ID).SetTransactionID(credit.ID).SetOccurrenceDate(rentDay).SaveX(ctx)
 
-	sum, err := ScanRecurrences(ctx, client, time.Time{})
+	sum, err := ScanRecurrences(ctx, client, today)
 	if err != nil {
 		t.Fatalf("scan: %v", err)
 	}
@@ -550,13 +550,13 @@ func TestScanRecurrences_SkipsDeclaredRuns(t *testing.T) {
 func TestScanRecurrences_CoverageOnWordBoundaries(t *testing.T) {
 	client := newFinanceTestClient(t)
 	ctx := context.Background()
-	today := localToday()
+	today := day(2026, time.November, 8)
 	acc := seedAccount(t, ctx, client, "Everyday", account.ClassAsset, account.TypeEveryday)
 	seedMonthlyRun(t, ctx, client, acc, "potato", recentDay(today, 2), 4, 500, "POTATO CO-OP")
 	seedIncome(t, ctx, client, "Tax", 500, recurringincome.CadenceMonthly, today, func(c *ent.RecurringIncomeCreate) {
 		c.SetMatchPattern("ato")
 	})
-	sum, err := ScanRecurrences(ctx, client, time.Time{})
+	sum, err := ScanRecurrences(ctx, client, today)
 	if err != nil {
 		t.Fatalf("scan: %v", err)
 	}
@@ -572,7 +572,7 @@ func TestScanRecurrences_CoverageOnWordBoundaries(t *testing.T) {
 func TestScanRecurrences_EndedDeclarationsStopCovering(t *testing.T) {
 	client := newFinanceTestClient(t)
 	ctx := context.Background()
-	today := localToday()
+	today := day(2026, time.November, 8)
 	acc := seedAccount(t, ctx, client, "Everyday", account.ClassAsset, account.TypeEveryday)
 	last := recentDay(today, 3)
 	seedMonthlyRun(t, ctx, client, acc, "zylo", last, 4, -15.99, "ZYLO STREAMING")
@@ -587,7 +587,7 @@ func TestScanRecurrences_EndedDeclarationsStopCovering(t *testing.T) {
 		c.SetMatchPattern("flexifit").SetStatus(recurringbill.StatusPaused)
 	})
 
-	sum, err := ScanRecurrences(ctx, client, time.Time{})
+	sum, err := ScanRecurrences(ctx, client, today)
 	if err != nil {
 		t.Fatalf("scan: %v", err)
 	}
@@ -600,7 +600,7 @@ func TestScanRecurrences_EndedDeclarationsStopCovering(t *testing.T) {
 
 	// Ending it later than the newest row (within the grace week) covers the run again.
 	client.RecurringBill.UpdateOne(ended).SetEndedOn(last.AddDate(0, 0, -5)).ExecX(ctx)
-	if sum, err := ScanRecurrences(ctx, client, time.Time{}); err != nil || sum.Declared != 2 || sum.Dropped != 1 {
+	if sum, err := ScanRecurrences(ctx, client, today); err != nil || sum.Declared != 2 || sum.Dropped != 1 {
 		t.Errorf("scan = %+v (%v), want both declared and the pending one dropped", sum, err)
 	}
 }
@@ -611,11 +611,11 @@ func TestScanRecurrences_EndedDeclarationsStopCovering(t *testing.T) {
 func TestScanRecurrences_ReopensAcceptedRunAfterItsDeclarationEnded(t *testing.T) {
 	client := newFinanceTestClient(t)
 	ctx := context.Background()
-	today := localToday()
+	today := day(2026, time.November, 8)
 	acc := seedAccount(t, ctx, client, "Everyday", account.ClassAsset, account.TypeEveryday)
 	last := recentDay(today, 3)
 	seedMonthlyRun(t, ctx, client, acc, "zylo", last, 4, -15.99, "ZYLO STREAMING")
-	if _, err := ScanRecurrences(ctx, client, time.Time{}); err != nil {
+	if _, err := ScanRecurrences(ctx, client, today); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
 	s := client.RecurrenceSuggestion.Query().OnlyX(ctx)
@@ -625,7 +625,7 @@ func TestScanRecurrences_ReopensAcceptedRunAfterItsDeclarationEnded(t *testing.T
 	}
 	client.RecurringBill.UpdateOneID(res.BillID).SetStatus(recurringbill.StatusEnded).SetEndedOn(last.AddDate(0, -2, 0)).ExecX(ctx)
 
-	sum, err := ScanRecurrences(ctx, client, time.Time{})
+	sum, err := ScanRecurrences(ctx, client, today)
 	if err != nil {
 		t.Fatalf("rescan: %v", err)
 	}
@@ -643,7 +643,7 @@ func TestScanRecurrences_ReopensAcceptedRunAfterItsDeclarationEnded(t *testing.T
 func TestScanRecurrences_DropsVanishedPending(t *testing.T) {
 	client := newFinanceTestClient(t)
 	ctx := context.Background()
-	today := localToday()
+	today := day(2026, time.November, 8)
 	stale := func(fp string, status recurrencesuggestion.Status) {
 		client.RecurrenceSuggestion.Create().
 			SetFingerprint(fp).SetKind(recurrencesuggestion.KindBill).SetCounterparty("d:gone").
@@ -653,7 +653,7 @@ func TestScanRecurrences_DropsVanishedPending(t *testing.T) {
 	stale("pending-gone", recurrencesuggestion.StatusPending)
 	stale("dismissed-gone", recurrencesuggestion.StatusDismissed)
 
-	sum, err := ScanRecurrences(ctx, client, time.Time{})
+	sum, err := ScanRecurrences(ctx, client, today)
 	if err != nil {
 		t.Fatalf("scan: %v", err)
 	}
@@ -673,7 +673,7 @@ func TestScanRecurrences_DropsVanishedPending(t *testing.T) {
 func TestScanRecurrences_ConcurrentInsertIsHarmless(t *testing.T) {
 	client := newFinanceTestClient(t)
 	ctx := context.Background()
-	today := localToday()
+	today := day(2026, time.November, 8)
 	acc := seedAccount(t, ctx, client, "Everyday", account.ClassAsset, account.TypeEveryday)
 	seedMonthlyRun(t, ctx, client, acc, "zylo", recentDay(today, 3), 4, -15.99, "ZYLO STREAMING")
 	fired := false
@@ -691,7 +691,7 @@ func TestScanRecurrences_ConcurrentInsertIsHarmless(t *testing.T) {
 			return next.Mutate(ctx, m)
 		})
 	})
-	if _, err := ScanRecurrences(ctx, client, time.Time{}); err != nil {
+	if _, err := ScanRecurrences(ctx, client, today); err != nil {
 		t.Fatalf("scan racing another scan's insert = %v, want no error", err)
 	}
 	rows := client.RecurrenceSuggestion.Query().WithEvidence().AllX(ctx)
@@ -706,7 +706,7 @@ func TestScanRecurrences_ConcurrentInsertIsHarmless(t *testing.T) {
 func TestScanRecurrences_ConcurrentDropIsHarmless(t *testing.T) {
 	client := newFinanceTestClient(t)
 	ctx := context.Background()
-	today := localToday()
+	today := day(2026, time.November, 8)
 	stale := client.RecurrenceSuggestion.Create().
 		SetFingerprint("gone").SetKind(recurrencesuggestion.KindBill).SetCounterparty("gone").
 		SetLabel("Gone").SetCadence(recurrencesuggestion.CadenceMonthly).SetExpectedAmount(5).
@@ -725,7 +725,7 @@ func TestScanRecurrences_ConcurrentDropIsHarmless(t *testing.T) {
 			return next.Mutate(ctx, m)
 		})
 	})
-	if _, err := ScanRecurrences(ctx, client, time.Time{}); err != nil {
+	if _, err := ScanRecurrences(ctx, client, today); err != nil {
 		t.Fatalf("scan racing another scan's drop = %v, want no error", err)
 	}
 	if n := client.RecurrenceSuggestion.Query().CountX(ctx); n != 0 {
@@ -739,10 +739,10 @@ func TestScanRecurrences_ConcurrentDropIsHarmless(t *testing.T) {
 func TestAcceptSuggestion_Bill(t *testing.T) {
 	client := newFinanceTestClient(t)
 	ctx := context.Background()
-	today := localToday()
+	today := day(2026, time.November, 8)
 	acc := seedAccount(t, ctx, client, "Everyday", account.ClassAsset, account.TypeEveryday)
 	seedMonthlyRun(t, ctx, client, acc, "zylo", recentDay(today, 3), 4, -15.99, "ZYLO STREAMING")
-	if _, err := ScanRecurrences(ctx, client, time.Time{}); err != nil {
+	if _, err := ScanRecurrences(ctx, client, today); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
 	s := client.RecurrenceSuggestion.Query().OnlyX(ctx)
@@ -775,7 +775,7 @@ func TestAcceptSuggestion_Bill(t *testing.T) {
 	if _, err := AcceptSuggestion(ctx, client, 9999, "", ""); !ent.IsNotFound(err) {
 		t.Errorf("unknown accept = %v, want not found", err)
 	}
-	sum, err := ScanRecurrences(ctx, client, time.Time{})
+	sum, err := ScanRecurrences(ctx, client, today)
 	if err != nil || sum.Created != 0 || sum.Declared != 1 {
 		t.Errorf("scan after accept = %+v (%v), want the run left as declared", sum, err)
 	}
@@ -788,10 +788,10 @@ func TestAcceptSuggestion_Bill(t *testing.T) {
 func TestAcceptSuggestion_LosesARaceCleanly(t *testing.T) {
 	client := newFinanceTestClient(t)
 	ctx := context.Background()
-	today := localToday()
+	today := day(2026, time.November, 8)
 	acc := seedAccount(t, ctx, client, "Everyday", account.ClassAsset, account.TypeEveryday)
 	seedMonthlyRun(t, ctx, client, acc, "zylo", recentDay(today, 3), 4, -15.99, "ZYLO STREAMING")
-	if _, err := ScanRecurrences(ctx, client, time.Time{}); err != nil {
+	if _, err := ScanRecurrences(ctx, client, today); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
 	s := client.RecurrenceSuggestion.Query().OnlyX(ctx)
@@ -823,10 +823,10 @@ func TestAcceptSuggestion_LosesARaceCleanly(t *testing.T) {
 func TestAcceptSuggestion_TwoConcurrentAccepts(t *testing.T) {
 	client := newFinanceTestClient(t)
 	ctx := context.Background()
-	today := localToday()
+	today := day(2026, time.November, 8)
 	acc := seedAccount(t, ctx, client, "Everyday", account.ClassAsset, account.TypeEveryday)
 	seedMonthlyRun(t, ctx, client, acc, "zylo", recentDay(today, 3), 4, -15.99, "ZYLO STREAMING")
-	if _, err := ScanRecurrences(ctx, client, time.Time{}); err != nil {
+	if _, err := ScanRecurrences(ctx, client, today); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
 	s := client.RecurrenceSuggestion.Query().OnlyX(ctx)
@@ -921,13 +921,13 @@ func newLoggedFinanceTestClient(t *testing.T) (*ent.Client, *stmtLog) {
 func TestAcceptSuggestion_OneLinkedLookup(t *testing.T) {
 	client, log := newLoggedFinanceTestClient(t)
 	ctx := context.Background()
-	today := localToday()
+	today := day(2026, time.November, 8)
 	acc := seedAccount(t, ctx, client, "Everyday", account.ClassAsset, account.TypeEveryday)
 	seedMonthlyRun(t, ctx, client, acc, "zylo", recentDay(today, 3), 6, -15.99, "ZYLO STREAMING")
 	for i := 0; i < 6; i++ {
 		seedTxn(t, ctx, client, acc, "pay-"+itoaTest(i), today.AddDate(0, 0, -2-14*i), 2450, "Salary ACME WIDGETS", "")
 	}
-	if _, err := ScanRecurrences(ctx, client, time.Time{}); err != nil {
+	if _, err := ScanRecurrences(ctx, client, today); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
 	for _, s := range client.RecurrenceSuggestion.Query().AllX(ctx) {
@@ -951,14 +951,14 @@ func TestAcceptSuggestion_OneLinkedLookup(t *testing.T) {
 func TestAcceptSuggestion_IncomeLinksEarlyPay(t *testing.T) {
 	client := newFinanceTestClient(t)
 	ctx := context.Background()
-	today := localToday()
+	today := day(2026, time.November, 8)
 	acc := seedAccount(t, ctx, client, "Everyday", account.ClassAsset, account.TypeEveryday)
 	// Fortnightly, newest two days ago; the one before it posted two days early.
 	payday := today.AddDate(0, 0, -2)
 	for i, offset := range []int{0, -16, -28, -42} {
 		seedTxn(t, ctx, client, acc, "pay-"+itoaTest(i), payday.AddDate(0, 0, offset), 2450, "Salary ACME WIDGETS", "")
 	}
-	if _, err := ScanRecurrences(ctx, client, time.Time{}); err != nil {
+	if _, err := ScanRecurrences(ctx, client, today); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
 	s := client.RecurrenceSuggestion.Query().OnlyX(ctx)
@@ -992,10 +992,10 @@ func TestAcceptSuggestion_IncomeLinksEarlyPay(t *testing.T) {
 func TestAcceptSuggestion_PatternIsTheOwners(t *testing.T) {
 	client := newFinanceTestClient(t)
 	ctx := context.Background()
-	today := localToday()
+	today := day(2026, time.November, 8)
 	acc := seedAccount(t, ctx, client, "Everyday", account.ClassAsset, account.TypeEveryday)
 	seedMonthlyRun(t, ctx, client, acc, "zylo", recentDay(today, 3), 4, -15.99, "ZYLO STREAMING")
-	if _, err := ScanRecurrences(ctx, client, time.Time{}); err != nil {
+	if _, err := ScanRecurrences(ctx, client, today); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
 	s := client.RecurrenceSuggestion.Query().OnlyX(ctx)
@@ -1016,11 +1016,11 @@ func TestAcceptSuggestion_PatternIsTheOwners(t *testing.T) {
 func TestAcceptSuggestion_NameTaken(t *testing.T) {
 	client := newFinanceTestClient(t)
 	ctx := context.Background()
-	today := localToday()
+	today := day(2026, time.November, 8)
 	acc := seedAccount(t, ctx, client, "Everyday", account.ClassAsset, account.TypeEveryday)
 	seedMonthlyRun(t, ctx, client, acc, "zylo", recentDay(today, 3), 4, -15.99, "ZYLO STREAMING")
 	seedBill(t, ctx, client, "Streaming", 30, recurringbill.CadenceAnnual, today)
-	if _, err := ScanRecurrences(ctx, client, time.Time{}); err != nil {
+	if _, err := ScanRecurrences(ctx, client, today); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
 	s := client.RecurrenceSuggestion.Query().OnlyX(ctx)
