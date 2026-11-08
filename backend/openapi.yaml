@@ -1571,7 +1571,7 @@ components:
             - array
             - "null"
         events:
-          description: Every flow applied, oldest first
+          description: Every flow applied, oldest first, including any between a stale snapshot and today that the first point already carries
           items:
             $ref: "#/components/schemas/ProjectionEventDTO"
           type:
@@ -3031,7 +3031,7 @@ components:
           description: Why the line is empty or flat; empty otherwise
           type: string
         points:
-          description: From the snapshot's bucket through the horizon end's bucket
+          description: From today's bucket (the snapshot's, when that is later) through the horizon end's bucket. Flows between an older snapshot and today are folded into the first point
           items:
             $ref: "#/components/schemas/ProjectionPointDTO"
           type:
@@ -3142,7 +3142,7 @@ components:
           description: Why the line is empty; empty otherwise
           type: string
         points:
-          description: From the freshest snapshot's bucket through the horizon end's bucket
+          description: From today's bucket (the freshest snapshot's, when that is later) through the horizon end's bucket. Flows between an older snapshot and today are folded into the first point
           items:
             $ref: "#/components/schemas/ProjectionPointDTO"
           type:
