@@ -19,6 +19,7 @@ import (
 	"github.com/alifyandra/portfolio-site/backend/ent/account"
 	"github.com/alifyandra/portfolio-site/backend/ent/user"
 	"github.com/alifyandra/portfolio-site/backend/internal/auth"
+	"github.com/alifyandra/portfolio-site/backend/internal/finance"
 )
 
 // Recurring Income endpoint tests (ADR 0019). The read lives under /api/finance/* and
@@ -43,22 +44,18 @@ func newFinanceIncomeTestAPI(t *testing.T) (humatest.TestAPI, *ent.Client) {
 	svc := auth.New(client, auth.Config{})
 	_, api := humatest.New(t)
 	api.UseMiddleware(svc.Middleware)
-	h := New(Deps{Auth: svc, Ent: client})
+	h := New(Deps{Auth: svc, Ent: client, Now: func() time.Time { return boundaryNow }})
 	h.registerFinanceIncome(api)
 	return api, client
 }
 
 // melbourneToday is the owner's calendar day as a UTC-midnight date, the clock the
-// derived pay dates are measured against. A UTC "today" would be a day behind for the
-// first hours of every Australian morning.
+// derived pay dates are measured against. The handler's clock is pinned to boundaryNow
+// (see finance_bills_test.go), where the UTC date is a day behind, so this is the
+// Melbourne day there: 2026-11-08.
 func melbourneToday(t *testing.T) time.Time {
 	t.Helper()
-	loc, err := time.LoadLocation("Australia/Melbourne")
-	if err != nil {
-		t.Fatalf("load tz: %v", err)
-	}
-	n := time.Now().In(loc)
-	return time.Date(n.Year(), n.Month(), n.Day(), 0, 0, 0, 0, time.UTC)
+	return finance.LocalDate(boundaryNow)
 }
 
 // TestFinanceIncome_RequiresAdmin: anonymous is 401 and a member is 403 on every route.

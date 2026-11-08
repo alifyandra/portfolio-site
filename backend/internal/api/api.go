@@ -64,7 +64,8 @@ type Deps struct {
 	FinanceBackfillYears   int
 	FinanceSyncOverlapDays int
 
-	// Now is the clock the recurring-bill handlers take "today" from; nil means time.Now.
+	// Now is the clock the finance handlers (bills, income) take "today" from; nil means
+	// time.Now.
 	// Tests pin it to an instant where the UTC and Melbourne dates differ, so the date
 	// boundary is exercised on every run instead of only when one lands in the first hours
 	// of a Melbourne day.

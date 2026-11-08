@@ -220,6 +220,7 @@ func (h *Handler) registerFinanceIncome(api huma.API) {
 			Status:     in.Status,
 			WithinDays: in.WithinDays,
 			AccountID:  in.AccountID,
+			Today:      h.financeToday(),
 		})
 		if err != nil {
 			return nil, huma.Error500InternalServerError("failed to load recurring income", err)
@@ -553,7 +554,7 @@ func (h *Handler) registerFinanceIncomeReceiptDelete(api huma.API) {
 // incomeResponse reloads an income through the shared read service after a write, so a
 // create or update answers with the same derived fields the list reports.
 func (h *Handler) incomeResponse(ctx context.Context, id int) (*financeIncomeOutput, error) {
-	incomes, _, err := finance.ListRecurringIncome(ctx, h.deps.Ent, finance.IncomeFilter{Status: "all"})
+	incomes, _, err := finance.ListRecurringIncome(ctx, h.deps.Ent, finance.IncomeFilter{Status: "all", Today: h.financeToday()})
 	if err != nil {
 		return nil, huma.Error500InternalServerError("failed to load the recurring income", err)
 	}

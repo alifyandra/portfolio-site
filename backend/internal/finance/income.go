@@ -70,10 +70,15 @@ var ErrWrongAccount = errors.New("finance: that transaction was posted to a diff
 // or "" / "all" for every status. WithinDays > 0 keeps only incomes whose next pay day
 // falls inside that many days from today. AccountID > 0 keeps only incomes paid into
 // that account, which EXCLUDES incomes with no account set.
+//
+// Today is the calendar day the derived figures (next_expected, days_until, the totals'
+// ended_on cut) are measured from, in BillFilter.Today's form; zero means the current
+// Melbourne day.
 type IncomeFilter struct {
 	Status     string
 	WithinDays int
 	AccountID  int
+	Today      time.Time
 }
 
 // IncomeView is one recurring income's stored columns plus the part derived on read.
@@ -149,7 +154,10 @@ func ListRecurringIncome(ctx context.Context, client *ent.Client, f IncomeFilter
 		return nil, IncomeTotals{}, err
 	}
 
-	today := localToday()
+	today := f.Today
+	if today.IsZero() {
+		today = localToday()
+	}
 	views := make([]IncomeView, 0, len(incomes))
 	for _, inc := range incomes {
 		v, err := incomeView(ctx, client, inc, today)
