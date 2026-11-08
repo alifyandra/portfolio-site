@@ -401,9 +401,10 @@ A forward [Balance Series] under one stated premise: **nothing changes**. It sta
 each [Financial Account]'s latest [Balance Snapshot] and walks forward applying only
 what the owner has declared: every occurrence in the horizon of each *active*
 [Recurring Bill] and [Recurring Income], and optionally each *wanted* [Wishlist Item]
-that carries both a cost and a deadline. Paused or ended declarations and bought or
-abandoned wishlist items are retained but feed nothing: a bought item is already in
-the starting balance. An **investment** account is carried flat, since nothing declared moves it.
+that carries both a cost and a deadline. Paused declarations are retained but feed
+nothing, ended ones feed up to `ended_on` (and nothing when they carry none), and bought
+or abandoned wishlist items feed nothing: a bought item is already in the starting
+balance. An **investment** account is carried flat, since nothing declared moves it.
 Net worth is the sum. A Projection is an extrapolation of declarations, never a
 forecast: it is only as complete as what has been declared, and it is wrong the day
 something changes. Every projected point is marked as such so it can never be read as
