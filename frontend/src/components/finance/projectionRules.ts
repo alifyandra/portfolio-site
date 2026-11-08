@@ -16,10 +16,11 @@ export interface DatedPoint {
 
 /**
  * The projected points that continue a history line: only those strictly after the
- * last history point. The projection opens on the snapshot's own bucket, which the
- * history already plots as a reading, so drawing it again would put two values on
- * one x. Its close is not lost by dropping it: a balance is a level, so the next
- * projected bucket already carries every flow before it.
+ * last history point. The projection opens on today's bucket (the snapshot's own,
+ * when that is later), which the history already plots as a reading or a carried
+ * close, so drawing it again would put two values on one x. Its close is not lost by
+ * dropping it: a balance is a level, so the next projected bucket already carries
+ * every flow before it.
  */
 export function continuation<T extends DatedPoint>(
   history: readonly DatedPoint[],
@@ -51,6 +52,7 @@ const REASONS: Record<string, string> = {
   investment_account: 'on an investment account',
   no_snapshot: 'on an account with no reading',
   currency_mismatch: 'in another currency',
+  past_deadline: 'past its deadline',
 };
 
 /**

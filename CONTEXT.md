@@ -381,13 +381,45 @@ the same cadence, anchor date, expected amount and optional [Financial Account] 
 signed bill because a bill is a commitment and income is not; the two share a shape,
 not a meaning. Like a bill it is a declaration: the ledger shows what arrived, the
 declaration says what is expected and when. Each cycle links to the [Posted
-Transaction] that paid it the way a [Bill Payment] does, so "is this credit regular?"
-is answered by the link, never by a flag on the transaction.
+Transaction] that paid it through an [Income Receipt], the way a [Bill Payment] does for
+a bill, so "is this credit regular?" is answered by the link, never by a flag on the
+transaction.
+
+### Income Receipt
+The link between one cycle of a [Recurring Income] and the [Posted Transaction] that
+paid it: the credit-side twin of a [Bill Payment]. It is identified by the cycle's
+derived pay date, not the posted date, and carries no amount, for the same reason a Bill
+Payment carries none. One cycle is received at most once, and one credit settles at most
+one receipt across **every** income, since a credit is one payment. The row must be a
+credit, on the income's account when it names one, and its cycle must fall on or after
+the anchor, not after `ended_on`, and no more than a week after the credit posted: pay
+due on a weekend or a holiday lands the business day before, so a credit can settle a
+cycle that is still ahead. A receipt records who made it (**manual** or **auto**): the
+owner by hand, [Income Matching], or accepting a [Recurrence Suggestion], whose
+[Evidence] becomes the new income's history. A settled cycle is never relinked by the
+pass, whoever settled it. A receipt that posted on or before its account's latest
+[Balance Snapshot] tells the [Projection] the cycle is already in that reading.
+
+### Income Matching
+The automatic pass that creates [Income Receipt]s, the credit-side sibling of the pass
+that creates [Bill Payment]s. It runs after each [Finance Ingest] commits (bounded to
+the ingested window) and on demand over the whole ledger, and it is arithmetic on text,
+amounts and dates, with no LLM. Each active or ended [Recurring Income] with an
+owner-typed match pattern has its unsettled pay dates (up to about a week past today,
+and never past `ended_on`) tried against credits that contain the pattern on word
+boundaries in the description or merchant, ignoring case, sit on the income's account
+when it names one, are within 10% of the expected amount, and posted from 7 days before
+to 5 days after the pay date. A move between the owner's own accounts and a refund,
+reversal or chargeback are never candidates. Credits are shared out across all incomes
+at once: each goes to the income it fits best (fewest cents off, then nearest pay date),
+a tie is left for a hand link rather than guessed, and within an income each cycle takes
+its nearest credit. An income with no pattern is linked by hand only. Unlike a bill, the
+tolerance and window are fixed rules, not per-declaration settings.
 
 ### Recurrence Suggestion
 A proposal, derived from history, that a run of [Posted Transaction]s looks like one
-[Recurring Bill] or [Recurring Income]: the same counterparty, a near-constant amount
-and a near-constant interval, with the evidence attached. It is surfaced to the owner
+[Recurring Bill] or [Recurring Income]: the same [Counterparty], a near-constant amount
+and a near-constant interval, with the [Evidence] attached. It is surfaced to the owner
 to accept or dismiss, the way a bank app offers "we noticed a regular payment". The
 detection pass only ever **suggests**; it never creates a declaration on its own, for
 the same reason the ingest never writes an account's description: declarations are
@@ -396,18 +428,66 @@ dismissing one is remembered, so the same pattern is not offered again. A Sugges
 is not a declaration and feeds nothing, not the [Projection], not the dashboard
 totals, until accepted.
 
+### Counterparty
+Who a run of [Posted Transaction]s pays or is paid by, as the [Recurrence Suggestion]
+pass reduces it to group rows: a normalised key, not the text as the bank printed it. It
+is the parsed merchant when the bank gave one, else the description cut down to its
+distinctive words, in lowercase, with digits, punctuation, month names, single letters,
+the bank's own vocabulary ("direct credit", "transfer to") and trailing place names
+removed, so a varying reference number or a "RENT MARCH" narrative does not split one
+payee and the payment channel does not join two. A row with no merchant whose name (the
+words before its first number) is a merchant parsed on the same account takes that
+merchant's key. A row with nothing distinctive left has no Counterparty and is never
+grouped. With the kind, the account and the cadence it is the identity of "the same run"
+across scans, which is how a dismissal stays remembered. It is internal to the pass: the
+owner sees the suggested label and match pattern, never the key.
+
+### Evidence
+The [Posted Transaction]s attached to a [Recurrence Suggestion]: the run that justifies
+it. Every row is on one account, within 10% of the run's median magnitude (which becomes
+the suggested expected amount), and spaced to fit the cadence, with at most one cycle
+skipped at a time. Each scan replaces a pending suggestion's Evidence with the run as it
+now stands. Accepting links each row to its nearest cycle as the new declaration's [Bill
+Payment] or [Income Receipt] (method **auto**), under the rules a hand link obeys; a row
+already linked elsewhere, or one that settles no cycle those rules allow, is skipped and
+counted, not an error. Evidence is a link to the ledger, never a copy of it.
+
 ### Projection
 A forward [Balance Series] under one stated premise: **nothing changes**. It starts from
 each [Financial Account]'s latest [Balance Snapshot] and walks forward applying only
 what the owner has declared: every occurrence in the horizon of each *active*
 [Recurring Bill] and [Recurring Income], and optionally each *wanted* [Wishlist Item]
-that carries both a cost and a deadline. Paused or ended declarations and bought or
-abandoned wishlist items are retained but feed nothing: a bought item is already in
-the starting balance. An **investment** account is carried flat, since nothing declared moves it.
+that carries both a cost and a deadline. Paused declarations are retained but feed
+nothing, ended ones feed up to `ended_on` (and nothing when they carry none), and bought
+or abandoned wishlist items feed nothing: a bought item is already in the starting
+balance. An **investment** account is carried flat, since nothing declared moves it.
 Net worth is the sum. A Projection is an extrapolation of declarations, never a
 forecast: it is only as complete as what has been declared, and it is wrong the day
 something changes. Every projected point is marked as such so it can never be read as
 a reading. Contrast with the historical [Balance Series], which reports what was.
+
+### Projection Event
+One declared flow the [Projection] applied: its date (a cycle's derived due or pay date,
+or a wishlist deadline), its kind (bill, income or wishlist), the declaration it came
+from, and a signed amount, money out negative. It names the [Financial Account] it
+moves, or none when it moves net worth only. Events are why a projected line moves: a
+line's starting reading plus its events is its last close. A cycle whose payment posted
+on or before its account's reading is not an event, since the reading already has it; a
+cycle between a stale reading and today is one, and the line's first point already
+carries it. An event is not a [Posted Transaction] and is never stored: it is recomputed
+on every request.
+
+### Projection Exclusion
+A declaration the [Projection] left out, named with its reason, so a projection that is
+only as complete as what was declared says what it skipped rather than dropping it
+silently. The reasons: **paused**; **investment_account** (it names an investment
+account, which is carried flat); **no_snapshot** (its account has no [Balance Snapshot]
+to start from); **currency_mismatch** (its currency differs from its account's, or from
+net worth's when it has no account); **past_deadline** (a wanted [Wishlist Item] due on
+or before the freshest reading's day). Not everything that feeds nothing is an
+Exclusion: an ended declaration with no `ended_on`, a bought or abandoned item, an item
+missing a cost or a deadline, and the whole wishlist when it was not asked for are left
+out without one.
 
 ## Naming conventions
 

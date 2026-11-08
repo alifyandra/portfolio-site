@@ -288,9 +288,14 @@ func TestProjection_Walk(t *testing.T) {
 			},
 			wantEnd: map[string]float64{"Everyday": 1000, "Saver": 350, "": 1350},
 			check: func(t *testing.T, v ProjectionView) {
+				// The stale line opens on today, not on its reading's day, with the cycle
+				// between the two already folded into its first close.
 				saver := seriesByName(t, v, "Saver")
-				if !saver.Points[0].AsOf.Equal(mel(2026, time.November, 3, 0)) {
-					t.Errorf("saver starts %v, want its own reading's day", saver.Points[0].AsOf)
+				if !saver.Points[0].AsOf.Equal(mel(2026, time.November, 8, 0)) || !near(saver.Points[0].Balance, 470) {
+					t.Errorf("saver opens %v at %v, want 8 Nov at 470", saver.Points[0].AsOf, saver.Points[0].Balance)
+				}
+				if saver.Start == nil || *saver.Start != 500 {
+					t.Errorf("saver start = %v, want its reading 500", saver.Start)
 				}
 				// Net worth opens at the freshest reading's day and already carries the
 				// stale account's walk up to it.
@@ -420,6 +425,11 @@ func TestProjection_Walk(t *testing.T) {
 				"2026-11-20 wishlist Glasses -300",
 			},
 			wantEnd: map[string]float64{"Everyday": 1000, "": 700},
+			// Due before the reading, or on its day, is never applied, and is said so.
+			wantExcluded: []string{
+				"wishlist Due today past_deadline",
+				"wishlist Overdue want past_deadline",
+			},
 		},
 		{
 			name:    "the wishlist is left out unless asked for",
@@ -466,7 +476,8 @@ func TestProjection_Walk(t *testing.T) {
 }
 
 // seedWishlistFixture seeds one item the projection takes (wanted, priced, dated inside the
-// horizon) beside one of each kind it must not take.
+// horizon) beside one of each kind it must not take: two of those are wanted and priced but
+// due on or before the reading's day, which the projection reports as past their deadline.
 func seedWishlistFixture(t *testing.T, ctx context.Context, c *ent.Client, _ projFixture) {
 	t.Helper()
 	item := func(name string, amount *float64, deadline *time.Time, status wishlistitem.Status) {
@@ -480,6 +491,70 @@ func seedWishlistFixture(t *testing.T, ctx context.Context, c *ent.Client, _ pro
 	item("Bike", cost(900), date(2026, time.November, 22), wishlistitem.StatusBought)
 	item("Chair", cost(250), date(2027, time.June, 1), wishlistitem.StatusWanted)
 	item("Overdue want", cost(80), date(2026, time.November, 1), wishlistitem.StatusWanted)
+	item("Due today", cost(50), date(2026, time.November, 8), wishlistitem.StatusWanted)
+}
+
+// TestProjection_StaleReadingIsBounded: a reading 400 days old still opens its line on
+// today, so the point count is set by the horizon alone. The flows since the reading still
+// apply (and are still listed), folded into the opening close, so the line ends where the
+// unclamped walk did: the reading plus every listed flow. With no fresher reading anywhere,
+// net worth opens on today too, and an unassigned flow since the reading is folded the
+// same way.
+func TestProjection_StaleReadingIsBounded(t *testing.T) {
+	ctx := context.Background()
+	client := newFinanceTestClient(t)
+	dormant := seedAccount(t, ctx, client, "Dormant", account.ClassAsset, account.TypeSavings)
+	seedSnapshot(t, ctx, client, dormant, 500, mel(2025, time.October, 4, 9))
+	seedBill(t, ctx, client, "Fee", 10, recurringbill.CadenceMonthly, utcDay(2025, time.October, 15), onAccount(dormant))
+	seedIncome(t, ctx, client, "Gift", 100, recurringincome.CadenceMonthly, utcDay(2025, time.October, 20))
+
+	const horizon = 28
+	v, err := Projection(ctx, client, ProjectionFilter{HorizonDays: horizon, Now: projNow})
+	if err != nil {
+		t.Fatalf("Projection: %v", err)
+	}
+
+	// 15 Oct 2025 through 15 Nov 2026 for the fee, 20 Oct 2025 through 20 Nov 2026 for the
+	// gift: 14 cycles each, 13 of them before today.
+	if len(v.Events) != 28 {
+		t.Fatalf("events = %d, want 28: every cycle since the reading still applies", len(v.Events))
+	}
+	var feeSum, allSum float64
+	for _, e := range v.Events {
+		allSum += e.Amount
+		if e.AccountID == dormant.ID {
+			feeSum += e.Amount
+		}
+	}
+
+	for _, tc := range []struct {
+		name               string
+		s                  ProjectedSeries
+		start, open, close float64
+	}{
+		{"Dormant", seriesByName(t, v, "Dormant"), 500, 370, 360},
+		{"net worth", v.NetWorth, 500, 1670, 1760},
+	} {
+		if len(tc.s.Points) != horizon+1 {
+			t.Errorf("%s: points = %d, want %d (today through the horizon end), not one per day since the reading", tc.name, len(tc.s.Points), horizon+1)
+			continue
+		}
+		if first := tc.s.Points[0]; !first.AsOf.Equal(mel(2026, time.November, 8, 0)) || !near(first.Balance, tc.open) {
+			t.Errorf("%s opens %v at %v, want 8 Nov at %v", tc.name, first.AsOf, first.Balance, tc.open)
+		}
+		if got := lastClose(t, tc.s); !near(got, tc.close) {
+			t.Errorf("%s closes at %v, want %v", tc.name, got, tc.close)
+		}
+		if tc.s.Start == nil || *tc.s.Start != tc.start {
+			t.Errorf("%s start = %v, want the reading %v", tc.name, tc.s.Start, tc.start)
+		}
+	}
+	if got := lastClose(t, seriesByName(t, v, "Dormant")); !near(got, 500+feeSum) {
+		t.Errorf("Dormant closes at %v, want the reading plus its listed flows, %v", got, 500+feeSum)
+	}
+	if got := lastClose(t, v.NetWorth); !near(got, 500+allSum) {
+		t.Errorf("net worth closes at %v, want the reading plus every listed flow, %v", got, 500+allSum)
+	}
 }
 
 // TestProjection_MelbourneDayWithPinnedClock pins the clock at 01:00 AEDT on the 8th,

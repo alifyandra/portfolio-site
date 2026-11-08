@@ -134,6 +134,10 @@ export function BalanceHistorySection() {
   const projected = continuation(points, projectedLine?.points ?? []);
   const netWorthEnd =
     horizon > 0 ? projection?.net_worth.points?.at(-1) : undefined;
+  // A point's as_of is its bucket START, so the last one names the start of the
+  // final week or month. The projection runs to horizon_end, which is the date a
+  // projected figure is "by".
+  const horizonEnd = horizon > 0 ? projection?.horizon_end : undefined;
 
   // Series-level flags: one caption line under the chart rather than more ink on
   // the plot. drift_max is emitted under ledger even when it is 0, so the check
@@ -154,8 +158,8 @@ export function BalanceHistorySection() {
       ? 'Dashed grey: projected from declared bills and income only'
       : undefined,
     projectedLine?.note || undefined,
-    netWorthEnd
-      ? `Net worth projected ${money(netWorthEnd.balance)} by ${formatDate(netWorthEnd.as_of)}`
+    netWorthEnd && horizonEnd
+      ? `Net worth projected ${money(netWorthEnd.balance)} by ${formatDate(horizonEnd)}`
       : undefined,
     horizon > 0 ? exclusionSummary(projection?.excluded ?? []) : undefined,
   ]
@@ -299,7 +303,12 @@ export function BalanceHistorySection() {
         </p>
       ) : (
         <div>
-          <BalanceChart points={points} basis={basis} projected={projected} />
+          <BalanceChart
+            points={points}
+            basis={basis}
+            projected={projected}
+            horizonEnd={horizonEnd}
+          />
           {caption !== '' && (
             <p className="mt-2 text-xs text-slate-500">{caption}</p>
           )}

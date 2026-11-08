@@ -39,13 +39,20 @@ import (
 //     declaration naming one is left out rather than moving it.
 //   - A declaration with no account moves net worth only. Net worth is the sum of every
 //     account's line plus those unassigned flows.
+//   - A wishlist item is one flow on its deadline, moving net worth only. One due on or
+//     before the freshest reading's day is reported as past_deadline, not applied.
+//   - Every line opens at today's bucket, or at its reading's bucket when that is later. A
+//     flow between a stale reading and today still applies and is still listed as an
+//     event, but it is folded into the opening close rather than given a point of its own,
+//     so a reading a year old does not add a year of points.
 //
 // Buckets use the Balance Series grammar exactly (bucketStart / nextBucketStart: local
 // Melbourne day, Monday week, 1st-of-month), and a bucket's value is its close. Nothing
 // here rounds money; the API rounds at its DTO boundary.
 
 // Horizon bounds for a projection, in days from today. The cap keeps a weekly declaration
-// to about a hundred occurrences and a daily series to a few hundred points.
+// to about a hundred occurrences ahead of today and a daily series to a few hundred
+// points, however stale a reading is, since no line opens before today's bucket.
 const (
 	DefaultProjectionHorizonDays = 90
 	MaxProjectionHorizonDays     = 730
@@ -66,6 +73,10 @@ const (
 	ExcludedInvestment       = "investment_account"
 	ExcludedNoSnapshot       = "no_snapshot"
 	ExcludedCurrencyMismatch = "currency_mismatch"
+	// ExcludedPastDeadline is a wanted wishlist item whose deadline falls on or before the
+	// freshest reading's day, where net worth's walk starts: it is overdue or already due,
+	// and the premise does not guess when it will be bought.
+	ExcludedPastDeadline = "past_deadline"
 )
 
 // ProjectionFilter shapes one projection. HorizonDays counts forward from today (zero or
@@ -246,7 +257,7 @@ func Projection(ctx context.Context, client *ent.Client, f ProjectionFilter) (Pr
 		return v, nil
 	}
 
-	flows, excluded, err := loadProjectedFlows(ctx, client, f.IncludeWishlist, anchors, currency)
+	flows, excluded, err := loadProjectedFlows(ctx, client, f.IncludeWishlist, newest.day, anchors, currency)
 	if err != nil {
 		return v, err
 	}
@@ -303,6 +314,7 @@ func Projection(ctx context.Context, client *ent.Client, f ProjectionFilter) (Pr
 	}
 
 	hi := bucketStart(v.End, f.Step)
+	todayBucket := bucketStart(v.Today, f.Step)
 	// One bucket index per account line, in account order so the net-worth sum adds in
 	// the same order on every request.
 	closes := make([]map[int64]ProjectedPoint, 0, len(anchors))
@@ -326,7 +338,7 @@ func Projection(ctx context.Context, client *ent.Client, f ProjectionFilter) (Pr
 		}
 		// An investment account never receives a flow (loadProjectedFlows leaves out any
 		// declaration naming one), so walking it with no events is what carries it flat.
-		s.Points = walkBuckets(bucketStart(a.asOf, f.Step), hi, f.Step, a.balance, byAccount[acc.ID])
+		s.Points = walkBuckets(laterOf(bucketStart(a.asOf, f.Step), todayBucket), hi, f.Step, a.balance, byAccount[acc.ID])
 		if a.flat {
 			s.Note = "investment account carried flat: nothing declared moves it"
 		}
@@ -339,10 +351,11 @@ func Projection(ctx context.Context, client *ent.Client, f ProjectionFilter) (Pr
 		v.Accounts = append(v.Accounts, s)
 	}
 
-	// Net worth opens at the freshest reading's bucket: every account's line already
-	// reaches that far (each starts at its own, older or equal, reading), so every bucket
-	// from here sums a defined close per account and nothing is back-filled.
-	nwLo := bucketStart(newest.asOf, f.Step)
+	// Net worth opens at the freshest reading's bucket, or today's when that is later:
+	// every account's line already reaches that far (each opens at its own, older or
+	// equal, reading's bucket or at today's), so every bucket from here sums a defined
+	// close per account and nothing is back-filled.
+	nwLo := laterOf(bucketStart(newest.asOf, f.Step), todayBucket)
 	nwAsOf := newest.asOf
 	v.NetWorth.Start = &nwStart
 	v.NetWorth.StartAsOf = &nwAsOf
@@ -377,16 +390,23 @@ func noSnapshotSeries(acc *ent.Account) ProjectedSeries {
 }
 
 // walkBuckets emits one point per bucket in [lo, hi], each closing at start plus every
-// event up to the end of that bucket. Events arrive already inside the walk's window, so
-// none falls before lo.
+// event up to the end of that bucket. An event in a bucket before lo (a flow between a
+// stale reading and today) is folded into the opening level instead, so the first point
+// already carries it and the point count depends only on lo and hi.
 func walkBuckets(lo, hi time.Time, step BalanceStep, start float64, events []ProjectionEvent) []ProjectedPoint {
 	if hi.Before(lo) {
 		hi = lo
 	}
+	level := start
 	in := make(map[int64]float64)
 	out := make(map[int64]float64)
 	for _, e := range events {
-		k := bucketKey(bucketStart(e.Date, step))
+		b := bucketStart(e.Date, step)
+		if b.Before(lo) {
+			level += e.Amount
+			continue
+		}
+		k := bucketKey(b)
 		if e.Amount >= 0 {
 			in[k] += e.Amount
 		} else {
@@ -394,13 +414,20 @@ func walkBuckets(lo, hi time.Time, step BalanceStep, start float64, events []Pro
 		}
 	}
 	points := []ProjectedPoint{}
-	level := start
 	for b := lo; !b.After(hi); b = nextBucketStart(b, step) {
 		k := bucketKey(b)
 		level += in[k] - out[k]
 		points = append(points, ProjectedPoint{AsOf: b, Balance: level, In: in[k], Out: out[k]})
 	}
 	return points
+}
+
+// laterOf is the later of two instants.
+func laterOf(a, b time.Time) time.Time {
+	if b.After(a) {
+		return b
+	}
+	return a
 }
 
 // occurrences lists the flow's dates in (after, end]: strictly after the day its walk starts
@@ -437,8 +464,10 @@ func reflectedIn(s settlement, anchors map[int]*projectionAnchor) bool {
 // loadProjectedFlows reads every declaration and reduces the ones the walk applies to
 // projectedFlows, reporting the rest. A declaration on an account must name one with a
 // reading that is not an investment, in that account's currency; one with no account moves
-// net worth, which is reported in reportCurrency, so it has to be in that currency.
-func loadProjectedFlows(ctx context.Context, client *ent.Client, includeWishlist bool, anchors map[int]*projectionAnchor, currency map[int]string) ([]projectedFlow, []ProjectionExclusion, error) {
+// net worth, which is reported in reportCurrency, so it has to be in that currency. A
+// wishlist item moves net worth only, whose walk starts after netWorthDay (the freshest
+// reading's day), so an item due on or before that day is reported as past its deadline.
+func loadProjectedFlows(ctx context.Context, client *ent.Client, includeWishlist bool, netWorthDay time.Time, anchors map[int]*projectionAnchor, currency map[int]string) ([]projectedFlow, []ProjectionExclusion, error) {
 	var flows []projectedFlow
 	var excluded []ProjectionExclusion
 
@@ -508,6 +537,10 @@ func loadProjectedFlows(ctx context.Context, client *ent.Client, includeWishlist
 			return nil, nil, err
 		}
 		for _, it := range items {
+			if !normalizeDate(*it.Deadline).After(netWorthDay) {
+				excluded = append(excluded, ProjectionExclusion{Kind: ProjectionKindWishlist, ID: it.ID, Name: it.Name, Reason: ExcludedPastDeadline})
+				continue
+			}
 			admit(projectedFlow{
 				kind: ProjectionKindWishlist, id: it.ID, name: it.Name, amount: *it.Amount, sign: -1,
 				anchor: *it.Deadline, once: true,

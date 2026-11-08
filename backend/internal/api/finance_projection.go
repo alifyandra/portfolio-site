@@ -38,7 +38,7 @@ type ProjectionAccountDTO struct {
 	StartAsOf    *string              `json:"start_as_of" doc:"RFC3339 reading time of that snapshot; null with it"`
 	Flat         bool                 `json:"flat" doc:"True for an investment account, carried flat at its reading because nothing declared moves it"`
 	Note         string               `json:"note" doc:"Why the line is empty or flat; empty otherwise"`
-	Points       []ProjectionPointDTO `json:"points" doc:"From the snapshot's bucket through the horizon end's bucket"`
+	Points       []ProjectionPointDTO `json:"points" doc:"From today's bucket (the snapshot's, when that is later) through the horizon end's bucket. Flows between an older snapshot and today are folded into the first point"`
 }
 
 // ProjectionNetWorthDTO is the net-worth line: every account's line summed, plus the flows
@@ -48,7 +48,7 @@ type ProjectionNetWorthDTO struct {
 	StartBalance *float64             `json:"start_balance" doc:"Sum of every account's latest snapshot; null when no account has one"`
 	StartAsOf    *string              `json:"start_as_of" doc:"RFC3339 time of the freshest of those snapshots; null with it"`
 	Note         string               `json:"note" doc:"Why the line is empty; empty otherwise"`
-	Points       []ProjectionPointDTO `json:"points" doc:"From the freshest snapshot's bucket through the horizon end's bucket"`
+	Points       []ProjectionPointDTO `json:"points" doc:"From today's bucket (the freshest snapshot's, when that is later) through the horizon end's bucket. Flows between an older snapshot and today are folded into the first point"`
 }
 
 // ProjectionEventDTO is one declared flow the walk applied, so the line can say why it moves.
@@ -66,7 +66,7 @@ type ProjectionExclusionDTO struct {
 	Kind   string `json:"kind" enum:"bill,income,wishlist"`
 	ID     int    `json:"id"`
 	Name   string `json:"name"`
-	Reason string `json:"reason" enum:"paused,investment_account,no_snapshot,currency_mismatch" doc:"paused: declared paused. investment_account: names an investment account, which is carried flat. no_snapshot: names an account with no balance reading to start from. currency_mismatch: its currency differs from its account's (or, with no account, from net worth's)"`
+	Reason string `json:"reason" enum:"paused,investment_account,no_snapshot,currency_mismatch,past_deadline" doc:"paused: declared paused. investment_account: names an investment account, which is carried flat. no_snapshot: names an account with no balance reading to start from. currency_mismatch: its currency differs from its account's (or, with no account, from net worth's). past_deadline: a wanted wishlist item due on or before the freshest balance reading's day, so overdue or already due"`
 }
 
 type financeProjectionInput struct {
@@ -74,7 +74,7 @@ type financeProjectionInput struct {
 	// step is validated in the handler, like the balance history's, so an unknown value is
 	// a 400 naming the allowed set.
 	Step            string `query:"step" doc:"Bucket width: day (default), week or month, on the Balance Series grammar. An unknown value is a 400."`
-	IncludeWishlist bool   `query:"include_wishlist" doc:"Also apply each wanted wishlist item that has both a cost and a deadline, as money out on its deadline (net worth only)"`
+	IncludeWishlist bool   `query:"include_wishlist" doc:"Also apply each wanted wishlist item that has both a cost and a deadline, as money out on its deadline (net worth only). An item due on or before the freshest balance reading's day is listed in excluded as past_deadline instead"`
 }
 
 type financeProjectionOutput struct {
@@ -86,7 +86,7 @@ type financeProjectionOutput struct {
 		IncludeWishlist bool                     `json:"include_wishlist"`
 		Accounts        []ProjectionAccountDTO   `json:"accounts" doc:"One line per account, name-ordered"`
 		NetWorth        ProjectionNetWorthDTO    `json:"net_worth"`
-		Events          []ProjectionEventDTO     `json:"events" doc:"Every flow applied, oldest first"`
+		Events          []ProjectionEventDTO     `json:"events" doc:"Every flow applied, oldest first, including any between a stale snapshot and today that the first point already carries"`
 		Excluded        []ProjectionExclusionDTO `json:"excluded" doc:"Declarations the walk left out"`
 	}
 }

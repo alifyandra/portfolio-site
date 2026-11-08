@@ -128,11 +128,17 @@ export function BalanceChart({
   points,
   basis,
   projected,
+  horizonEnd,
 }: {
   points: BalancePointDTO[];
   basis?: string;
   /** Projected buckets continuing the line, already trimmed to after the history. */
   projected?: ProjectionPointDTO[];
+  /**
+   * YYYY-MM-DD the projection runs to. The projected readout is dated with it,
+   * not with the last point's as_of, which is that bucket's start.
+   */
+  horizonEnd?: string;
 }) {
   const { money } = useMoney();
   const [hover, setHover] = useState<number | null>(null);
@@ -647,13 +653,13 @@ export function BalanceChart({
           </FigureSlot>{' '}
           · {formatDate(maxPoint.as_of)}
         </span>
-        {projectedEnd && (
+        {projectedEnd && horizonEnd && (
           <span className="text-slate-400">
             Projected{' '}
             <FigureSlot className="font-medium text-slate-300">
               {money(projectedEnd.balance)}
             </FigureSlot>{' '}
-            · {formatDate(projectedEnd.as_of)}
+            · {formatDate(horizonEnd)}
           </span>
         )}
       </div>
