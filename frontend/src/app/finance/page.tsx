@@ -14,6 +14,7 @@ import { BalanceHistorySection } from '@/components/finance/BalanceHistorySectio
 import { TransactionsSection } from '@/components/finance/TransactionsSection';
 import { PendingSection } from '@/components/finance/PendingSection';
 import { BillsSection } from '@/components/finance/BillsSection';
+import { IncomeSection } from '@/components/finance/IncomeSection';
 import { CensorToggle } from '@/components/finance/censor';
 
 export default function FinancePage() {
@@ -103,6 +104,7 @@ export default function FinancePage() {
           <TransactionsSection />
           <PendingSection />
           <BillsSection />
+          <IncomeSection />
         </div>
       )}
     </main>

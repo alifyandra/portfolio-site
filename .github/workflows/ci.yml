@@ -77,6 +77,11 @@ jobs:
 
       - run: npm ci
 
+      # Dependency-free unit tests under node --test (Node strips the .ts types
+      # itself), so they need neither codegen nor a build.
+      - name: Unit tests
+        run: npm test
+
       - name: Generate API hooks from spec
         run: npm run codegen
 

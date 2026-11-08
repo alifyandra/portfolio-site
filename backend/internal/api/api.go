@@ -64,7 +64,8 @@ type Deps struct {
 	FinanceBackfillYears   int
 	FinanceSyncOverlapDays int
 
-	// Now is the clock the recurring-bill handlers take "today" from; nil means time.Now.
+	// Now is the clock the finance handlers (bills, income) take "today" from; nil means
+	// time.Now.
 	// Tests pin it to an instant where the UTC and Melbourne dates differ, so the date
 	// boundary is exercised on every run instead of only when one lands in the first hours
 	// of a Melbourne day.
@@ -99,4 +100,7 @@ func (h *Handler) Register(api huma.API) {
 	// feature is a finance concern (its UI lives on /finance, not /admin) and its read
 	// half is registered by registerFinanceRead.
 	h.registerAdminFinanceBills(api)
+	// Recurring income registers its read and writes together: the same admin gate and
+	// the same /api/finance (read) and /api/admin/finance (write) split as the bills.
+	h.registerFinanceIncome(api)
 }
