@@ -606,9 +606,15 @@ type ScanSummary struct {
 // accepted one too unless its declaration has ended and the run carried on past it (then
 // it is reopened as pending), and a pending one whose run is gone or is now covered by a
 // live declaration is dropped. It never creates or edits a declaration.
-func ScanRecurrences(ctx context.Context, client *ent.Client) (ScanSummary, error) {
+//
+// today is the Melbourne calendar day the lookback and the derived next dates are measured
+// from, in LocalDate's form; zero means the current one. A caller holding a clock passes
+// it, so a test can pin the instant.
+func ScanRecurrences(ctx context.Context, client *ent.Client, today time.Time) (ScanSummary, error) {
 	sum := ScanSummary{}
-	today := localToday()
+	if today.IsZero() {
+		today = localToday()
+	}
 	from := today.AddDate(0, 0, -suggestLookbackDays)
 	rows, err := client.Transaction.Query().
 		Where(transaction.PostedDateGTE(from)).
@@ -955,8 +961,9 @@ func suggestionsQuery(client *ent.Client) *ent.RecurrenceSuggestionQuery {
 // ListSuggestions returns the stored suggestions with the given status ("pending",
 // "accepted", "dismissed", or "" / "all"), ordered by label, each with its newest
 // suggestListEvidence evidence rows. It reads only the id and date of every evidence row
-// (to count them and pick the newest), then the full rows of just those picked.
-func ListSuggestions(ctx context.Context, client *ent.Client, status string) ([]SuggestionView, error) {
+// (to count them and pick the newest), then the full rows of just those picked. today is
+// the day each next expected date is measured from, as for ScanRecurrences.
+func ListSuggestions(ctx context.Context, client *ent.Client, status string, today time.Time) ([]SuggestionView, error) {
 	q := suggestionsQuery(client).
 		WithEvidence(func(tq *ent.TransactionQuery) { tq.Select(transaction.FieldPostedDate) })
 	switch s := strings.ToLower(strings.TrimSpace(status)); s {
@@ -988,7 +995,9 @@ func ListSuggestions(ctx context.Context, client *ent.Client, status string) ([]
 			full[t.ID] = t
 		}
 	}
-	today := localToday()
+	if today.IsZero() {
+		today = localToday()
+	}
 	out := make([]SuggestionView, 0, len(rows))
 	for _, s := range rows {
 		ev := s.Edges.Evidence
@@ -1004,8 +1013,8 @@ func ListSuggestions(ctx context.Context, client *ent.Client, status string) ([]
 }
 
 // GetSuggestion returns one stored suggestion with all of its evidence, newest first. A
-// missing id is ent's not-found error.
-func GetSuggestion(ctx context.Context, client *ent.Client, id int) (SuggestionView, error) {
+// missing id is ent's not-found error. today is as for ListSuggestions.
+func GetSuggestion(ctx context.Context, client *ent.Client, id int, today time.Time) (SuggestionView, error) {
 	s, err := suggestionsQuery(client).
 		Where(recurrencesuggestion.IDEQ(id)).
 		WithEvidence().
@@ -1015,7 +1024,10 @@ func GetSuggestion(ctx context.Context, client *ent.Client, id int) (SuggestionV
 	}
 	ev := s.Edges.Evidence
 	slices.SortFunc(ev, newestFirst)
-	return suggestionView(s, ev, ev, localToday()), nil
+	if today.IsZero() {
+		today = localToday()
+	}
+	return suggestionView(s, ev, ev, today), nil
 }
 
 // suggestionView builds the view from a loaded suggestion: shown are the evidence rows to

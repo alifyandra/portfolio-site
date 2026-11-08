@@ -266,7 +266,8 @@ func incomeCycleWindow(inc *ent.RecurringIncome, coverageFrom *time.Time, opts R
 // and the unique indexes on IncomeReceipt make a concurrent double run a no-op. Paused
 // incomes are skipped; ended ones are matched up to ended_on, so late history settles.
 // Which credit settles which cycle is decided across all incomes at once
-// (assignIncomeCredits), and a credit two incomes fit equally well is not linked.
+// (assignIncomeCredits), and a credit two incomes fit equally well is not linked. Like
+// ReconcileBills, the pass treats opts.Today as now, the current Melbourne day when zero.
 func ReconcileIncome(ctx context.Context, client *ent.Client, opts ReconcileOptions) (IncomeReconcileSummary, error) {
 	sum := IncomeReconcileSummary{}
 	incomes, err := client.RecurringIncome.Query().
@@ -288,7 +289,10 @@ func ReconcileIncome(ctx context.Context, client *ent.Client, opts ReconcileOpti
 		return sum, nil
 	}
 
-	today := localToday()
+	today := opts.Today
+	if today.IsZero() {
+		today = localToday()
+	}
 	cycles := make(map[int][]time.Time, len(incomes))
 	var from, to time.Time
 	matchers := make([]incomeMatcher, 0, len(incomes))

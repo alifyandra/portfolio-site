@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"entgo.io/ent/dialect"
 	entsql "entgo.io/ent/dialect/sql"
@@ -38,7 +39,7 @@ func newFinanceSuggestionsTestAPI(t *testing.T) (humatest.TestAPI, *ent.Client) 
 	svc := auth.New(client, auth.Config{})
 	_, api := humatest.New(t)
 	api.UseMiddleware(svc.Middleware)
-	h := New(Deps{Auth: svc, Ent: client})
+	h := New(Deps{Auth: svc, Ent: client, Now: func() time.Time { return boundaryNow }})
 	h.registerFinanceIncome(api)
 	h.registerAdminFinanceBills(api)
 	h.registerFinanceSuggestions(api)

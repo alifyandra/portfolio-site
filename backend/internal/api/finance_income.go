@@ -541,7 +541,7 @@ func (h *Handler) registerFinanceIncomeReconcile(api huma.API) {
 		if h.deps.Ent == nil {
 			return nil, huma.Error503ServiceUnavailable("finance is not available")
 		}
-		sum, err := finance.ReconcileIncome(ctx, h.deps.Ent, finance.ReconcileOptions{})
+		sum, err := finance.ReconcileIncome(ctx, h.deps.Ent, finance.ReconcileOptions{Today: h.financeToday()})
 		if err != nil {
 			return nil, huma.Error500InternalServerError("failed to match recurring income", err)
 		}

@@ -158,7 +158,7 @@ func (h *Handler) registerFinanceSuggestions(api huma.API) {
 		if h.deps.Ent == nil {
 			return nil, huma.Error503ServiceUnavailable("finance is not available")
 		}
-		views, err := finance.ListSuggestions(ctx, h.deps.Ent, in.Status)
+		views, err := finance.ListSuggestions(ctx, h.deps.Ent, in.Status, h.financeToday())
 		if err != nil {
 			return nil, huma.Error500InternalServerError("failed to load suggestions", err)
 		}
@@ -202,7 +202,7 @@ func (h *Handler) registerFinanceSuggestions(api huma.API) {
 		if h.deps.Ent == nil {
 			return nil, huma.Error503ServiceUnavailable("finance is not available")
 		}
-		sum, err := finance.ScanRecurrences(ctx, h.deps.Ent)
+		sum, err := finance.ScanRecurrences(ctx, h.deps.Ent, h.financeToday())
 		if err != nil {
 			return nil, huma.Error500InternalServerError("failed to scan for recurring runs", err)
 		}
@@ -287,7 +287,7 @@ func (h *Handler) registerFinanceSuggestions(api huma.API) {
 
 // suggestionResponse reads one suggestion with all of its evidence as the response body.
 func (h *Handler) suggestionResponse(ctx context.Context, id int) (*financeSuggestionOutput, error) {
-	v, err := finance.GetSuggestion(ctx, h.deps.Ent, id)
+	v, err := finance.GetSuggestion(ctx, h.deps.Ent, id, h.financeToday())
 	if ent.IsNotFound(err) {
 		return nil, huma.Error404NotFound("suggestion not found")
 	}
