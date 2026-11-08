@@ -66,7 +66,7 @@ type ProjectionExclusionDTO struct {
 	Kind   string `json:"kind" enum:"bill,income,wishlist"`
 	ID     int    `json:"id"`
 	Name   string `json:"name"`
-	Reason string `json:"reason" enum:"paused,investment_account,no_snapshot,currency_mismatch" doc:"paused: declared paused. investment_account: names an investment account, which is carried flat. no_snapshot: names an account with no balance reading to start from. currency_mismatch: its currency differs from its account's (or, with no account, from net worth's)"`
+	Reason string `json:"reason" enum:"paused,investment_account,no_snapshot,currency_mismatch,past_deadline" doc:"paused: declared paused. investment_account: names an investment account, which is carried flat. no_snapshot: names an account with no balance reading to start from. currency_mismatch: its currency differs from its account's (or, with no account, from net worth's). past_deadline: a wanted wishlist item due on or before the freshest balance reading's day, so overdue or already due"`
 }
 
 type financeProjectionInput struct {
@@ -74,7 +74,7 @@ type financeProjectionInput struct {
 	// step is validated in the handler, like the balance history's, so an unknown value is
 	// a 400 naming the allowed set.
 	Step            string `query:"step" doc:"Bucket width: day (default), week or month, on the Balance Series grammar. An unknown value is a 400."`
-	IncludeWishlist bool   `query:"include_wishlist" doc:"Also apply each wanted wishlist item that has both a cost and a deadline, as money out on its deadline (net worth only)"`
+	IncludeWishlist bool   `query:"include_wishlist" doc:"Also apply each wanted wishlist item that has both a cost and a deadline, as money out on its deadline (net worth only). An item due on or before the freshest balance reading's day is listed in excluded as past_deadline instead"`
 }
 
 type financeProjectionOutput struct {

@@ -51,6 +51,7 @@ const REASONS: Record<string, string> = {
   investment_account: 'on an investment account',
   no_snapshot: 'on an account with no reading',
   currency_mismatch: 'in another currency',
+  past_deadline: 'past its deadline',
 };
 
 /**

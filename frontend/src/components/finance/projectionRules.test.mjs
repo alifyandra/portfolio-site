@@ -62,7 +62,8 @@ test('left-out declarations are named with a readable reason', () => {
     exclusionSummary([
       { name: 'Gym', reason: 'paused' },
       { name: 'Dividend', reason: 'investment_account' },
+      { name: 'Glasses', reason: 'past_deadline' },
     ]),
-    'Left out of the projection: Gym (paused), Dividend (on an investment account)',
+    'Left out of the projection: Gym (paused), Dividend (on an investment account), Glasses (past its deadline)',
   );
 });

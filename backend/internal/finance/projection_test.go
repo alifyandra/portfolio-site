@@ -420,6 +420,11 @@ func TestProjection_Walk(t *testing.T) {
 				"2026-11-20 wishlist Glasses -300",
 			},
 			wantEnd: map[string]float64{"Everyday": 1000, "": 700},
+			// Due before the reading, or on its day, is never applied, and is said so.
+			wantExcluded: []string{
+				"wishlist Due today past_deadline",
+				"wishlist Overdue want past_deadline",
+			},
 		},
 		{
 			name:    "the wishlist is left out unless asked for",
@@ -466,7 +471,8 @@ func TestProjection_Walk(t *testing.T) {
 }
 
 // seedWishlistFixture seeds one item the projection takes (wanted, priced, dated inside the
-// horizon) beside one of each kind it must not take.
+// horizon) beside one of each kind it must not take: two of those are wanted and priced but
+// due on or before the reading's day, which the projection reports as past their deadline.
 func seedWishlistFixture(t *testing.T, ctx context.Context, c *ent.Client, _ projFixture) {
 	t.Helper()
 	item := func(name string, amount *float64, deadline *time.Time, status wishlistitem.Status) {
@@ -480,6 +486,7 @@ func seedWishlistFixture(t *testing.T, ctx context.Context, c *ent.Client, _ pro
 	item("Bike", cost(900), date(2026, time.November, 22), wishlistitem.StatusBought)
 	item("Chair", cost(250), date(2027, time.June, 1), wishlistitem.StatusWanted)
 	item("Overdue want", cost(80), date(2026, time.November, 1), wishlistitem.StatusWanted)
+	item("Due today", cost(50), date(2026, time.November, 8), wishlistitem.StatusWanted)
 }
 
 // TestProjection_MelbourneDayWithPinnedClock pins the clock at 01:00 AEDT on the 8th,

@@ -3119,12 +3119,13 @@ components:
         name:
           type: string
         reason:
-          description: "paused: declared paused. investment_account: names an investment account, which is carried flat. no_snapshot: names an account with no balance reading to start from. currency_mismatch: its currency differs from its account's (or, with no account, from net worth's)"
+          description: "paused: declared paused. investment_account: names an investment account, which is carried flat. no_snapshot: names an account with no balance reading to start from. currency_mismatch: its currency differs from its account's (or, with no account, from net worth's). past_deadline: a wanted wishlist item due on or before the freshest balance reading's day, so overdue or already due"
           enum:
             - paused
             - investment_account
             - no_snapshot
             - currency_mismatch
+            - past_deadline
           type: string
       required:
         - kind
@@ -5623,12 +5624,12 @@ paths:
           schema:
             description: "Bucket width: day (default), week or month, on the Balance Series grammar. An unknown value is a 400."
             type: string
-        - description: Also apply each wanted wishlist item that has both a cost and a deadline, as money out on its deadline (net worth only)
+        - description: Also apply each wanted wishlist item that has both a cost and a deadline, as money out on its deadline (net worth only). An item due on or before the freshest balance reading's day is listed in excluded as past_deadline instead
           explode: false
           in: query
           name: include_wishlist
           schema:
-            description: Also apply each wanted wishlist item that has both a cost and a deadline, as money out on its deadline (net worth only)
+            description: Also apply each wanted wishlist item that has both a cost and a deadline, as money out on its deadline (net worth only). An item due on or before the freshest balance reading's day is listed in excluded as past_deadline instead
             type: boolean
       responses:
         "200":

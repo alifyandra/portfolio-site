@@ -39,6 +39,8 @@ import (
 //     declaration naming one is left out rather than moving it.
 //   - A declaration with no account moves net worth only. Net worth is the sum of every
 //     account's line plus those unassigned flows.
+//   - A wishlist item is one flow on its deadline, moving net worth only. One due on or
+//     before the freshest reading's day is reported as past_deadline, not applied.
 //
 // Buckets use the Balance Series grammar exactly (bucketStart / nextBucketStart: local
 // Melbourne day, Monday week, 1st-of-month), and a bucket's value is its close. Nothing
@@ -66,6 +68,10 @@ const (
 	ExcludedInvestment       = "investment_account"
 	ExcludedNoSnapshot       = "no_snapshot"
 	ExcludedCurrencyMismatch = "currency_mismatch"
+	// ExcludedPastDeadline is a wanted wishlist item whose deadline falls on or before the
+	// freshest reading's day, where net worth's walk starts: it is overdue or already due,
+	// and the premise does not guess when it will be bought.
+	ExcludedPastDeadline = "past_deadline"
 )
 
 // ProjectionFilter shapes one projection. HorizonDays counts forward from today (zero or
@@ -246,7 +252,7 @@ func Projection(ctx context.Context, client *ent.Client, f ProjectionFilter) (Pr
 		return v, nil
 	}
 
-	flows, excluded, err := loadProjectedFlows(ctx, client, f.IncludeWishlist, anchors, currency)
+	flows, excluded, err := loadProjectedFlows(ctx, client, f.IncludeWishlist, newest.day, anchors, currency)
 	if err != nil {
 		return v, err
 	}
@@ -437,8 +443,10 @@ func reflectedIn(s settlement, anchors map[int]*projectionAnchor) bool {
 // loadProjectedFlows reads every declaration and reduces the ones the walk applies to
 // projectedFlows, reporting the rest. A declaration on an account must name one with a
 // reading that is not an investment, in that account's currency; one with no account moves
-// net worth, which is reported in reportCurrency, so it has to be in that currency.
-func loadProjectedFlows(ctx context.Context, client *ent.Client, includeWishlist bool, anchors map[int]*projectionAnchor, currency map[int]string) ([]projectedFlow, []ProjectionExclusion, error) {
+// net worth, which is reported in reportCurrency, so it has to be in that currency. A
+// wishlist item moves net worth only, whose walk starts after netWorthDay (the freshest
+// reading's day), so an item due on or before that day is reported as past its deadline.
+func loadProjectedFlows(ctx context.Context, client *ent.Client, includeWishlist bool, netWorthDay time.Time, anchors map[int]*projectionAnchor, currency map[int]string) ([]projectedFlow, []ProjectionExclusion, error) {
 	var flows []projectedFlow
 	var excluded []ProjectionExclusion
 
@@ -508,6 +516,10 @@ func loadProjectedFlows(ctx context.Context, client *ent.Client, includeWishlist
 			return nil, nil, err
 		}
 		for _, it := range items {
+			if !normalizeDate(*it.Deadline).After(netWorthDay) {
+				excluded = append(excluded, ProjectionExclusion{Kind: ProjectionKindWishlist, ID: it.ID, Name: it.Name, Reason: ExcludedPastDeadline})
+				continue
+			}
 			admit(projectedFlow{
 				kind: ProjectionKindWishlist, id: it.ID, name: it.Name, amount: *it.Amount, sign: -1,
 				anchor: *it.Deadline, once: true,
