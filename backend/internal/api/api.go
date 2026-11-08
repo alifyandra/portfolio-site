@@ -104,4 +104,6 @@ func (h *Handler) Register(api huma.API) {
 	// the same /api/finance (read) and /api/admin/finance (write) split as the bills.
 	h.registerFinanceIncome(api)
 	h.registerFinanceSuggestions(api)
+	// The Projection walks the declarations above forward, so it registers after them.
+	h.registerFinanceProjection(api)
 }
