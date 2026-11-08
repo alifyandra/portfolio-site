@@ -183,12 +183,6 @@ type cycleKey struct {
 	day  int64
 }
 
-// melbourneDay is the Melbourne calendar day containing t, as a UTC-midnight date.
-func melbourneDay(t time.Time) time.Time {
-	lt := t.In(bucketLoc)
-	return time.Date(lt.Year(), lt.Month(), lt.Day(), 0, 0, 0, 0, time.UTC)
-}
-
 // Projection computes the projection described at the top of this file.
 func Projection(ctx context.Context, client *ent.Client, f ProjectionFilter) (ProjectionView, error) {
 	if f.Step == StepRaw {
@@ -204,7 +198,7 @@ func Projection(ctx context.Context, client *ent.Client, f ProjectionFilter) (Pr
 	if now.IsZero() {
 		now = time.Now()
 	}
-	today := melbourneDay(now)
+	today := LocalDate(now)
 	v := ProjectionView{
 		Today:           today,
 		End:             today.AddDate(0, 0, f.HorizonDays),
@@ -236,7 +230,7 @@ func Projection(ctx context.Context, client *ent.Client, f ProjectionFilter) (Pr
 		a := &projectionAnchor{
 			balance: snap.Balance,
 			asOf:    snap.AsOf,
-			day:     melbourneDay(snap.AsOf),
+			day:     LocalDate(snap.AsOf),
 			flat:    acc.Type == account.TypeInvestment,
 		}
 		anchors[acc.ID] = a

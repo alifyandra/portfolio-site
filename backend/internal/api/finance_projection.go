@@ -126,6 +126,7 @@ func (h *Handler) getFinanceProjection(ctx context.Context, in *financeProjectio
 		HorizonDays:     in.HorizonDays,
 		Step:            step,
 		IncludeWishlist: in.IncludeWishlist,
+		Now:             h.now(),
 	})
 	if err != nil {
 		return nil, huma.Error500InternalServerError("failed to compute the projection", err)

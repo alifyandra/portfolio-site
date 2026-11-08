@@ -43,7 +43,7 @@ func newFinanceProjectionTestAPI(t *testing.T) (humatest.TestAPI, *ent.Client) {
 	svc := auth.New(client, auth.Config{})
 	_, api := humatest.New(t)
 	api.UseMiddleware(svc.Middleware)
-	h := New(Deps{Auth: svc, Ent: client})
+	h := New(Deps{Auth: svc, Ent: client, Now: func() time.Time { return boundaryNow }})
 	h.registerFinanceProjection(api)
 	return api, client
 }
@@ -118,7 +118,7 @@ func TestFinanceProjection_WireShape(t *testing.T) {
 	acc := client.Account.Create().SetSource("commbank").SetName("Everyday").
 		SetType(account.TypeEveryday).SetClass(account.ClassAsset).SaveX(ctx)
 	client.BalanceSnapshot.Create().SetAccountID(acc.ID).SetBalance(1000).
-		SetAsOf(time.Now().UTC().Truncate(time.Second)).SaveX(ctx)
+		SetAsOf(boundaryNow).SaveX(ctx)
 	client.RecurringBill.Create().SetName("Phone").SetExpectedAmount(33.333).
 		SetCadence(recurringbill.CadenceWeekly).SetAnchorDate(today.AddDate(0, 0, 1)).
 		SetAccountID(acc.ID).SaveX(ctx)

@@ -24,14 +24,18 @@ var financeTags = []string{"finance"}
 // financeScope is the ScheduledJob key / scope string the ingest token must carry.
 const financeScope = "finance.sync"
 
+// now is the handler's clock: Deps.Now when set, else the wall clock.
+func (h *Handler) now() time.Time {
+	if h.deps.Now != nil {
+		return h.deps.Now()
+	}
+	return time.Now()
+}
+
 // financeToday is the Melbourne calendar day at the handler's clock (Deps.Now, else the
 // wall clock), the "today" recurring-bill due dates and matching windows measure from.
 func (h *Handler) financeToday() time.Time {
-	now := time.Now
-	if h.deps.Now != nil {
-		now = h.deps.Now
-	}
-	return finance.LocalDate(now())
+	return finance.LocalDate(h.now())
 }
 
 type ingestInput struct {
