@@ -29,10 +29,10 @@ import (
 //     is derived from (cadence, anchor_date); next_due is NEVER stored, so there is no
 //     bumping job and no cache to go stale.
 //   - The matching pass (ReconcileBills), a rules-based sibling of isInternalTransfer
-//     (read.go): one owner-typed substring per bill, no LLM, no categorisation. It runs
-//     over rows that are ALREADY in the ledger, after the ingest transaction commits, so
-//     a matcher bug can never reject a good ingest window and a fixed matcher can be
-//     re-run without a re-ingest.
+//     (read.go): one owner-typed pattern per bill, found on word boundaries
+//     (containsToken), no LLM, no categorisation. It runs over rows that are ALREADY in
+//     the ledger, after the ingest transaction commits, so a matcher bug can never reject
+//     a good ingest window and a fixed matcher can be re-run without a re-ingest.
 //
 // Nothing here rounds money; the caller formats.
 
@@ -655,8 +655,9 @@ func newBillMatcher(b *ent.RecurringBill) billMatcher {
 // matches is the auto-match rule: a per-bill AND of four clauses, all of them
 // owner-declared rather than inferred.
 //
-//  1. match_pattern is a case-insensitive SUBSTRING of the transaction's description OR
-//     merchant (the same two fields search_merchant covers). An empty pattern never
+//  1. match_pattern occurs case-insensitively in the transaction's description OR
+//     merchant (the same two fields search_merchant covers) on word boundaries, so "ATO"
+//     is not found in "POTATO" (containsToken has the rule). An empty pattern never
 //     matches, so that bill is reconciled by hand only.
 //  2. account scope: when the bill carries an account edge, only that account's rows are
 //     candidates. A zero scope (a bill with no account) matches any row.
@@ -669,7 +670,7 @@ func (m billMatcher) matches(c candidate, occ time.Time) bool {
 	if m.needle == "" {
 		return false
 	}
-	if !strings.Contains(c.descLower, m.needle) && !strings.Contains(c.merchLower, m.needle) {
+	if !containsToken(c.descLower, m.needle) && !containsToken(c.merchLower, m.needle) {
 		return false
 	}
 	if m.scopeID != 0 && c.accountID != m.scopeID {

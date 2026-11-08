@@ -677,6 +677,101 @@ func TestBillMatches_AmountVariableSkipsAmountCheck(t *testing.T) {
 	}
 }
 
+// TestBillMatches_PatternOnWordBoundaries: match_pattern finds its text only on word
+// boundaries, so a bill keyed "ATO" is not settled by a row from a potato farm. Each row
+// passes every other clause, so the pattern alone decides. The positive rows are the
+// shapes a real description takes: the key leading, trailing, hyphenated or glued to a
+// reference number, in any case, in either field.
+func TestBillMatches_PatternOnWordBoundaries(t *testing.T) {
+	occ := day(2026, time.July, 10)
+	cases := []struct {
+		pattern, desc, merchant string
+		want                    bool
+	}{
+		// The bug: the key inside a longer word.
+		{"ATO", "POTATO FARM SUPPLIES", "", false},
+		{"ATO", "CARD PURCHASE", "Potato Co", false},
+		{"ato", "TOMATO SAUCE CO", "", false},
+		{"ATO", "ATOMIC CAFE", "", false},
+		{"ATO", "PLATO BOOKS", "", false},
+		// The key standing as its own word, wherever it sits.
+		{"ATO", "ATO PAYMENT", "", true},
+		{"ATO", "PAYMENT TO ATO", "", true},
+		{"ATO", "ATO-123", "", true},
+		{"ATO", "BPAY TAX (ATO) REF 0042", "", true},
+		{"ATO", "ATO.", "", true},
+		{"ato", "Ato Payment 2026", "", true},
+		{"ATO", "CARD PURCHASE", "ato", true},
+		{"  ATO ", "ATO PAYMENT", "", true},                // the stored pattern is trimmed
+		{"ATO", "POTATO FARM, THEN ATO PAYMENT", "", true}, // a later occurrence on a boundary counts
+		// A reference number glued to the key does not hide it: a letter edge only needs a
+		// non-letter neighbour.
+		{"ATO", "BPAY ATO0042", "", true},
+		{"ATO", "REF0042ATO", "", true},
+		// A digit edge needs a non-digit neighbour.
+		{"0042", "REF 0042 ATO", "", true},
+		{"0042", "REF 00421", "", false},
+		{"0042", "REF 10042", "", false},
+		// Multi-word keys match as a phrase, boundaries judged at the phrase's two ends.
+		{"housing debit", "HOUSING DEBIT REF 9", "", true},
+		{"housing debit", "REHOUSING DEBIT", "", false},
+		{"housing debit", "HOUSING DEBITS", "", false},
+		{"placeholder co", "DIRECT DEBIT PLACEHOLDER CO 123", "", true},
+		{"placeholder co", "PLACEHOLDER COMMUNITY", "", false},
+		// The phrase's inner text is literal: its spacing is not collapsed.
+		{"housing debit", "HOUSING  DEBIT", "", false},
+		// Punctuation in the key is literal, and an edge that is punctuation needs no
+		// boundary.
+		{"streamco.com", "STREAMCO.COM SYDNEY", "", true},
+		{"streamco.com", "MYSTREAMCO.COM", "", false},
+		{"*streamco", "PAY *STREAMCO", "", true},
+		{"*streamco", "PAY*STREAMCO", "", true},
+		{"*streamco", "PAY *STREAMCOM", "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.pattern+" in "+c.desc+"/"+c.merchant, func(t *testing.T) {
+			bill := &ent.RecurringBill{ExpectedAmount: 100, AmountTolerancePct: 10, MatchPattern: c.pattern, MatchWindowDays: 5}
+			row := newCandidate(&ent.Transaction{PostedDate: occ, Amount: -100, Description: c.desc, Merchant: c.merchant})
+			if got := newBillMatcher(bill).matches(row, occ); got != c.want {
+				t.Errorf("pattern %q against description %q / merchant %q: matches = %v, want %v", c.pattern, c.desc, c.merchant, got, c.want)
+			}
+		})
+	}
+}
+
+// TestReconcileBills_PatternOnWordBoundaries is the bug end to end: a bill keyed "ATO" is
+// not settled by a same-amount row from a potato farm posted on the due date, and is
+// settled by the tax office's own row a day later.
+func TestReconcileBills_PatternOnWordBoundaries(t *testing.T) {
+	client := newFinanceTestClient(t)
+	ctx := context.Background()
+	acc := seedAccount(t, ctx, client, "Everyday", account.ClassAsset, account.TypeEveryday)
+	due := day(2026, time.June, 1)
+	bill := seedBill(t, ctx, client, "Tax instalment", 300, recurringbill.CadenceQuarterly, due, func(c *ent.RecurringBillCreate) {
+		c.SetMatchPattern("ATO").SetAccountID(acc.ID)
+	})
+	seedTxn(t, ctx, client, acc, "potato", due, -300, "POTATO FARM SUPPLIES", "")
+	seedTxn(t, ctx, client, acc, "ato", due.AddDate(0, 0, 1), -300, "ATO PAYMENT REF 0042", "")
+
+	from, to := due, due.AddDate(0, 0, 1)
+	if _, err := ReconcileBills(ctx, client, ReconcileOptions{From: &from, To: &to, Today: day(2026, time.June, 30)}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	links, err := client.BillPayment.Query().
+		Where(billpayment.HasBillWith(recurringbill.IDEQ(bill.ID))).
+		WithTransaction().
+		All(ctx)
+	if err != nil {
+		t.Fatalf("query links: %v", err)
+	}
+	if len(links) != 1 {
+		t.Fatalf("links = %d, want 1", len(links))
+	}
+	if got := links[0].Edges.Transaction.Description; got != "ATO PAYMENT REF 0042" {
+		t.Errorf("the cycle settled on %q, want the ATO row", got)
+	}
+}
+
 // TestReconcileBills_IdempotentAndRespectsManual is the whole pass end to end: it links a
 // cycle from a real stored row, a second run changes nothing (the unique indexes make a
 // re-run a no-op), a hand-made `manual` link survives the pass untouched, and a paused

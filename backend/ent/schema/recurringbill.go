@@ -52,7 +52,7 @@ func (RecurringBill) Fields() []ent.Field {
 		field.String("match_pattern").
 			Optional().
 			MaxLen(200).
-			Comment("Case-insensitive substring matched against a posted transaction's description OR merchant; empty means this bill is never auto-matched and is reconciled by hand. Same rules-based approach as isInternalTransfer (internal/finance/read.go)"),
+			Comment("Case-insensitive text matched on word boundaries against a posted transaction's description OR merchant (\"ATO\" does not match \"POTATO\"; the rule is containsToken in internal/finance/income_match.go); empty means this bill is never auto-matched and is reconciled by hand. Same rules-based approach as isInternalTransfer (internal/finance/read.go)"),
 		field.Int("match_window_days").
 			Default(5).
 			NonNegative().
