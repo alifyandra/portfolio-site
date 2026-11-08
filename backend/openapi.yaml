@@ -654,7 +654,7 @@ components:
           format: double
           type: number
         match_pattern:
-          description: Case-insensitive substring matched against a posted row's description or merchant; empty means never auto-matched
+          description: Case-insensitive text matched on word boundaries against a posted row's description or merchant ("ATO" does not match "POTATO"); empty means never auto-matched
           maxLength: 200
           type: string
         match_window_days:
@@ -1297,7 +1297,7 @@ components:
             - string
             - "null"
         match_pattern:
-          description: Case-insensitive substring matched against a posted row's description or merchant; empty means never auto-matched
+          description: Case-insensitive text matched on word boundaries against a posted row's description or merchant ("ATO" does not match "POTATO"); empty means never auto-matched
           type: string
         match_window_days:
           format: int64

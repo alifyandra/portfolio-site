@@ -61,7 +61,7 @@ type createBillInput struct {
 		AnchorDate         string   `json:"anchor_date" doc:"One known due date, YYYY-MM-DD; every occurrence steps the cadence from here"`
 		AmountVariable     bool     `json:"amount_variable,omitempty" doc:"True for a bill whose amount changes every cycle: the matcher then skips the amount check"`
 		AmountTolerancePct *float64 `json:"amount_tolerance_pct,omitempty" minimum:"0" doc:"Percent either side of expected_amount a posted row may differ; defaults to 10"`
-		MatchPattern       string   `json:"match_pattern,omitempty" maxLength:"200" doc:"Case-insensitive substring matched against a posted row's description or merchant; empty means never auto-matched"`
+		MatchPattern       string   `json:"match_pattern,omitempty" maxLength:"200" doc:"Case-insensitive text matched on word boundaries against a posted row's description or merchant (\"ATO\" does not match \"POTATO\"); empty means never auto-matched"`
 		MatchWindowDays    *int     `json:"match_window_days,omitempty" minimum:"0" doc:"Days either side of an occurrence a posted row may land; defaults to 5"`
 		Status             string   `json:"status,omitempty" enum:"active,paused,ended" doc:"Defaults to active"`
 		EndedOn            string   `json:"ended_on,omitempty" doc:"YYYY-MM-DD the commitment stopped"`

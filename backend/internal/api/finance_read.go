@@ -152,7 +152,7 @@ type FinanceBillDTO struct {
 	AnchorDate         string   `json:"anchor_date" doc:"YYYY-MM-DD; every occurrence steps the cadence from here"`
 	AmountVariable     bool     `json:"amount_variable" doc:"True when the amount changes every cycle (utilities): the matcher skips the amount check and expected_amount is an estimate"`
 	AmountTolerancePct float64  `json:"amount_tolerance_pct"`
-	MatchPattern       string   `json:"match_pattern" doc:"Case-insensitive substring matched against a posted row's description or merchant; empty means never auto-matched"`
+	MatchPattern       string   `json:"match_pattern" doc:"Case-insensitive text matched on word boundaries against a posted row's description or merchant (\"ATO\" does not match \"POTATO\"); empty means never auto-matched"`
 	MatchWindowDays    int      `json:"match_window_days"`
 	Status             string   `json:"status" enum:"active,paused,ended"`
 	EndedOn            *string  `json:"ended_on" doc:"YYYY-MM-DD the commitment stopped; null while it runs"`

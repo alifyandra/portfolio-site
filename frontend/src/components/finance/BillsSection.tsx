@@ -364,7 +364,7 @@ export function BillsSection() {
               </select>
             </label>
             <label className={labelClass}>
-              Match pattern (substring of the description or merchant)
+              Match pattern (word or phrase in the description or merchant)
               <input
                 type="text"
                 className={inputClass}
