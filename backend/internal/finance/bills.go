@@ -8,8 +8,6 @@ import (
 	"sort"
 	"strings"
 	"time"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/alifyandra/portfolio-site/backend/ent"
 	"github.com/alifyandra/portfolio-site/backend/ent/account"
@@ -685,63 +683,6 @@ func (m billMatcher) matches(c candidate, occ time.Time) bool {
 		}
 	}
 	return absInt(daysBetween(occ, c.day)) <= m.bill.MatchWindowDays
-}
-
-// containsToken reports whether needle occurs in hay (both lowercased already) on word
-// boundaries. It is the pattern clause of the match rule, and the rule is:
-//
-//   - An occurrence counts only when the character before it does not continue the
-//     needle's first character, and the character after it does not continue the needle's
-//     last. "Continue" means the same kind: letter next to letter, digit next to digit.
-//     So "ato" finds "ato payment", "payment to ato", "ato-123" and "(ato)" but not
-//     "potato" or "atomic", and "0042" does not find "00421".
-//   - A letter next to a digit is a boundary, so a reference number glued to a name does
-//     not hide it: "ato" finds "ato0042".
-//   - A multi-word needle is one phrase, matched literally inside and judged at its two
-//     ends: "housing debit" finds "housing debit ref 9" but not "rehousing debit" or
-//     "housing debits". Inner spacing is not collapsed, so a double space in the row
-//     does not match a single space in the needle.
-//   - Punctuation in the needle is literal, and an edge that is punctuation (or a space)
-//     needs no boundary: "*streamco" finds "pay*streamco", and "streamco.com" finds
-//     "streamco.com sydney" but not "mystreamco.com".
-//   - Every occurrence is tried, so a boundary match later in the row counts even when an
-//     earlier occurrence sits inside a word.
-//
-// An empty needle never matches.
-func containsToken(hay, needle string) bool {
-	if needle == "" {
-		return false
-	}
-	first, _ := utf8.DecodeRuneInString(needle)
-	last, _ := utf8.DecodeLastRuneInString(needle)
-	for off := 0; off <= len(hay)-len(needle); {
-		i := strings.Index(hay[off:], needle)
-		if i < 0 {
-			return false
-		}
-		start, end := off+i, off+i+len(needle)
-		before, _ := utf8.DecodeLastRuneInString(hay[:start])
-		after, _ := utf8.DecodeRuneInString(hay[end:])
-		if (start == 0 || !sameWordClass(before, first)) && (end == len(hay) || !sameWordClass(after, last)) {
-			return true
-		}
-		// Step one rune past this occurrence's start, so overlapping occurrences are tried.
-		_, size := utf8.DecodeRuneInString(hay[start:])
-		off = start + size
-	}
-	return false
-}
-
-// sameWordClass reports whether r continues the word that edge ends: both letters or both
-// digits. An edge that is neither (punctuation, a space) is never continued.
-func sameWordClass(r, edge rune) bool {
-	switch {
-	case unicode.IsLetter(edge):
-		return unicode.IsLetter(r)
-	case unicode.IsDigit(edge):
-		return unicode.IsDigit(r)
-	}
-	return false
 }
 
 // bestMatch picks the posted row that settles one cycle: the closest posted date to the
