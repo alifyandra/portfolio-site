@@ -59,5 +59,8 @@ func (Transaction) Edges() []ent.Edge {
 			Required(),
 		edge.To("bill_payments", BillPayment.Type),
 		edge.To("income_receipts", IncomeReceipt.Type),
+		// Evidence back-reference: many-to-many through a join table, no column here.
+		edge.From("recurrence_suggestions", RecurrenceSuggestion.Type).
+			Ref("evidence"),
 	}
 }

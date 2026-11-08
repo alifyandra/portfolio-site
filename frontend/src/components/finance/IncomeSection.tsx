@@ -6,9 +6,10 @@
 // /api/admin/finance/income behind the server-enforced admin middleware, while the list
 // comes from /api/finance/income.
 //
-// Receipts are linked by hand through the API for now, so there is no reconcile button
-// and no match fields here; the row shows when money last arrived once a link exists,
-// and expands to list its receipts with a Remove action (IncomeReceiptList).
+// Receipts are linked by hand, by the matching pass from the income's match pattern (the
+// Match button re-runs it over the whole ledger), or as evidence when a suggestion is
+// accepted. The row shows when money last arrived once a link exists, and expands to
+// list its receipts with a Remove action (IncomeReceiptList).
 // The status and date rules live in incomeRules.ts, where node --test reaches them.
 
 import { useState } from 'react';
@@ -19,8 +20,10 @@ import {
   useCreateFinanceIncome,
   useUpdateFinanceIncome,
   useDeleteFinanceIncome,
+  useReconcileFinanceIncome,
   useListFinanceAccounts,
   getListFinanceIncomeQueryKey,
+  getListFinanceSuggestionsQueryKey,
 } from '@/lib/api/generated';
 import type { FinanceIncomeDTO } from '@/lib/api/model';
 import {
@@ -69,6 +72,7 @@ interface IncomeForm {
   cadence: Cadence;
   anchor_date: string;
   account_id: string;
+  match_pattern: string;
   notes: string;
 }
 
@@ -85,6 +89,7 @@ function newIncomeForm(): IncomeForm {
     cadence: 'fortnightly',
     anchor_date: melbourneTodayISO(),
     account_id: '',
+    match_pattern: '',
     notes: '',
   };
 }
@@ -96,6 +101,7 @@ function incomeToForm(i: FinanceIncomeDTO): IncomeForm {
     cadence: i.cadence as Cadence,
     anchor_date: i.anchor_date,
     account_id: i.account_id == null ? '' : String(i.account_id),
+    match_pattern: i.match_pattern,
     notes: i.notes,
   };
 }
@@ -132,10 +138,11 @@ export function IncomeSection() {
   const create = useCreateFinanceIncome();
   const update = useUpdateFinanceIncome();
   const remove = useDeleteFinanceIncome();
+  const reconcile = useReconcileFinanceIncome();
 
   const saving = create.isPending || update.isPending;
-  const listBusy = remove.isPending || update.isPending;
-  const error = create.error ?? update.error ?? remove.error;
+  const listBusy = remove.isPending || update.isPending || reconcile.isPending;
+  const error = create.error ?? update.error ?? remove.error ?? reconcile.error;
 
   const patch = <K extends keyof IncomeForm>(key: K, value: IncomeForm[K]) =>
     setForm((f) => ({ ...f, [key]: value }));
@@ -153,9 +160,13 @@ export function IncomeSection() {
   // The API caps name at 120 BYTES, so count bytes here too: accented characters cost
   // more than one.
   const nameBytes = new TextEncoder().encode(form.name.trim()).length;
+  const patternBytes = new TextEncoder().encode(
+    form.match_pattern.trim(),
+  ).length;
   const canSave =
     nameBytes > 0 &&
     nameBytes <= 120 &&
+    patternBytes <= 200 &&
     Number.parseFloat(form.expected_amount) > 0 &&
     form.anchor_date.length > 0 &&
     !saving;
@@ -169,6 +180,7 @@ export function IncomeSection() {
       anchor_date: form.anchor_date,
       // 0 detaches the account on a PATCH and means "unset" on a create.
       account_id: form.account_id ? Number.parseInt(form.account_id, 10) : 0,
+      match_pattern: form.match_pattern.trim(),
       notes: form.notes,
     };
     const onSuccess = () => {
@@ -204,7 +216,18 @@ export function IncomeSection() {
 
   const del = (i: FinanceIncomeDTO) => {
     if (!confirm(`Delete "${i.name}"? Its receipt links go too.`)) return;
-    remove.mutate({ id: i.id }, { onSuccess: invalidate });
+    remove.mutate(
+      { id: i.id },
+      {
+        onSuccess: () => {
+          invalidate();
+          // An income accepted from a suggestion reopens it on delete.
+          queryClient.invalidateQueries({
+            queryKey: getListFinanceSuggestionsQueryKey(),
+          });
+        },
+      },
+    );
   };
 
   return (
@@ -229,9 +252,21 @@ export function IncomeSection() {
             </p>
           </div>
         </div>
-        <button type="button" className={primaryBtn} onClick={openNew}>
-          Add income
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            className={ghostBtn}
+            disabled={reconcile.isPending}
+            onClick={() =>
+              reconcile.mutate(undefined, { onSuccess: invalidate })
+            }
+          >
+            {reconcile.isPending ? 'Matching…' : 'Match'}
+          </button>
+          <button type="button" className={primaryBtn} onClick={openNew}>
+            Add income
+          </button>
+        </div>
       </header>
 
       <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 rounded-lg border border-slate-700 bg-deepsea/40 px-3 py-2.5">
@@ -316,6 +351,15 @@ export function IncomeSection() {
               </select>
             </label>
             <label className={`${labelClass} sm:col-span-2`}>
+              Match pattern (optional; text in the credit&apos;s description)
+              <input
+                type="text"
+                className={inputClass}
+                value={form.match_pattern}
+                onChange={(e) => patch('match_pattern', e.target.value)}
+              />
+            </label>
+            <label className={`${labelClass} sm:col-span-2`}>
               Notes
               <textarea
                 rows={2}
@@ -325,6 +369,11 @@ export function IncomeSection() {
               />
             </label>
           </div>
+          {patternBytes > 200 ? (
+            <p className="text-xs text-coral">
+              Match pattern is too long (at most 200 bytes).
+            </p>
+          ) : null}
           {nameBytes > 120 ? (
             <p className="text-xs text-coral">
               Name is too long (at most 120 bytes; accented characters count

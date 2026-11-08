@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -30,6 +31,9 @@ import (
 // clears Huma, fails Ent, and surfaces as a 500 carrying the raw validator text.
 const incomeNameMaxBytes = 120
 
+// incomeMatchPatternMaxBytes is the same guard for match_pattern's MaxLen(200).
+const incomeMatchPatternMaxBytes = 200
+
 // FinanceIncomeDTO is one declared recurring income: the stored columns plus the part
 // derived on read. next_expected is never stored, it is computed from (cadence,
 // anchor_date); last_received_* come from the newest linked receipt's transaction.
@@ -43,6 +47,7 @@ type FinanceIncomeDTO struct {
 	Status             string   `json:"status" enum:"active,paused,ended"`
 	EndedOn            *string  `json:"ended_on" doc:"YYYY-MM-DD the income stopped; null while it runs"`
 	Notes              string   `json:"notes"`
+	MatchPattern       string   `json:"match_pattern" doc:"Case-insensitive text the matching pass looks for, on word boundaries, in a credit's description or merchant; empty means receipts are linked by hand only"`
 	AccountID          *int     `json:"account_id" doc:"Account the income is paid into; null when unset (the edge is optional)"`
 	AccountName        string   `json:"account_name"`
 	NextExpected       *string  `json:"next_expected" doc:"YYYY-MM-DD; the next derived pay date on or after today and not after ended_on. Null when none is left (the income ended before its next pay date), never a past date"`
@@ -62,6 +67,7 @@ type IncomeReceiptDTO struct {
 	IncomeID       int     `json:"income_id"`
 	TransactionID  int     `json:"transaction_id"`
 	OccurrenceDate string  `json:"occurrence_date" doc:"YYYY-MM-DD pay date this receipt settles (not the posted date)"`
+	Method         string  `json:"method" enum:"manual,auto" doc:"manual: linked by hand. auto: found by the matching pass, or evidence on an accepted suggestion"`
 	PostedDate     string  `json:"posted_date" doc:"YYYY-MM-DD the linked credit posted; up to 7 days before occurrence_date when pay landed early"`
 	Amount         float64 `json:"amount" doc:"The linked credit's amount, rounded to the cent (read from the transaction, never stored on the receipt)"`
 	Description    string  `json:"description" doc:"The linked credit's narrative as the bank provides it"`
@@ -82,6 +88,7 @@ func toIncomeReceiptDTO(v finance.IncomeReceiptView) IncomeReceiptDTO {
 		IncomeID:       v.IncomeID,
 		TransactionID:  v.TransactionID,
 		OccurrenceDate: v.OccurrenceDate.Format(dateLayout),
+		Method:         v.Method,
 		PostedDate:     v.PostedDate.Format(dateLayout),
 		Amount:         roundCents(v.Amount),
 		Description:    v.Description,
@@ -118,6 +125,7 @@ type createIncomeInput struct {
 		Status         string  `json:"status,omitempty" enum:"active,paused,ended" doc:"Defaults to active; ended requires ended_on"`
 		EndedOn        string  `json:"ended_on,omitempty" doc:"YYYY-MM-DD the income stopped; required with status ended and refused with any other status"`
 		Notes          string  `json:"notes,omitempty"`
+		MatchPattern   string  `json:"match_pattern,omitempty" maxLength:"200" doc:"Text the matching pass looks for in a credit's description or merchant, at most 200 bytes; omit to link receipts by hand only"`
 		AccountID      *int    `json:"account_id,omitempty" doc:"Account the income is paid into; optional"`
 	}
 }
@@ -136,6 +144,7 @@ type updateIncomeInput struct {
 		Status         *string  `json:"status,omitempty" enum:"active,paused,ended" doc:"After the patch, ended requires ended_on and any other status refuses it"`
 		EndedOn        *string  `json:"ended_on,omitempty" doc:"YYYY-MM-DD, or \"\" to clear it"`
 		Notes          *string  `json:"notes,omitempty"`
+		MatchPattern   *string  `json:"match_pattern,omitempty" maxLength:"200" doc:"Text the matching pass looks for, or \"\" to stop auto-matching"`
 		AccountID      *int     `json:"account_id,omitempty" doc:"Account id, or 0 to detach the account"`
 	}
 }
@@ -201,6 +210,14 @@ func checkIncomeName(name string) error {
 	return nil
 }
 
+// checkIncomeMatchPattern is the byte pre-check behind incomeMatchPatternMaxBytes.
+func checkIncomeMatchPattern(p string) error {
+	if len(p) > incomeMatchPatternMaxBytes {
+		return huma.Error422UnprocessableEntity("match_pattern is too long: at most 200 bytes, and accented or emoji characters cost more than one byte each")
+	}
+	return nil
+}
+
 func (h *Handler) registerFinanceIncome(api huma.API) {
 	huma.Register(api, huma.Operation{
 		OperationID: "list-finance-income",
@@ -251,6 +268,9 @@ func (h *Handler) registerFinanceIncome(api huma.API) {
 		if err := checkIncomeName(in.Body.Name); err != nil {
 			return nil, err
 		}
+		if err := checkIncomeMatchPattern(in.Body.MatchPattern); err != nil {
+			return nil, err
+		}
 		anchor, err := parseBillDate("anchor_date", in.Body.AnchorDate)
 		if err != nil {
 			return nil, err
@@ -272,6 +292,7 @@ func (h *Handler) registerFinanceIncome(api huma.API) {
 			SetExpectedAmount(in.Body.ExpectedAmount).
 			SetAnchorDate(anchor).
 			SetNotes(in.Body.Notes).
+			SetMatchPattern(strings.TrimSpace(in.Body.MatchPattern)).
 			SetNillableEndedOn(endedOn)
 		// Omitted optionals fall through to the schema defaults (AUD, monthly, active).
 		if in.Body.Currency != "" {
@@ -377,6 +398,12 @@ func (h *Handler) registerFinanceIncome(api huma.API) {
 		if in.Body.Notes != nil {
 			upd.SetNotes(*in.Body.Notes)
 		}
+		if in.Body.MatchPattern != nil {
+			if err := checkIncomeMatchPattern(*in.Body.MatchPattern); err != nil {
+				return nil, err
+			}
+			upd.SetMatchPattern(strings.TrimSpace(*in.Body.MatchPattern))
+		}
 		if in.Body.AccountID != nil {
 			if *in.Body.AccountID == 0 {
 				upd.ClearAccount()
@@ -415,8 +442,13 @@ func (h *Handler) registerFinanceIncome(api huma.API) {
 		}
 		// The receipts carry a required FK to the income, so they go first, in one
 		// transaction. They are links only; the ledger rows they point at are untouched.
+		// An income accepted from a suggestion reopens that suggestion for review.
 		tx, err := h.deps.Ent.Tx(ctx)
 		if err != nil {
+			return nil, huma.Error500InternalServerError("failed to delete recurring income", err)
+		}
+		if err := finance.ReopenSuggestionForIncome(ctx, tx, in.ID); err != nil {
+			_ = tx.Rollback()
 			return nil, huma.Error500InternalServerError("failed to delete recurring income", err)
 		}
 		if _, err := tx.IncomeReceipt.Delete().
@@ -478,6 +510,49 @@ func (h *Handler) registerFinanceIncome(api huma.API) {
 
 	h.registerFinanceIncomeReceiptList(api)
 	h.registerFinanceIncomeReceiptDelete(api)
+	h.registerFinanceIncomeReconcile(api)
+}
+
+type reconcileIncomeOutput struct {
+	Body struct {
+		IncomesScanned     int `json:"incomes_scanned" doc:"Incomes with a match pattern the pass considered"`
+		CyclesChecked      int `json:"cycles_checked" doc:"Unsettled pay dates it tried to settle"`
+		CandidatesCompared int `json:"candidates_compared" doc:"Posted rows the match rule was evaluated against"`
+		ReceiptsLinked     int `json:"receipts_linked" doc:"New auto receipts"`
+		Ambiguous          int `json:"ambiguous" doc:"Credits two incomes fit equally well, left unlinked for a hand link"`
+	}
+}
+
+// registerFinanceIncomeReconcile re-runs the income matching pass over the whole stored
+// ledger, the backfill after a pattern edit; the post-ingest hook runs it bounded to the
+// window it just ingested.
+func (h *Handler) registerFinanceIncomeReconcile(api huma.API) {
+	huma.Register(api, huma.Operation{
+		OperationID: "reconcile-finance-income",
+		Method:      http.MethodPost,
+		Path:        "/api/admin/finance/income/reconcile",
+		Summary:     "Re-run the income matching pass over the stored ledger",
+		Tags:        adminTags,
+		Security:    cookieAuthSecurity,
+	}, func(ctx context.Context, _ *struct{}) (*reconcileIncomeOutput, error) {
+		if _, err := requireAdmin(ctx); err != nil {
+			return nil, err
+		}
+		if h.deps.Ent == nil {
+			return nil, huma.Error503ServiceUnavailable("finance is not available")
+		}
+		sum, err := finance.ReconcileIncome(ctx, h.deps.Ent, finance.ReconcileOptions{Today: h.financeToday()})
+		if err != nil {
+			return nil, huma.Error500InternalServerError("failed to match recurring income", err)
+		}
+		out := &reconcileIncomeOutput{}
+		out.Body.IncomesScanned = sum.IncomesScanned
+		out.Body.CyclesChecked = sum.CyclesChecked
+		out.Body.CandidatesCompared = sum.CandidatesCompared
+		out.Body.ReceiptsLinked = sum.ReceiptsLinked
+		out.Body.Ambiguous = sum.Ambiguous
+		return out, nil
+	})
 }
 
 // registerFinanceIncomeReceiptList lists one income's receipts with the credit each one
@@ -597,6 +672,7 @@ func toFinanceIncomeDTOs(incomes []finance.IncomeView) []FinanceIncomeDTO {
 			Status:             v.Status,
 			EndedOn:            dateOnlyPtr(v.EndedOn),
 			Notes:              v.Notes,
+			MatchPattern:       v.MatchPattern,
 			AccountName:        v.AccountName,
 			NextExpected:       dateOnlyPtr(v.NextExpected),
 			DaysUntil:          v.DaysUntil,

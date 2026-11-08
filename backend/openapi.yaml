@@ -1,5 +1,68 @@
 components:
   schemas:
+    AcceptFinanceSuggestionInputBody:
+      additionalProperties: false
+      properties:
+        $schema:
+          description: A URL to the JSON Schema for this object.
+          examples:
+            - https://example.com/schemas/AcceptFinanceSuggestionInputBody.json
+          format: uri
+          readOnly: true
+          type: string
+        match_pattern:
+          description: "The owner's match pattern for the new declaration, at most 200 bytes: the suggestion's match_pattern as the owner confirmed or edited it, or \"\" to link payments by hand. Required, and never defaulted from the suggestion, because a declaration's match pattern is owner-typed"
+          maxLength: 200
+          type: string
+        name:
+          description: Name for the new declaration, at most 120 bytes; defaults to the suggestion's label
+          maxLength: 120
+          type: string
+      required:
+        - match_pattern
+      type: object
+    AcceptFinanceSuggestionOutputBody:
+      additionalProperties: false
+      properties:
+        $schema:
+          description: A URL to the JSON Schema for this object.
+          examples:
+            - https://example.com/schemas/AcceptFinanceSuggestionOutputBody.json
+          format: uri
+          readOnly: true
+          type: string
+        bill_id:
+          description: The recurring bill created, for kind bill
+          format: int64
+          type:
+            - integer
+            - "null"
+        income_id:
+          description: The recurring income created, for kind income
+          format: int64
+          type:
+            - integer
+            - "null"
+        kind:
+          enum:
+            - bill
+            - income
+          type: string
+        linked:
+          description: Evidence rows linked as the declaration's payments or receipts (method auto)
+          format: int64
+          type: integer
+        skipped:
+          description: "Evidence rows left unlinked: claimed elsewhere since the scan, or outside the cycle rules"
+          format: int64
+          type: integer
+      required:
+        - kind
+        - bill_id
+        - income_id
+        - linked
+        - skipped
+      type: object
     AccessGrantDTO:
       additionalProperties: false
       properties:
@@ -754,6 +817,10 @@ components:
           exclusiveMinimum: 0
           format: double
           type: number
+        match_pattern:
+          description: Text the matching pass looks for in a credit's description or merchant, at most 200 bytes; omit to link receipts by hand only
+          maxLength: 200
+          type: string
         name:
           description: Label and human identity key, at most 120 bytes; must be unique
           maxLength: 120
@@ -1415,6 +1482,9 @@ components:
           type:
             - string
             - "null"
+        match_pattern:
+          description: Case-insensitive text the matching pass looks for, on word boundaries, in a credit's description or merchant; empty means receipts are linked by hand only
+          type: string
         name:
           type: string
         next_expected:
@@ -1442,6 +1512,7 @@ components:
         - status
         - ended_on
         - notes
+        - match_pattern
         - account_id
         - account_name
         - next_expected
@@ -1481,6 +1552,145 @@ components:
         - amount
         - description
         - merchant
+      type: object
+    FinanceSuggestionDTO:
+      additionalProperties: false
+      properties:
+        $schema:
+          description: A URL to the JSON Schema for this object.
+          examples:
+            - https://example.com/schemas/FinanceSuggestionDTO.json
+          format: uri
+          readOnly: true
+          type: string
+        account_id:
+          description: The account every evidence row posted to
+          format: int64
+          type:
+            - integer
+            - "null"
+        account_name:
+          type: string
+        anchor_date:
+          description: YYYY-MM-DD; the grid that best fits the evidence, on its oldest cycle
+          type: string
+        bill_id:
+          description: The recurring bill accepting created; null otherwise. Deleting that bill reopens the suggestion as pending
+          format: int64
+          type:
+            - integer
+            - "null"
+        cadence:
+          enum:
+            - weekly
+            - fortnightly
+            - monthly
+            - quarterly
+            - annual
+          type: string
+        created_at:
+          type: string
+        decided_at:
+          description: When the owner accepted or dismissed it; null while pending
+          type:
+            - string
+            - "null"
+        evidence:
+          description: "The run's transactions, newest first: the newest 5 in the list, all of them from GET /api/admin/finance/suggestions/{id}"
+          items:
+            $ref: "#/components/schemas/FinanceSuggestionEvidenceDTO"
+          type:
+            - array
+            - "null"
+        evidence_count:
+          description: How many transactions the run rests on, whether or not evidence lists them all
+          format: int64
+          type: integer
+        evidence_since:
+          description: YYYY-MM-DD the run's oldest transaction posted
+          type: string
+        expected_amount:
+          description: Median magnitude of the evidence, rounded to the cent
+          format: double
+          type: number
+        gaps:
+          description: Cycles the run skipped between its oldest and newest evidence row; 0 for an unbroken run
+          format: int64
+          type: integer
+        id:
+          format: int64
+          type: integer
+        income_id:
+          description: The recurring income accepting created; null otherwise. Deleting that income reopens the suggestion as pending
+          format: int64
+          type:
+            - integer
+            - "null"
+        kind:
+          description: "What accepting creates: a recurring bill (a run of debits) or a recurring income (a run of credits)"
+          enum:
+            - bill
+            - income
+          type: string
+        label:
+          description: Suggested name; accepting can replace it
+          type: string
+        match_pattern:
+          description: Suggested match pattern, shown to the owner to confirm, edit or clear when accepting (it is never copied unseen); empty when the run shares no distinctive text
+          type: string
+        next_expected:
+          description: YYYY-MM-DD; the grid's next date on or after today
+          type: string
+        status:
+          enum:
+            - pending
+            - accepted
+            - dismissed
+          type: string
+        updated_at:
+          type: string
+      required:
+        - id
+        - kind
+        - label
+        - match_pattern
+        - cadence
+        - expected_amount
+        - anchor_date
+        - next_expected
+        - gaps
+        - status
+        - decided_at
+        - account_id
+        - account_name
+        - bill_id
+        - income_id
+        - evidence
+        - evidence_count
+        - evidence_since
+        - created_at
+        - updated_at
+      type: object
+    FinanceSuggestionEvidenceDTO:
+      additionalProperties: false
+      properties:
+        amount:
+          description: Signed, as on the transaction (money out negative), rounded to the cent
+          format: double
+          type: number
+        description:
+          type: string
+        posted_date:
+          description: YYYY-MM-DD
+          type: string
+        transaction_id:
+          format: int64
+          type: integer
+      required:
+        - transaction_id
+        - posted_date
+        - amount
+        - description
       type: object
     FinanceSummaryDTO:
       additionalProperties: false
@@ -1685,6 +1895,12 @@ components:
         income_id:
           format: int64
           type: integer
+        method:
+          description: "manual: linked by hand. auto: found by the matching pass, or evidence on an accepted suggestion"
+          enum:
+            - manual
+            - auto
+          type: string
         occurrence_date:
           description: YYYY-MM-DD pay date this receipt settles (not the posted date)
           type: string
@@ -1699,6 +1915,7 @@ components:
         - income_id
         - transaction_id
         - occurrence_date
+        - method
         - posted_date
         - amount
         - description
@@ -2086,6 +2303,29 @@ components:
             - "null"
       required:
         - pending
+      type: object
+    ListFinanceSuggestionsOutputBody:
+      additionalProperties: false
+      properties:
+        $schema:
+          description: A URL to the JSON Schema for this object.
+          examples:
+            - https://example.com/schemas/ListFinanceSuggestionsOutputBody.json
+          format: uri
+          readOnly: true
+          type: string
+        count:
+          format: int64
+          type: integer
+        suggestions:
+          items:
+            $ref: "#/components/schemas/FinanceSuggestionDTO"
+          type:
+            - array
+            - "null"
+      required:
+        - suggestions
+        - count
       type: object
     ListFinanceTxnOutputBody:
       additionalProperties: false
@@ -2751,6 +2991,43 @@ components:
         - candidates_compared
         - payments_linked
       type: object
+    ReconcileIncomeOutputBody:
+      additionalProperties: false
+      properties:
+        $schema:
+          description: A URL to the JSON Schema for this object.
+          examples:
+            - https://example.com/schemas/ReconcileIncomeOutputBody.json
+          format: uri
+          readOnly: true
+          type: string
+        ambiguous:
+          description: Credits two incomes fit equally well, left unlinked for a hand link
+          format: int64
+          type: integer
+        candidates_compared:
+          description: Posted rows the match rule was evaluated against
+          format: int64
+          type: integer
+        cycles_checked:
+          description: Unsettled pay dates it tried to settle
+          format: int64
+          type: integer
+        incomes_scanned:
+          description: Incomes with a match pattern the pass considered
+          format: int64
+          type: integer
+        receipts_linked:
+          description: New auto receipts
+          format: int64
+          type: integer
+      required:
+        - incomes_scanned
+        - cycles_checked
+        - candidates_compared
+        - receipts_linked
+        - ambiguous
+      type: object
     ReorderPlaylistsInputBody:
       additionalProperties: false
       properties:
@@ -2790,6 +3067,58 @@ components:
             - "null"
       required:
         - items
+      type: object
+    ScanFinanceSuggestionsOutputBody:
+      additionalProperties: false
+      properties:
+        $schema:
+          description: A URL to the JSON Schema for this object.
+          examples:
+            - https://example.com/schemas/ScanFinanceSuggestionsOutputBody.json
+          format: uri
+          readOnly: true
+          type: string
+        created:
+          description: New pending suggestions
+          format: int64
+          type: integer
+        declared:
+          description: Runs left alone because a live declaration already covers them (an ended one covers only up to its ended_on plus a week)
+          format: int64
+          type: integer
+        dismissed:
+          description: Runs left alone because the owner dismissed them before
+          format: int64
+          type: integer
+        dropped:
+          description: Pending suggestions removed because their run is gone or now declared
+          format: int64
+          type: integer
+        refreshed:
+          description: Pending suggestions updated with the current amount, grid and evidence
+          format: int64
+          type: integer
+        reopened:
+          description: Accepted suggestions put back to pending because their declaration ended and the run carried on
+          format: int64
+          type: integer
+        rows_scanned:
+          description: Posted rows inside the lookback window
+          format: int64
+          type: integer
+        runs_found:
+          description: Runs the detection rule found
+          format: int64
+          type: integer
+      required:
+        - rows_scanned
+        - runs_found
+        - created
+        - refreshed
+        - declared
+        - dismissed
+        - reopened
+        - dropped
       type: object
     StartJobRunOutputBody:
       additionalProperties: false
@@ -3122,6 +3451,10 @@ components:
           exclusiveMinimum: 0
           format: double
           type: number
+        match_pattern:
+          description: Text the matching pass looks for, or "" to stop auto-matching
+          maxLength: 200
+          type: string
         name:
           maxLength: 120
           minLength: 1
@@ -3703,6 +4036,27 @@ paths:
       summary: Declare a recurring income
       tags:
         - admin
+  /api/admin/finance/income/reconcile:
+    post:
+      operationId: reconcile-finance-income
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReconcileIncomeOutputBody"
+          description: OK
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ErrorModel"
+          description: Error
+      security:
+        - cookieAuth: []
+      summary: Re-run the income matching pass over the stored ledger
+      tags:
+        - admin
   /api/admin/finance/income/{id}:
     delete:
       operationId: delete-finance-income
@@ -3861,6 +4215,158 @@ paths:
       security:
         - cookieAuth: []
       summary: Remove one hand-linked receipt from an income (the transaction stays)
+      tags:
+        - admin
+  /api/admin/finance/suggestions:
+    get:
+      operationId: list-finance-suggestions
+      parameters:
+        - description: Which suggestions to include
+          explode: false
+          in: query
+          name: status
+          schema:
+            default: pending
+            description: Which suggestions to include
+            enum:
+              - pending
+              - accepted
+              - dismissed
+              - all
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListFinanceSuggestionsOutputBody"
+          description: OK
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ErrorModel"
+          description: Error
+      security:
+        - cookieAuth: []
+      summary: List recurrence suggestions with their newest evidence
+      tags:
+        - admin
+  /api/admin/finance/suggestions/scan:
+    post:
+      operationId: scan-finance-suggestions
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScanFinanceSuggestionsOutputBody"
+          description: OK
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ErrorModel"
+          description: Error
+      security:
+        - cookieAuth: []
+      summary: Scan the posted ledger for recurring runs and refresh the suggestions
+      tags:
+        - admin
+  /api/admin/finance/suggestions/{id}:
+    get:
+      operationId: get-finance-suggestion
+      parameters:
+        - description: Recurrence suggestion ID
+          in: path
+          name: id
+          required: true
+          schema:
+            description: Recurrence suggestion ID
+            format: int64
+            type: integer
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FinanceSuggestionDTO"
+          description: OK
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ErrorModel"
+          description: Error
+      security:
+        - cookieAuth: []
+      summary: Get one recurrence suggestion with all of its evidence
+      tags:
+        - admin
+  /api/admin/finance/suggestions/{id}/accept:
+    post:
+      operationId: accept-finance-suggestion
+      parameters:
+        - description: Recurrence suggestion ID
+          in: path
+          name: id
+          required: true
+          schema:
+            description: Recurrence suggestion ID
+            format: int64
+            type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AcceptFinanceSuggestionInputBody"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AcceptFinanceSuggestionOutputBody"
+          description: OK
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ErrorModel"
+          description: Error
+      security:
+        - cookieAuth: []
+      summary: "Accept a suggestion: create the recurring bill or income and link its evidence"
+      tags:
+        - admin
+  /api/admin/finance/suggestions/{id}/dismiss:
+    post:
+      operationId: dismiss-finance-suggestion
+      parameters:
+        - description: Recurrence suggestion ID
+          in: path
+          name: id
+          required: true
+          schema:
+            description: Recurrence suggestion ID
+            format: int64
+            type: integer
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FinanceSuggestionDTO"
+          description: OK
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ErrorModel"
+          description: Error
+      security:
+        - cookieAuth: []
+      summary: Dismiss a suggestion; the same run is not suggested again
       tags:
         - admin
   /api/admin/job-kinds:

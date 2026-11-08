@@ -77,6 +77,11 @@ export function IncomeReceiptList({
             <div className="flex min-w-0 flex-col">
               <span className="text-slate-200">
                 Pay date {formatDate(r.occurrence_date)}
+                {r.method === 'auto' ? (
+                  <span className="ml-1.5 rounded-sm bg-white/5 px-1 py-0.5 text-[10px] uppercase tracking-wide text-slate-400">
+                    auto
+                  </span>
+                ) : null}
               </span>
               <span className="truncate text-slate-400">
                 Posted {formatDate(r.posted_date)} ·{' '}

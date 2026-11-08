@@ -338,9 +338,14 @@ func (h *Handler) registerAdminFinanceBills(api huma.API) {
 		}
 		// The link rows carry a required FK to the bill, so they go first or the delete
 		// trips the constraint. They are derived data (the ledger rows they point at are
-		// untouched), so dropping them with the declaration is safe.
+		// untouched), so dropping them with the declaration is safe. A bill accepted from a
+		// recurrence suggestion reopens that suggestion for review.
 		tx, err := h.deps.Ent.Tx(ctx)
 		if err != nil {
+			return nil, huma.Error500InternalServerError("failed to delete recurring bill", err)
+		}
+		if err := finance.ReopenSuggestionForBill(ctx, tx, in.ID); err != nil {
+			_ = tx.Rollback()
 			return nil, huma.Error500InternalServerError("failed to delete recurring bill", err)
 		}
 		if _, err := tx.BillPayment.Delete().

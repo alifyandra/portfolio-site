@@ -103,4 +103,5 @@ func (h *Handler) Register(api huma.API) {
 	// Recurring income registers its read and writes together: the same admin gate and
 	// the same /api/finance (read) and /api/admin/finance (write) split as the bills.
 	h.registerFinanceIncome(api)
+	h.registerFinanceSuggestions(api)
 }

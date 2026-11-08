@@ -15,9 +15,8 @@ import (
 // apart. "Is this credit regular?" is answered by this link, never by a flag on the
 // transaction (ADR 0019).
 //
-// There is no method column yet because every receipt is made by hand. When an
-// automatic pass arrives it adds method with a "manual" default, which is what every
-// existing row already is.
+// method records who made the link. It defaults to manual, which is what every row made
+// before the matcher existed already was.
 type IncomeReceipt struct {
 	ent.Schema
 }
@@ -27,6 +26,10 @@ func (IncomeReceipt) Fields() []ent.Field {
 	return []ent.Field{
 		field.Time("occurrence_date").
 			Comment("The derived pay date (UTC midnight) this receipt settles, NOT the posted date: it is the cycle identity, so one cycle is received once"),
+		field.Enum("method").
+			Values("manual", "auto").
+			Default("manual").
+			Comment("manual: the owner linked it by hand. auto: the matching pass found it, or it was evidence on an accepted Recurrence Suggestion. The pass never touches a settled cycle of either kind"),
 		field.Time("created_at").
 			Default(time.Now).
 			Immutable(),
