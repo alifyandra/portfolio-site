@@ -56,6 +56,40 @@ function FinanceLink() {
   );
 }
 
+// Admin-only entry for the Lab console, in the same citron family: it is an
+// admin surface like the other two. Three things make it unlike them.
+//
+// The URL is configuration, not source. The Lab is the other repository's and
+// names itself under its own subtree; this one owns the rest of the zone and
+// writes nothing under `lab.`. A hostname hardcoded here would put that repo's
+// naming in this one's build, so it arrives as NEXT_PUBLIC_LAB_CONSOLE_URL and
+// the entry is simply absent where the variable is not set.
+//
+// It leaves the site, so it is a plain anchor with the repo's usual rel, not a
+// next/link route.
+//
+// It resolves publicly but answers only on the owner's tailnet, so off the
+// tailnet it hangs rather than refusing. The title says so: the one reading
+// this is the only person who ever sees it, and the alternative to telling
+// them is them debugging their own network.
+function LabLink() {
+  const { isAdmin } = useAuth();
+  const url = process.env.NEXT_PUBLIC_LAB_CONSOLE_URL;
+  if (!isAdmin || !url) return null;
+  return (
+    <a
+      href={url}
+      target="_blank"
+      rel="noopener noreferrer"
+      title="Lab console — reachable on the tailnet only"
+      className="flex items-center gap-1.5 rounded-md px-2 py-1 text-sm font-medium text-citron no-underline transition hover:brightness-110"
+    >
+      <span aria-hidden className="h-2 w-2 rounded-full bg-citron" />
+      <span className="hidden sm:inline">Lab</span>
+    </a>
+  );
+}
+
 function AccountControl() {
   const { user, role, displayName, isLoading, isAuthenticated, signIn } =
     useAuth();
@@ -143,6 +177,7 @@ export function Navbar() {
         <div className="flex items-center gap-2 sm:gap-3">
           <AdminLink />
           <FinanceLink />
+          <LabLink />
           <AppMenu />
           <ThemeToggle />
           <AccountControl />
