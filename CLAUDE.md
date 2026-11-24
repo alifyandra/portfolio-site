@@ -49,10 +49,11 @@ make fe-dev    # Next.js at :3000 (separate terminal)
 - **Codegen pipeline:** Go handlers → `make generate-spec` → `backend/openapi.yaml`
   → `make codegen` → frontend hooks. **After changing any handler, run `make generate`
   and commit `openapi.yaml`** — CI fails if the committed spec is stale.
-- **Go 1.26.10 required** (security floor for crypto/x509; Huma v2 alone needs
-  1.25). Bump `go.mod`, `backend/Dockerfile`, CI `setup-go`, the `Makefile` image and
-  the pinned govulncheck together. Generated Ent code and frontend hooks are
-  **gitignored** — regenerated on build/CI. Schema + `openapi.yaml` are committed.
+- **Go 1.26.11 required** (security floor for net/http GO-2026-6859 and
+  crypto/x509; Huma v2 alone needs 1.25). Bump `go.mod`, `backend/Dockerfile`,
+  CI `setup-go`, the `Makefile` image and the pinned govulncheck together.
+  Generated Ent code and frontend hooks are **gitignored** — regenerated on
+  build/CI. Schema + `openapi.yaml` are committed.
 - **Ent generation must run BEFORE `go mod tidy`** (else the not-yet-generated
   `ent/*` packages look like missing remote modules). The Dockerfile/CI do this order.
 - DB is opened via pgx stdlib + `entsql.OpenDB(dialect.Postgres, db)` — **not**

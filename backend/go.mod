@@ -1,6 +1,6 @@
 module github.com/alifyandra/portfolio-site/backend
 
-go 1.26.10
+go 1.26.11
 
 // Dependencies are resolved by `go mod tidy` (run via `make setup` or the
 // Docker build) from the imports in the source. Key libraries:
